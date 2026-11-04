@@ -30,6 +30,10 @@ npm test                                                # node --test
 
 Laptop speed varies about +-15% from run to run; details and method in `docs/BENCHMARKS.md`.
 
+## Next: the app
+
+Plan for a ChatGPT/Claude-style local chat app (pure Node + HTML, zero dependencies, on this engine) with the functionality of Skibeti37: `docs/APP-PLAN.md`.
+
 ## Rules
 
 Node built-ins only. No npm dependencies, no native addons, no external binaries. Works on Node >= 22.
