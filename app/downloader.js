@@ -18,7 +18,7 @@ export function freeDiskBytes(dir) {
  * @param {{paths: {modelsDir: string}, log: {info: Function, error: Function}, emit: (type: string, data: any) => void,
  *          catalog?: typeof CATALOG, retryDelayMs?: number}} o
  */
-export function createDownloader({ paths, log, emit, catalog = CATALOG, retryDelayMs = 2000 }) {
+export function createDownloader({ paths, log, emit, catalog = CATALOG, retryDelayMs = 2000, onDone = null }) {
   const entries = new Map(catalog.map((e) => [e.id, e]));
   let queue = []; let current = null; let running = false; let abort = null;
   const failed = new Map(); // id -> message
@@ -112,7 +112,7 @@ export function createDownloader({ paths, log, emit, catalog = CATALOG, retryDel
       while (queue.length && !abort.signal.aborted) {
         const e = queue.shift();
         const result = await runOne(e);
-        if (result === 'done') done.add(e.id);
+        if (result === 'done') { done.add(e.id); try { onDone?.(e); } catch (err) { log.error(`onDone failed: ${err.message}`); } }
         current = null; pushStatus();
         if (result === 'cancelled') break;
       }

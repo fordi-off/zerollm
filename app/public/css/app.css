@@ -206,3 +206,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 
 .math-block { margin: .8em 0; overflow-x: auto; overflow-y: hidden; }
 .katex { font-size: 1.05em; }
+
+.lock-banner { margin: 0 6px 8px; padding: 10px 14px; border: 1px solid var(--accent); border-radius: 12px; background: var(--card); font-size: 13px; }
+.lock-banner .progress-bar { margin-top: 6px; max-width: none; }
+.app.locked .composer, .app.locked #model-btn, .app.locked .starters { opacity: .45; pointer-events: none; }

@@ -26,13 +26,15 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
   const chatStore = createChatStore(paths);
   const docs = createDocuments(paths, chatStore);
   const embeddings = createEmbeddings({ paths, getConfig, log });
-  let indexing = null; // {abort} while document chunks are being embedded
+  let indexing = null; // {abort, docId, filename, done, total} while document chunks are being embedded
+  const pendingIndex = new Set(); // documents added while a reply was being written: indexed right after it
   const skills = createSkills(paths);
   const summarizer = createSummarizer({ paths, host, getConfig, log });
   skills.seed();
   /** Instruction text for the slash commands on the last user message (they apply to that one reply). */
   const extraFor = (history) => skills.bodies([...history].reverse().find((m) => m.role === 'user')?.commands) ?? '';
-  const downloader = createDownloader({ paths, log, emit, catalog, retryDelayMs });
+  let afterDownload = () => {};
+  const downloader = createDownloader({ paths, log, emit, catalog, retryDelayMs, onDone: (e) => afterDownload(e) });
   const tokenizers = new Map(); // filename -> PromptTools (weights not loaded)
 
   const toolsFor = (filename) => {
@@ -66,25 +68,35 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
     } catch { return []; }
   }
 
-  /** Embed the chunks of documents that have no vectors yet, in the background; progress goes out as `docindex` events. */
+  /** While documents are being indexed, chat generation, summaries and model changes are refused: the search model needs every core. */
+  const assertNotIndexing = () => { if (indexing) throw new Error('indexing'); };
+
+  /** Embed the chunks of documents that have no vectors yet, in the background; progress goes out as `docindex` events.
+   *  The lock (`indexing`) is set synchronously, so nothing can start between "document added" and "indexing running". */
   function startIndexing(docIds) {
-    if (indexing || !embeddings.available() || docIds.length === 0) return false;
-    const abort = { aborted: false }; indexing = { abort };
+    if (indexing || current || !embeddings.available() || docIds.length === 0) return false;
+    const abort = { aborted: false }; indexing = { abort, docId: docIds[0], filename: docs.preview(docIds[0])?.filename ?? '', done: 0, total: 0 };
+    emit('docindex', { docId: indexing.docId, filename: indexing.filename, done: 0, total: 0, state: 'running' });
     (async () => {
       try {
         for (const docId of docIds) {
           if (abort.aborted) break;
           const texts = docs.chunkTexts(docId); if (!texts?.length) continue;
           const t0 = performance.now();
-          emit('docindex', { docId, done: 0, total: texts.length, state: 'running' });
-          const vecs = await embeddings.embedTexts(texts, { signal: abort, onProgress: (done, total) => emit('docindex', { docId, done, total, state: 'running' }) });
+          Object.assign(indexing, { docId, filename: docs.preview(docId)?.filename ?? '', done: 0, total: texts.length });
+          emit('docindex', { docId, filename: indexing.filename, done: 0, total: texts.length, state: 'running' });
+          const vecs = await embeddings.embedTexts(texts, { signal: abort, threads: Math.min(getConfig().n_threads ?? 4, 8), onProgress: (done, total) => { indexing.done = done; emit('docindex', { docId, filename: indexing.filename, done, total, state: 'running' }); } });
           if (vecs && docs.setEmbeddings(docId, vecs)) log.info(`document indexed for search: ${texts.length} chunks in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
         }
       } catch (e) { log.error(`indexing failed: ${e.stack ?? e}`); emit('docindex', { state: 'error', message: String(e.message ?? e) }); }
-      finally { indexing = null; emit('docindex', { state: 'idle' }); }
+      finally {
+        indexing = null; emit('docindex', { state: 'idle' });
+        if (pendingIndex.size && !current) { const ids = [...pendingIndex]; pendingIndex.clear(); startIndexing(ids); } // documents added meanwhile
+      }
     })();
     return true;
   }
+  afterDownload = (entry) => { if (entry.kind === 'embed') startIndexing(docs.needingEmbeddings()); };
 
   /** System-prompt additions after the base prompt: command instructions, then the rolling summary (the language reminder stays last). */
   const extraText = (history, summary) => [extraFor(history), summary ? SUMMARY_PREFIX + summary : ''].filter(Boolean).join('\n\n');
@@ -172,6 +184,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
       send('error', { message, code: e.code ?? null });
     } finally {
       if (current?.id === id) current = null;
+      if (pendingIndex.size && !current) { const ids = [...pendingIndex]; pendingIndex.clear(); startIndexing(ids); }
     }
   }
 
@@ -186,7 +199,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
         language: cfg.language, models, lastModel: cfg.last_model, loaded: host.loadedName,
         settings: { docChunks: cfg.doc_chunks ?? 4, utilityModel: cfg.utility_model, contextWindow: cfg.context_window, threads: cfg.n_threads, contextSteps: CONTEXT_STEPS, maxThreads: os.availableParallelism?.() ?? os.cpus().length, defaultThreads: defaultThreads() },
         system: { freeRam: os.freemem(), totalRam: os.totalmem() },
-        busy: current !== null, embedding: embeddings.modelFile(),
+        busy: current !== null, indexing: indexing ? { docId: indexing.docId, filename: indexing.filename, done: indexing.done, total: indexing.total } : null, embedding: embeddings.modelFile(),
       };
     },
 
@@ -212,6 +225,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
     async download_status() { return downloader.status(); },
 
     async delete_model({ filename }) {
+      assertNotIndexing();
       const full = modelPath(paths, filename);
       if (host.loadedName === filename) await host.unload();
       await embeddings.closeResident();
@@ -258,8 +272,9 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
     async add_document({ chatId, filename, content }) {
       const r = docs.add(chatId, filename, content);
       log.info(`document added: ${filename} (${r.chunks} chunks)`);
-      startIndexing([r.id]);
-      return { ...r, indexing: embeddings.available(), documents: docs.forChat(chatId) };
+      const started = startIndexing([r.id]);
+      if (!started && embeddings.available()) pendingIndex.add(r.id); // while a reply is written or another document is indexed
+      return { ...r, indexing: started, deferred: !started && embeddings.available(), documents: docs.forChat(chatId) };
     },
     async attach_document({ chatId, docId }) { docs.attach(chatId, docId); return docs.forChat(chatId); },
     async detach_document({ chatId, docId }) { docs.detach(chatId, docId); return docs.forChat(chatId); },
@@ -275,6 +290,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
     },
     /** Long job (minutes): summary of a whole document, with the small model when there is one. */
     async summarize_document({ docId, model }) {
+      assertNotIndexing();
       if (current) throw new Error('busy');
       const parts = docs.textParts(docId);
       if (!parts) throw new Error('document not found');
@@ -295,6 +311,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
 
     async send_message({ model, messages, chatId }) {
       modelPath(paths, model);
+      assertNotIndexing();
       if (current) throw new Error('busy');
       const started = new Promise((resolve) => setImmediate(resolve));
       run(model, messages, { continuation: false, chatId: chatId ?? null });
@@ -304,6 +321,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
 
     async continue_message({ model, messages, chatId }) {
       modelPath(paths, model);
+      assertNotIndexing();
       if (current) throw new Error('busy');
       const started = new Promise((resolve) => setImmediate(resolve));
       run(model, messages, { continuation: true, chatId: chatId ?? null });
@@ -323,6 +341,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
     },
 
     async set_context_window({ value }) {
+      assertNotIndexing();
       const v = Number(value);
       if (!Number.isInteger(v) || v < 512 || v > 131072) throw new Error('invalid context size');
       const cfg = getConfig(); cfg.context_window = v; setConfig(cfg);
@@ -338,6 +357,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
     },
 
     async set_thread_count({ value }) {
+      assertNotIndexing();
       const v = Number(value);
       if (!Number.isInteger(v) || v < 1 || v > 64) throw new Error('invalid thread count');
       const cfg = getConfig(); cfg.n_threads = v; setConfig(cfg);
@@ -347,6 +367,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
 
     async update_model_settings({ filename, display_name, active, kv }) {
       modelPath(paths, filename);
+      if (kv !== undefined) assertNotIndexing();
       const cfg = getConfig();
       const m = { ...(cfg.models[filename] ?? {}) };
       if (kv !== undefined) {
@@ -360,9 +381,10 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
       return { ok: true };
     },
 
-    async unload_model() { await host.unload(); return { ok: true }; },
+    async unload_model() { assertNotIndexing(); await host.unload(); return { ok: true }; },
 
     async reset_settings() {
+      assertNotIndexing();
       await host.unload();
       const keep = getConfig();
       setConfig({ ...defaultConfig(), last_model: keep.last_model });

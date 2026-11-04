@@ -5,6 +5,7 @@ import path from 'node:path';
 import http from 'node:http';
 import { createRequire } from 'node:module';
 import { makeTinyModel } from '../tools/make-tiny-gguf.js';
+import { makeTinyEmbedModel } from '../tools/make-tiny-embed-gguf.js';
 import { startTestApp } from '../test/app/helpers.js';
 
 const require = createRequire(import.meta.url);
@@ -167,6 +168,23 @@ try {
     await c2.close();
   }
   await dlApp.close(); fileServer.close();
+
+  // ---- indexing lock: adding a document with a search model installed locks chat + model picker until it is indexed
+  const lockApp = await startTestApp({ ctx: 4096, models: [{ name: 'tiny-llama.gguf', arch: 'llama' }, { name: 'tiny-embed.gguf', raw: makeTinyEmbedModel({ quant: 'q8_0' }).buffer }] });
+  {
+    const c3 = await browser.newContext({ viewport: { width: 1200, height: 800 } }); const pg = await c3.newPage();
+    pg.on('pageerror', (e) => errors.push(`lock: ${e.message}`)); pg.on('console', (m) => { if (m.type() === 'error') errors.push(`lock: ${m.text()}`); });
+    await pg.goto(lockApp.app.url); await pg.waitForSelector('#model-name');
+    await pg.setInputFiles('#file-input', { name: 'stor.txt', mimeType: 'text/plain', buffer: Buffer.from('hello world og kommune barnehage skole. '.repeat(3000)) });
+    await pg.waitForSelector('#lock-banner:not([hidden])', { timeout: 10000 }).catch(() => errors.push('CHECK FAILED: lock banner did not appear'));
+    check(await pg.locator('#input').isDisabled(), 'composer is disabled while indexing');
+    check(await pg.locator('#model-btn').isDisabled(), 'model picker is disabled while indexing');
+    await pg.screenshot({ path: path.join(out, 'lock-1-indexing.png') });
+    await pg.waitForSelector('#lock-banner', { state: 'hidden', timeout: 60000 }).catch(() => errors.push('CHECK FAILED: lock never released'));
+    check(!(await pg.locator('#input').isDisabled()), 'composer usable again after indexing');
+    await c3.close();
+  }
+  await lockApp.close();
 } finally { await browser.close(); await t.close(); }
 console.log(errors.length ? `console errors:\n${errors.join('\n')}` : 'no console errors');
 console.log(`screenshots in ${out}`);

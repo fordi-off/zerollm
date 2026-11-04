@@ -21,6 +21,7 @@ export function initDocuments(h) {
 }
 
 export async function addFiles(files) {
+  if (hooks.isLocked?.()) { hooks.toast(t('indexingBlocked')); return; }
   for (const f of files) {
     if (!TEXT_EXT.test(f.name) && !(f.type || '').startsWith('text/')) { hooks.toast(`${t('unsupportedFile')}${f.name}`); continue; }
     if (f.size > MAX_BYTES) { hooks.toast(`${f.name}: >20 MB`); continue; }

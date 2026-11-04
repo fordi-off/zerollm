@@ -138,5 +138,8 @@
   "indexNow": "Index documents",
   "indexed": "search index {done}/{total}",
   "indexing": "Building search index… {done}/{total}",
-  "noIndex": "keywords only"
+  "noIndex": "keywords only",
+  "indexingLock": "Building the search index for \"{name}\"… {done}/{total}. Chat and models are locked until it is done.",
+  "indexingBlocked": "Wait until the document has been indexed.",
+  "indexingError": "Indexing failed"
 }
