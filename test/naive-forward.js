@@ -2,7 +2,7 @@
 // Whole-sequence recomputation (no KV cache), double precision, plain arrays. Used only as a test oracle.
 import { readTensor } from '../src/gguf/reader.js';
 import { GGML_TYPE } from '../src/gguf/types.js';
-import { dequantizeQ8_0, dequantizeQ4_0 } from '../src/compute/quant.js';
+import { dequantizeQ8_0, dequantizeQ4_0, dequantizeQ5_0, dequantizeQ4_K, dequantizeQ5_K, dequantizeQ6_K } from '../src/compute/quant.js';
 import { modelConfig } from '../src/model/config.js';
 
 function floats(g, name) {
@@ -11,6 +11,10 @@ function floats(g, name) {
   if (t.type === GGML_TYPE.F32) return Array.from(new Float32Array(raw.buffer));
   if (t.type === GGML_TYPE.Q8_0) return Array.from(dequantizeQ8_0(raw, t.nElements));
   if (t.type === GGML_TYPE.Q4_0) return Array.from(dequantizeQ4_0(raw, t.nElements));
+  if (t.type === GGML_TYPE.Q5_0) return Array.from(dequantizeQ5_0(raw, t.nElements));
+  if (t.type === GGML_TYPE.Q4_K) return Array.from(dequantizeQ4_K(raw, t.nElements));
+  if (t.type === GGML_TYPE.Q5_K) return Array.from(dequantizeQ5_K(raw, t.nElements));
+  if (t.type === GGML_TYPE.Q6_K) return Array.from(dequantizeQ6_K(raw, t.nElements));
   throw new Error('naive: unsupported type');
 }
 /** matrix as array of rows */

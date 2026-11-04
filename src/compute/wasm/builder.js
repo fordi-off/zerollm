@@ -48,9 +48,10 @@ export const OPS = Object.freeze({
 
 /** SIMD opcodes, all prefixed by 0xFD with the sub-opcode LEB128-encoded. */
 export const SIMD = Object.freeze({
-  'v128.load': 0x00, 'v128.store': 0x0b, 'v128.const': 0x0c,
+  'v128.load': 0x00, 'v128.store': 0x0b, 'v128.const': 0x0c, 'i8x16.swizzle': 0x0e,
   'i8x16.splat': 0x0f, 'i16x8.splat': 0x10, 'i32x4.splat': 0x11, 'f32x4.splat': 0x13,
   'i32x4.extract_lane': 0x1b, 'f32x4.extract_lane': 0x1f,
+  'i8x16.eq': 0x23, 'i8x16.ne': 0x24,
   'v128.not': 0x4d, 'v128.and': 0x4e, 'v128.andnot': 0x4f, 'v128.or': 0x50, 'v128.xor': 0x51,
   'i8x16.neg': 0x61, 'i8x16.shl': 0x6b, 'i8x16.shr_s': 0x6c, 'i8x16.shr_u': 0x6d, 'i8x16.add': 0x6e, 'i8x16.sub': 0x71,
   'i16x8.extadd_pairwise_i8x16_s': 0x7c, 'i32x4.extadd_pairwise_i16x8_s': 0x7e,

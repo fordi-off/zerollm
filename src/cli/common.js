@@ -1,7 +1,7 @@
 // Shared CLI plumbing for run / chat / bench: engine loading, sampler flags, streaming output.
 import os from 'node:os';
 import { readGGUF } from '../gguf/reader.js';
-import { modelConfig, estimateRam } from '../model/config.js';
+import { modelConfig, estimateRam, assertSupportedTensorTypes } from '../model/config.js';
 import { RefModel } from '../model/forward.js';
 import { PoolModel } from '../compute/pool.js';
 import path from 'node:path';
@@ -81,6 +81,7 @@ export async function loadEngine(modelPath, flags) {
   const t0 = performance.now();
   const g = readGGUF(modelPath);
   const cfg = modelConfig(g);
+  assertSupportedTensorTypes(g);
   const ctx = num(flags.ctx, 2048);
   const threads = threadsFromFlags(flags);
   const est = estimateRam(g, cfg, { ctx });

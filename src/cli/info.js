@@ -1,7 +1,7 @@
 import os from 'node:os';
 import { readGGUF } from '../gguf/reader.js';
 import { typeName } from '../gguf/types.js';
-import { modelConfig, estimateRam, UnsupportedArchError } from '../model/config.js';
+import { modelConfig, estimateRam, UnsupportedArchError, SUPPORTED_TENSOR_TYPES } from '../model/config.js';
 import { parseArgs, num } from '../util/args.js';
 import { formatBytes, formatCount, printTable, section } from '../util/log.js';
 
@@ -38,8 +38,8 @@ export async function run(argv) {
   try {
     cfg = modelConfig(g);
   } catch (e) {
-    if (!(e instanceof UnsupportedArchError)) throw e;
-    process.stdout.write(`\nnote: ${e.message}\n`);
+    // still print everything else we can (quantization table, tokenizer, ...) for unsupported or incomplete files
+    process.stdout.write(`\nnote: ${e instanceof UnsupportedArchError ? e.message : `could not read the hyperparameters (${e.message})`}\n`);
   }
 
   if (cfg) {
@@ -73,7 +73,7 @@ export async function run(argv) {
   }
   for (const [type, h] of [...hist].sort((a, b) => b[1].bytes - a[1].bytes)) {
     const bpw = h.elems ? ((h.bytes * 8) / h.elems).toFixed(2) : '-';
-    process.stdout.write(`${typeName(type).padEnd(8)} ${String(h.count).padStart(5)} tensors  ${formatBytes(h.bytes).padStart(10)}  ${((100 * h.bytes) / totalBytes).toFixed(1).padStart(5)}%  ${bpw} bits/weight\n`);
+    process.stdout.write(`${typeName(type).padEnd(8)} ${String(h.count).padStart(5)} tensors  ${formatBytes(h.bytes).padStart(10)}  ${((100 * h.bytes) / totalBytes).toFixed(1).padStart(5)}%  ${bpw} bits/weight${SUPPORTED_TENSOR_TYPES.has(type) ? '' : '   <- NOT supported by this engine yet'}\n`);
   }
   process.stdout.write(`Total: ${formatBytes(totalBytes)} of tensor data, ${formatCount(totalParams)} parameters\n`);
 

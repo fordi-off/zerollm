@@ -18,6 +18,7 @@
 // activation, convert to f32, scale by (d_w * d_x), accumulate in an f32x4. Four rows are processed together so the
 // widened activation vectors are reused 4x and four independent accumulators hide latency.
 import { ModuleBuilder, T } from './builder.js';
+import { genKQuantKernels } from './kquant-kernels.js';
 
 export const Q8_0_BLOCK = 34;
 export const Q4_0_BLOCK = 18;
@@ -235,6 +236,7 @@ export function buildKernelModule() {
   genMatvec(m, 'matvec_q4_0', 'q4');
   genMatmul(m, 'mm_q8_0', 'q8');
   genMatmul(m, 'mm_q4_0', 'q4');
+  genKQuantKernels(m);
   return m.build();
 }
 

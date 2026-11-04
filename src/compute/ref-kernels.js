@@ -2,6 +2,7 @@
 // Weight matrices are row-major: `rows` output rows, each `cols` (ne0) inputs in whole quant blocks.
 import { GGML_TYPE } from '../gguf/types.js';
 import { f16Table, bf16ToF32 } from '../util/f16.js';
+import { dequantizeQ5_0, dequantizeQ4_K, dequantizeQ5_K, dequantizeQ6_K, unpackScaleMinK4 } from './quant.js';
 
 const QK = 32;
 
@@ -56,7 +57,11 @@ export function rowBytes(type, cols) {
     case GGML_TYPE.F16: case GGML_TYPE.BF16: return cols * 2;
     case GGML_TYPE.Q8_0: return (cols / QK) * 34;
     case GGML_TYPE.Q4_0: return (cols / QK) * 18;
-    default: throw new Error(`reference kernels: unsupported tensor type ${type}`);
+    case GGML_TYPE.Q5_0: return (cols / QK) * 22;
+    case GGML_TYPE.Q4_K: return (cols / 256) * 144;
+    case GGML_TYPE.Q5_K: return (cols / 256) * 176;
+    case GGML_TYPE.Q6_K: return (cols / 256) * 210;
+    default: throw new Error(`reference kernels: unsupported tensor type ${type} (supported: F32, F16, BF16, Q4_0, Q5_0, Q8_0, Q4_K, Q5_K, Q6_K)`);
   }
 }
 
@@ -95,6 +100,10 @@ export function dequantRow(w, row, out) {
         }
       }
       return out;
+    case GGML_TYPE.Q5_0: out.set(dequantizeQ5_0(u8.subarray(o0, o0 + rb), w.cols)); return out;
+    case GGML_TYPE.Q4_K: out.set(dequantizeQ4_K(u8.subarray(o0, o0 + rb), w.cols)); return out;
+    case GGML_TYPE.Q5_K: out.set(dequantizeQ5_K(u8.subarray(o0, o0 + rb), w.cols)); return out;
+    case GGML_TYPE.Q6_K: out.set(dequantizeQ6_K(u8.subarray(o0, o0 + rb), w.cols)); return out;
     default: throw new Error(`reference kernels: unsupported tensor type ${w.type}`);
   }
 }
@@ -146,6 +155,90 @@ export function matvec(w, a, y, r0 = 0, r1 = w.rows) {
           }
           acc += s * tbl[u8[o] | (u8[o + 1] << 8)] * xd[b];
           o += 18;
+        }
+        y[r] = acc;
+      }
+      return y;
+    }
+    case GGML_TYPE.Q5_0: {
+      a.quant();
+      const xq = a.q; const xd = a.d;
+      const tbl = f16Table();
+      for (let r = r0; r < r1; r++) {
+        let o = r * nb * 22;
+        let acc = 0;
+        for (let b = 0; b < nb; b++) {
+          const xo = b * QK;
+          const qh = u8[o + 2] | (u8[o + 3] << 8) | (u8[o + 4] << 16) | (u8[o + 5] << 24);
+          let s = 0;
+          for (let j = 0; j < 16; j++) {
+            const byte = u8[o + 6 + j];
+            s += (((byte & 0x0f) | (((qh >>> j) & 1) << 4)) - 16) * xq[xo + j] + (((byte >> 4) | (((qh >>> (j + 16)) & 1) << 4)) - 16) * xq[xo + j + 16];
+          }
+          acc += s * tbl[u8[o] | (u8[o + 1] << 8)] * xd[b];
+          o += 22;
+        }
+        y[r] = acc;
+      }
+      return y;
+    }
+    case GGML_TYPE.Q4_K: case GGML_TYPE.Q5_K: {
+      // per 32-element sub-block s:  sum_i (d*sc*q_i - dmin*mn) * x_i  =  d*sc*sum(q*xq) - dmin*mn*sum(xq), times the x scale
+      a.quant();
+      const xq = a.q; const xd = a.d;
+      const tbl = f16Table();
+      const five = w.type === GGML_TYPE.Q5_K;
+      const bs = five ? 176 : 144; const qs = five ? 48 : 16;
+      const nsb = cols / 256;
+      for (let r = r0; r < r1; r++) {
+        let acc = 0;
+        for (let sb = 0; sb < nsb; sb++) {
+          const o = (r * nsb + sb) * bs;
+          const d = tbl[u8[o] | (u8[o + 1] << 8)]; const dmin = tbl[u8[o + 2] | (u8[o + 3] << 8)];
+          const { sc, mn } = unpackScaleMinK4(u8.subarray(o + 4, o + 16));
+          for (let s = 0; s < 8; s++) {
+            const chunk = s >> 1; const hi = s & 1; const xo = (sb * 8 + s) * 32;
+            let isum = 0; let xsum = 0;
+            for (let l = 0; l < 32; l++) {
+              const byte = u8[o + qs + chunk * 32 + l];
+              let v = hi ? byte >> 4 : byte & 0x0f;
+              if (five) v |= ((u8[o + 16 + l] >> s) & 1) << 4;
+              isum += v * xq[xo + l]; xsum += xq[xo + l];
+            }
+            acc += xd[sb * 8 + s] * (d * sc[s] * isum - dmin * mn[s] * xsum);
+          }
+        }
+        y[r] = acc;
+      }
+      return y;
+    }
+    case GGML_TYPE.Q6_K: {
+      a.quant();
+      const xq = a.q; const xd = a.d;
+      const tbl = f16Table();
+      const nsb = cols / 256;
+      const gsum = new Float64Array(16);
+      for (let r = r0; r < r1; r++) {
+        let acc = 0;
+        for (let sb = 0; sb < nsb; sb++) {
+          const o = (r * nsb + sb) * 210;
+          const d = tbl[u8[o + 208] | (u8[o + 209] << 8)];
+          gsum.fill(0);
+          for (let half = 0; half < 2; half++) {
+            const ql = o + 64 * half; const qh = o + 128 + 32 * half;
+            for (let l = 0; l < 32; l++) {
+              const h = u8[qh + l]; const g = l >> 4;
+              const e = sb * 256 + half * 128;
+              gsum[half * 8 + g] += (((u8[ql + l] & 0x0f) | (((h >> 0) & 3) << 4)) - 32) * xq[e + l];
+              gsum[half * 8 + 2 + g] += (((u8[ql + l + 32] & 0x0f) | (((h >> 2) & 3) << 4)) - 32) * xq[e + l + 32];
+              gsum[half * 8 + 4 + g] += (((u8[ql + l] >> 4) | (((h >> 4) & 3) << 4)) - 32) * xq[e + l + 64];
+              gsum[half * 8 + 6 + g] += (((u8[ql + l + 32] >> 4) | (((h >> 6) & 3) << 4)) - 32) * xq[e + l + 96];
+            }
+          }
+          for (let g = 0; g < 16; g++) {
+            const scale = (u8[o + 192 + g] << 24) >> 24; // int8
+            acc += xd[sb * 8 + (g >> 1)] * d * scale * gsum[g];
+          }
         }
         y[r] = acc;
       }

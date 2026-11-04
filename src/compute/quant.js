@@ -88,3 +88,115 @@ export function dequantizeQ4_0(q, n) {
   }
   return out;
 }
+
+// ------------------------------------------------------------------------------------------------ Q5_0 and K-quants
+// Straightforward block dequantizers (the formulas of ggml's dequantize_row_*), validated against golden vectors from
+// the independent gguf-py implementation (test/data/quant-vectors.json, tools/gen-quant-vectors.py).
+
+export const QK_K = 256;
+export const Q5_0_BLOCK_BYTES = 22;
+export const Q4_K_BLOCK_BYTES = 144;
+export const Q5_K_BLOCK_BYTES = 176;
+export const Q6_K_BLOCK_BYTES = 210;
+
+/**
+ * Unpack the 12-byte 6-bit scale/min table of Q4_K / Q5_K into 8 scales and 8 mins.
+ *   bytes 0-3: low 6 bits = scales 0-3, top 2 bits = bits 4-5 of scales 4-7
+ *   bytes 4-7: low 6 bits = mins   0-3, top 2 bits = bits 4-5 of mins   4-7
+ *   bytes 8-11: low nibble = low 4 bits of scales 4-7, high nibble = low 4 bits of mins 4-7
+ * @param {Uint8Array} q 12 bytes @returns {{sc: number[], mn: number[]}}
+ */
+export function unpackScaleMinK4(q) {
+  const sc = new Array(8); const mn = new Array(8);
+  for (let j = 0; j < 4; j++) {
+    sc[j] = q[j] & 63;
+    mn[j] = q[j + 4] & 63;
+    sc[j + 4] = (q[j + 8] & 0x0f) | ((q[j] >> 6) << 4);
+    mn[j + 4] = (q[j + 8] >> 4) | ((q[j + 4] >> 6) << 4);
+  }
+  return { sc, mn };
+}
+
+/** @param {Uint8Array} q @param {number} n element count (multiple of 32) */
+export function dequantizeQ5_0(q, n) {
+  const out = new Float32Array(n);
+  const dv = new DataView(q.buffer, q.byteOffset, q.byteLength);
+  for (let b = 0; b < n / 32; b++) {
+    const o = b * Q5_0_BLOCK_BYTES;
+    const d = f16ToF32(dv.getUint16(o, true));
+    const qh = dv.getUint32(o + 2, true);
+    for (let j = 0; j < 16; j++) {
+      const byte = q[o + 6 + j];
+      out[b * 32 + j] = d * (((byte & 0x0f) | (((qh >>> j) & 1) << 4)) - 16);
+      out[b * 32 + j + 16] = d * (((byte >> 4) | (((qh >>> (j + 16)) & 1) << 4)) - 16);
+    }
+  }
+  return out;
+}
+
+/** @param {Uint8Array} q @param {number} n element count (multiple of 256) */
+export function dequantizeQ4_K(q, n) {
+  const out = new Float32Array(n);
+  const dv = new DataView(q.buffer, q.byteOffset, q.byteLength);
+  for (let b = 0; b < n / QK_K; b++) {
+    const o = b * Q4_K_BLOCK_BYTES;
+    const d = f16ToF32(dv.getUint16(o, true)); const dmin = f16ToF32(dv.getUint16(o + 2, true));
+    const { sc, mn } = unpackScaleMinK4(q.subarray(o + 4, o + 16));
+    for (let s = 0; s < 8; s++) {
+      const chunk = s >> 1; const hi = s & 1;
+      for (let l = 0; l < 32; l++) {
+        const byte = q[o + 16 + chunk * 32 + l];
+        const v = hi ? byte >> 4 : byte & 0x0f;
+        out[b * QK_K + s * 32 + l] = d * sc[s] * v - dmin * mn[s];
+      }
+    }
+  }
+  return out;
+}
+
+/** @param {Uint8Array} q @param {number} n element count (multiple of 256) */
+export function dequantizeQ5_K(q, n) {
+  const out = new Float32Array(n);
+  const dv = new DataView(q.buffer, q.byteOffset, q.byteLength);
+  for (let b = 0; b < n / QK_K; b++) {
+    const o = b * Q5_K_BLOCK_BYTES;
+    const d = f16ToF32(dv.getUint16(o, true)); const dmin = f16ToF32(dv.getUint16(o + 2, true));
+    const { sc, mn } = unpackScaleMinK4(q.subarray(o + 4, o + 16));
+    for (let s = 0; s < 8; s++) {
+      const chunk = s >> 1; const hi = s & 1;
+      for (let l = 0; l < 32; l++) {
+        const byte = q[o + 48 + chunk * 32 + l];
+        const v = (hi ? byte >> 4 : byte & 0x0f) | (((q[o + 16 + l] >> s) & 1) << 4);
+        out[b * QK_K + s * 32 + l] = d * sc[s] * v - dmin * mn[s];
+      }
+    }
+  }
+  return out;
+}
+
+/** @param {Uint8Array} q @param {number} n element count (multiple of 256) */
+export function dequantizeQ6_K(q, n) {
+  const out = new Float32Array(n);
+  const dv = new DataView(q.buffer, q.byteOffset, q.byteLength);
+  for (let b = 0; b < n / QK_K; b++) {
+    const o = b * Q6_K_BLOCK_BYTES;
+    const d = f16ToF32(dv.getUint16(o + 208, true));
+    for (let half = 0; half < 2; half++) {
+      const ql = o + 64 * half; const qh = o + 128 + 32 * half; const sc = o + 192 + 8 * half;
+      for (let l = 0; l < 32; l++) {
+        const h = q[qh + l];
+        const q1 = ((q[ql + l] & 0x0f) | (((h >> 0) & 3) << 4)) - 32;
+        const q2 = ((q[ql + l + 32] & 0x0f) | (((h >> 2) & 3) << 4)) - 32;
+        const q3 = ((q[ql + l] >> 4) | (((h >> 4) & 3) << 4)) - 32;
+        const q4 = ((q[ql + l + 32] >> 4) | (((h >> 6) & 3) << 4)) - 32;
+        const g = l >> 4; // 16-element scale group within the 32 lanes
+        const e = b * QK_K + half * 128;
+        out[e + l] = d * dv.getInt8(sc + g) * q1;
+        out[e + l + 32] = d * dv.getInt8(sc + g + 2) * q2;
+        out[e + l + 64] = d * dv.getInt8(sc + g + 4) * q3;
+        out[e + l + 96] = d * dv.getInt8(sc + g + 6) * q4;
+      }
+    }
+  }
+  return out;
+}

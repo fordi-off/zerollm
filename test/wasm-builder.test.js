@@ -104,6 +104,18 @@ test('SIMD bitwise + i8x16 ops', () => {
   check('i8x16.shl', (a) => a.map((x) => (x << 4) & 0xff), { shift: true });
 });
 
+test('SIMD swizzle and byte compares', () => {
+  check('i8x16.swizzle', (a, b) => b.map((idx) => (idx < 16 ? a[idx] : 0)));
+  check('i8x16.eq', (a, b) => a.map((x, i) => (x === b[i] ? 0xff : 0)));
+  check('i8x16.ne', (a, b) => a.map((x, i) => (x !== b[i] ? 0xff : 0)));
+  // equal-heavy data so eq/ne see both outcomes
+  const { inst, mem } = binaryKernel('i8x16.eq');
+  const u8 = new Uint8Array(mem.buffer);
+  const a = randBytes(16); const b = Uint8Array.from(a, (x, i) => (i % 3 ? x : x ^ 1));
+  u8.set(a, 0); u8.set(b, 16); inst.exports.t(0, 16, 32);
+  assert.deepEqual([...u8.subarray(32, 48)], [...a].map((x, i) => (x === b[i] ? 0xff : 0)));
+});
+
 test('SIMD widening, add, dot (int8 -> int16 -> int32)', () => {
   const s8 = (x) => (x << 24) >> 24;
   check('i16x8.extend_low_i8x16_s', (a) => out16((o) => { for (let i = 0; i < 8; i++) o.setInt16(2 * i, s8(a[i]), true); }), { unary: true });

@@ -7,7 +7,7 @@
 import fs from 'node:fs';
 import { parentPort, workerData } from 'node:worker_threads';
 import { readTensorBytes } from '../gguf/reader.js';
-import { GGML_TYPE } from '../gguf/types.js';
+import { GGML_TYPE, GGML_TYPE_INFO } from '../gguf/types.js';
 import { Act, matvec, dequantRow, rmsnorm, softmax, silu, ropeTables, applyRope, rowBytes, quantizeAct } from './ref-kernels.js';
 import { instantiateKernels } from './wasm/kernels.js';
 import { Barrier } from './barrier.js';
@@ -85,7 +85,7 @@ function main() {
     for (const p of plan) {
       const view = new Uint8Array(mem.buffer, p.off, p.bytes);
       if (p.bytes) readTensorBytes(fd, p.t, p.r0 * rowBytes(p.t.type, p.t.dims[0]), view);
-      W[p.key] = { type: p.t.type, rows: p.r1 - p.r0, cols: p.t.dims[0], data: view, off: p.off, kernel: null, mmKernel: null, nb: p.t.dims[0] / 32 };
+      W[p.key] = { type: p.t.type, rows: p.r1 - p.r0, cols: p.t.dims[0], data: view, off: p.off, kernel: null, mmKernel: null, nb: p.t.dims[0] / (GGML_TYPE_INFO[p.t.type]?.blockSize ?? 32) };
       loaded += p.bytes;
       const now = performance.now();
       if (now - lastPost > 100) { lastPost = now; parentPort.postMessage({ type: 'progress', id, bytes: loaded }); }
@@ -120,7 +120,12 @@ function main() {
   if (useWasm) {
     const k = instantiateKernels(mem);
     for (const w of Object.values(W)) {
-      if (w.type === GGML_TYPE.Q8_0) { w.kernel = k.matvec_q8_0; w.mmKernel = k.mm_q8_0; } else if (w.type === GGML_TYPE.Q4_0) { w.kernel = k.matvec_q4_0; w.mmKernel = k.mm_q4_0; }
+      // Q8_0 / Q4_0 have batched (matmul) kernels; Q5_0 and the K-quants only have decode kernels, which batched
+      // prefill applies once per token (correct, but the weights are then re-read for every token).
+      if (w.type === GGML_TYPE.Q8_0) { w.kernel = k.matvec_q8_0; w.mmKernel = k.mm_q8_0; } else if (w.type === GGML_TYPE.Q4_0) { w.kernel = k.matvec_q4_0; w.mmKernel = k.mm_q4_0; } else if (w.type === GGML_TYPE.Q5_0) w.kernel = k.matvec_q5_0;
+      else if (w.type === GGML_TYPE.Q4_K) w.kernel = k.matvec_q4_k;
+      else if (w.type === GGML_TYPE.Q5_K) w.kernel = k.matvec_q5_k;
+      else if (w.type === GGML_TYPE.Q6_K) w.kernel = k.matvec_q6_k;
     }
   }
 
@@ -177,6 +182,12 @@ function main() {
       if (B === 1) {
         w.kernel(w.off, XQ, XD, YO, w.rows, w.nb);
         dest.set(yv.subarray(0, w.rows), destOff);
+      } else if (!w.mmKernel) {
+        for (let b = 0; b < B; b++) { // no batched kernel for this format: decode kernel per token
+          quantizeAct(srcVec.subarray(b * srcDim, (b + 1) * srcDim), xqv, xdv);
+          w.kernel(w.off, XQ, XD, YO, w.rows, w.nb);
+          dest.set(yv.subarray(0, w.rows), b * destStride + destOff);
+        }
       } else {
         w.mmKernel(w.off, XQ16, XDB, YO, w.rows, w.nb, B);
         for (let b = 0; b < B; b++) dest.set(yv.subarray(b * w.rows, (b + 1) * w.rows), b * destStride + destOff);
