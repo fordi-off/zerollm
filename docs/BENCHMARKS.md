@@ -23,3 +23,39 @@ Linux VM, Intel Xeon @ 2.1 GHz, 4 vCPU, Node 22.23. `zerollm bench --threads 1,2
 | 4 | 3.68 | 4.17 | 3.39x | 85% |
 
 Greedy output is bit-identical across all thread counts (and the pool's logits are bit-identical to the reference path in the test suite). Fresh-process RSS with 4 workers: 761 MB (single thread 698-738 MB), i.e. no weight duplication. Barrier spin sensitivity at 4 threads (decode tok/s): spin=0 -> 2.89, 2000 -> 3.69, 20000 -> 3.85, 200000 -> 3.72.
+
+### M5 on the target laptop (user-measured): Ryzen 5 7530U, Node 26.5.1, Windows; Qwen3-0.6B-Q8_0 (real), JS kernels
+
+`zerollm bench --threads 1,2,4,6,8,12 --prompt-tokens 32 --n 32` (ctx 512). RSS column is cumulative (models are created in one process).
+
+| threads | load s | prefill tok/s | decode tok/s | eff. GB/s | speedup |
+|---|---|---|---|---|---|
+| 1 | 0.7 | 0.97 | 0.74 | 0.47 | 1.00x |
+| 2 | 0.4 | 1.80 | 1.50 | 0.95 | 2.03x |
+| 4 | 0.3 | 3.64 | 2.79 | 1.77 | 3.79x |
+| 6 | 0.3 | 3.75 | 3.28 | 2.08 | 4.46x |
+| 8 | 0.3 | 3.55 | 2.98 | 1.89 | 4.05x |
+| 12 | 0.3 | 4.18 | 3.89 | 2.46 | 5.28x |
+
+Greedy output identical across all thread counts. Observations: effective weight bandwidth is ~2.5 GB/s vs a ~25-35 GB/s ceiling, so the JS kernels (not RAM) are the bottleneck; 12 threads beat 6 because the workload is compute-bound (hyperthreads help). The 1-thread number (0.74) is lower than the earlier `run` measurements (1.20-1.27 decode), so the speedup column is inflated by a slow baseline (power state / background load?); compare absolute tok/s.
+
+### M6 (WASM SIMD kernels), dev container, synthetic Qwen3-0.6B-shaped Q8_0 (random weights)
+
+Linux VM, Xeon @ 2.1 GHz, 4 vCPU, Node 22.23, `zerollm bench --kernels js,wasm --threads 1,4 --prompt-tokens 8 --n 24 --ctx 256`. NOT the target machine.
+
+| kernels | threads | prefill tok/s | decode tok/s | eff. GB/s | vs js x1 |
+|---|---|---|---|---|---|
+| js | 1 | 1.59 | 1.23 | 0.78 | 1.00x |
+| js | 4 | 3.43 | 3.31 | 2.10 | 2.69x |
+| wasm-simd | 1 | 8.46 | 6.61 | 4.19 | 5.4x |
+| wasm-simd | 4 | 17.28 | 17.87 | 11.32 | 14.5x |
+
+Per-token profile of worker 0 (`ZEROLLM_PROFILE=1`), ms/token:
+
+| config | total | matmul kernels | act quantization (JS) | attention+rope | barrier waits | other |
+|---|---|---|---|---|---|---|
+| wasm 1 thread | 149.9 | 135.2 (90%) | 4.4 | 6.1 | 0.4 | 3.8 |
+| wasm 4 threads | 57.0 | 34.6 (61%) | 4.6 | 2.0 | 13.9 (24%) | 2.0 |
+| js 4 threads | 283.4 | 221.2 | 0.2 | 2.0 | 57.4 | 2.6 |
+
+Takeaways: the kernel is ~90% of single-thread time at ~4.5 GB/s of weights per thread (instruction-bound, not memory-bound, so far below the DRAM ceiling); kernel time scales ~3.9x on 4 threads; barrier waits grow to ~14 ms/token (169 barriers, ~80 us each: load imbalance + VM scheduling jitter). Next levers: relaxed-SIMD dot / hoisting the f16 scale conversion in the kernel, fewer/cheaper barriers, quantizing activations once instead of per worker.

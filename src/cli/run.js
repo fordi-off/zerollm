@@ -3,7 +3,7 @@ import { parseArgs, num } from '../util/args.js';
 import { encodeChat } from '../tokenizer/chat-templates.js';
 import { loadEngine, samplerFromFlags, templateOptions, installAbort, streamReply, formatStats, SAMPLER_HELP } from './common.js';
 
-export const help = `run <model.gguf> -p "prompt" [--n 256] [--system "..."] [--ctx 2048] [--threads N] [--raw] [--think|--no-think] [--stop "str"] ${SAMPLER_HELP}`;
+export const help = `run <model.gguf> -p "prompt" [--n 256] [--system "..."] [--ctx 2048] [--threads N] [--kernels auto|wasm|js] [--raw] [--think|--no-think] [--stop "str"] ${SAMPLER_HELP}`;
 
 export async function run(argv) {
   const { _, flags } = parseArgs(argv, { alias: { p: 'prompt', n: 'n' }, boolean: ['raw', 'think'] });
@@ -14,7 +14,7 @@ export async function run(argv) {
   }
   const eng = await loadEngine(_[0], flags);
   try {
-  process.stderr.write(`[loaded ${eng.cfg.arch} ${eng.cfg.nLayer}L in ${(eng.loadMs / 1000).toFixed(1)}s, ${eng.threads} thread${eng.threads > 1 ? 's' : ''}, template: ${eng.kind}, ctx ${eng.ctx}]\n`);
+  process.stderr.write(`[loaded ${eng.cfg.arch} ${eng.cfg.nLayer}L in ${(eng.loadMs / 1000).toFixed(1)}s, ${eng.threads} thread${eng.threads > 1 ? 's' : ''}, ${eng.kernels} kernels, template: ${eng.kind}, ctx ${eng.ctx}]\n`);
 
   /** @type {number[]} */
   let ids;

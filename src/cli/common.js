@@ -33,6 +33,13 @@ export function samplerFromFlags(flags) {
 export function defaultThreads() { return Math.max(1, Math.floor((os.availableParallelism?.() ?? os.cpus().length) / 2)); }
 
 /** @param {Record<string, any>} flags */
+export function kernelsFromFlags(flags) {
+  const k = flags.kernels === undefined ? 'auto' : String(flags.kernels);
+  if (!['auto', 'wasm', 'js'].includes(k)) throw new Error(`--kernels must be auto, wasm or js (got "${k}")`);
+  return k;
+}
+
+/** @param {Record<string, any>} flags */
 export function threadsFromFlags(flags) {
   if (flags.threads === undefined || flags.threads === 'auto' || flags.threads === true) return defaultThreads();
   const n = num(flags.threads, 1);
@@ -51,8 +58,9 @@ function loadProgress() {
  * Create the compute model: the single-thread reference path for 1 thread, the SPMD worker pool otherwise.
  * @param {import('../gguf/reader.js').GGUFFile} g
  */
-export async function createModel(g, { threads, ctx, spin, onProgress }) {
-  const model = threads > 1 ? await PoolModel.create(g, { ctx, workers: threads, spin, onProgress }) : new RefModel(g, { ctx, onProgress });
+export async function createModel(g, { threads, ctx, spin, kernels = 'auto', onProgress }) {
+  // `--threads 1 --kernels js` is the plain single-thread reference path (the test oracle); everything else uses the pool
+  const model = threads === 1 && kernels === 'js' ? new RefModel(g, { ctx, onProgress }) : await PoolModel.create(g, { ctx, workers: threads, spin, kernels, onProgress });
   if (process.stderr.isTTY) process.stderr.write('\r\x1b[K');
   return model;
 }
@@ -72,11 +80,11 @@ export async function loadEngine(modelPath, flags) {
   const est = estimateRam(g, cfg, { ctx });
   if (est.total > os.freemem() * 0.9) warn(`estimated RAM need ${formatBytes(est.total)} vs ${formatBytes(os.freemem())} free: close other apps or lower --ctx.`);
   const tok = Tokenizer.fromGGUF(g);
-  const model = await createModel(g, { threads, ctx, spin: flags.spin === undefined ? undefined : num(flags.spin, 20000), onProgress: loadProgress() });
+  const model = await createModel(g, { threads, ctx, kernels: kernelsFromFlags(flags), spin: flags.spin === undefined ? undefined : num(flags.spin, 20000), onProgress: loadProgress() });
   let kind = typeof flags.template === 'string' ? flags.template : flags.raw ? 'raw' : detectTemplate(cfg.arch, g.get('tokenizer.chat_template'), tok);
   if (!TEMPLATE_KINDS.includes(kind)) { await model.close?.(); throw new Error(`unknown --template "${kind}" (use ${TEMPLATE_KINDS.join(', ')})`); }
   return {
-    g, cfg, tok, model, kind, ctx: model.ctx, threads,
+    g, cfg, tok, model, kind, ctx: model.ctx, threads, kernels: model.kernels === 'wasm' ? 'wasm-simd' : 'js',
     jinja: g.get('tokenizer.chat_template'),
     stopIds: stopTokenIds(tok, kind),
     loadMs: performance.now() - t0,
