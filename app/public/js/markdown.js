@@ -26,8 +26,47 @@ function setup() {
   });
 }
 
+// ---- math: \( inline \), \[ display \] and $$ display $$ (a bare single $ is NOT math: it is usually currency).
+// Math is cut out before marked (which would eat the backslashes), and put back as KaTeX HTML afterwards. Code is left alone.
+const MATH = /\\\(([\s\S]+?)\\\)|\\\[([\s\S]+?)\\\]|\$\$([\s\S]+?)\$\$/g;
+const katexCache = new Map();
+function renderTex(tex, display) {
+  const key = `${display ? 'D' : 'I'}${tex}`;
+  let html = katexCache.get(key);
+  if (html === undefined) {
+    try { html = window.katex.renderToString(tex.trim(), { displayMode: display, throwOnError: false, output: 'html', strict: 'ignore', trust: false }); }
+    catch { html = `<code>${esc(tex)}</code>`; }
+    if (katexCache.size > 500) katexCache.clear();
+    katexCache.set(key, html);
+  }
+  return html;
+}
+
+/** Replace math outside code with placeholders; returns the new text and the pieces. */
+export function extractMath(text) {
+  const pieces = [];
+  // split into code / non-code parts: fenced blocks first, then inline code spans
+  const parts = String(text).split(/(```[\s\S]*?(?:```|$)|`[^`\n]*`)/g);
+  const out = parts.map((part, i) => {
+    if (i % 2 === 1) return part; // code
+    return part.replace(MATH, (m, a, b, c) => {
+      const display = a === undefined; const tex = a ?? b ?? c;
+      pieces.push({ tex, display });
+      return `ZCMATH${pieces.length - 1}X`;
+    });
+  });
+  return { text: out.join(''), pieces };
+}
+
 export function renderMarkdown(text) {
   setup();
   if (!window.marked) return `<p>${esc(text)}</p>`;
-  return window.marked.parse(text ?? '');
+  const hasMath = window.katex && /\\[(\[]|\$\$/.test(text ?? '');
+  const { text: src, pieces } = hasMath ? extractMath(text) : { text: text ?? '', pieces: [] };
+  let html = window.marked.parse(src);
+  if (pieces.length) {
+    html = html.replace(/<p>\s*ZCMATH(\d+)X\s*<\/p>/g, (m, i) => (pieces[+i]?.display ? `<div class="math-block">${renderTex(pieces[+i].tex, true)}</div>` : m));
+    html = html.replace(/ZCMATH(\d+)X/g, (m, i) => (pieces[+i] ? renderTex(pieces[+i].tex, pieces[+i].display) : m));
+  }
+  return html;
 }
