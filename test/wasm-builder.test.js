@@ -129,6 +129,15 @@ test('SIMD widening, add, dot (int8 -> int16 -> int32)', () => {
   }));
 });
 
+test('SIMD extended multiplies and pairwise adds (the int8 dot used by the K-quant kernels)', () => {
+  const s8 = (x) => (x << 24) >> 24;
+  check('i16x8.extmul_low_i8x16_s', (a, b) => out16((o) => { for (let i = 0; i < 8; i++) o.setInt16(2 * i, s8(a[i]) * s8(b[i]), true); }));
+  check('i16x8.extmul_high_i8x16_s', (a, b) => out16((o) => { for (let i = 0; i < 8; i++) o.setInt16(2 * i, s8(a[8 + i]) * s8(b[8 + i]), true); }));
+  check('i16x8.add', (a, b) => out16((o) => { const x = dv(a), y = dv(b); for (let i = 0; i < 8; i++) o.setInt16(2 * i, (x.getInt16(2 * i, true) + y.getInt16(2 * i, true)) << 16 >> 16, true); }));
+  check('i32x4.extadd_pairwise_i16x8_s', (a) => out16((o) => { const x = dv(a); for (let i = 0; i < 4; i++) o.setInt32(4 * i, x.getInt16(4 * i, true) + x.getInt16(4 * i + 2, true), true); }), { unary: true });
+  check('i16x8.extadd_pairwise_i8x16_s', (a) => out16((o) => { for (let i = 0; i < 8; i++) o.setInt16(2 * i, s8(a[2 * i]) + s8(a[2 * i + 1]), true); }), { unary: true });
+});
+
 test('SIMD float: convert, add, mul', () => {
   const small = (a) => { const u = new Uint8Array(16); const d = dv(u); for (let i = 0; i < 4; i++) d.setInt32(4 * i, dv(a).getInt32(4 * i, true) >> 8, true); return u; };
   const { inst, mem } = (() => {
