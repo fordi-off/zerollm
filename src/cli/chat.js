@@ -1,14 +1,14 @@
 import readline from 'node:readline';
 import { parseArgs, num } from '../util/args.js';
 import { encodeChat } from '../tokenizer/chat-templates.js';
-import { loadEngine, samplerFromFlags, templateOptions, streamReply, formatStats, usePrefixCache, SAMPLER_HELP } from './common.js';
+import { loadEngine, samplerFromFlags, templateOptions, streamReply, formatStats, usePrefixCache, describePrompt, SAMPLER_HELP } from './common.js';
 
-export const help = `chat <model.gguf> [--system "..."] [--n 512] [--ctx 2048] [--threads N] [--kernels auto|wasm|js] [--kv f32|f16] [--think|--no-think] [--no-cache] [--cache-dir DIR] ${SAMPLER_HELP}`;
+export const help = `chat <model.gguf> [--system "..."] [--n 512] [--ctx 2048] [--threads N] [--kernels auto|wasm|js] [--kv f32|f16] [--think|--no-think] [--no-cache] [--cache-dir DIR] [--show-prompt] ${SAMPLER_HELP}`;
 
 const COMMANDS = '/reset  clear conversation   /system <text>  set system prompt (resets)   /think  /nothink  toggle Qwen3 thinking   /exit';
 
 export async function run(argv) {
-  const { _, flags } = parseArgs(argv, { alias: { n: 'n' }, boolean: ['raw', 'think'] });
+  const { _, flags } = parseArgs(argv, { alias: { n: 'n' }, boolean: ['raw', 'think', 'show-prompt'] });
   const eng = await loadEngine(_[0], flags);
   const sample = samplerFromFlags(flags);
   const maxTokens = num(flags.n, 512);
@@ -45,6 +45,7 @@ export async function run(argv) {
     messages.push({ role: 'user', content: input });
     const convo = system ? [{ role: 'system', content: system }, ...messages] : messages;
     const ids = encodeChat(eng.tok, eng.kind, convo, { ...templateOptions(eng, flags), think });
+    if (flags['show-prompt']) describePrompt(eng, ids);
     signal.aborted = false;
     busy = true;
     try {

@@ -198,3 +198,21 @@ test('encodeChat: scaffolding becomes control tokens, user text cannot inject th
 test('unsupported tokenizer model / pre-tokenizer fail loudly', () => {
   assert.throws(() => new Tokenizer({ tokens: ['a'], merges: [], pre: 'weird-pre' }), /unsupported tokenizer.ggml.pre/);
 });
+
+test('Llama 3 style tokenizers use a whole pre-token directly when it is in the vocabulary (ignore_merges); Qwen2 style do not', () => {
+  const tokens = [...BYTE_TO_CHAR, 'ab', 'abc'];            // 'ab' and 'abc' are tokens but NO merge rule produces them
+  const types = tokens.map(() => 1);
+  const llama = new Tokenizer({ tokens, types, merges: [], pre: 'llama-bpe' });
+  const qwen = new Tokenizer({ tokens, types, merges: [], pre: 'qwen2' });
+  const id = (s) => llama.idOf(s);
+  assert.equal(llama.ignoreMerges, true);
+  assert.equal(qwen.ignoreMerges, false);
+  assert.deepEqual(llama.encode('abc', { special: false, bos: false }), [id('abc')]);
+  assert.deepEqual(qwen.encode('abc', { special: false, bos: false }), [id('a'), id('b'), id('c')]);
+  assert.deepEqual(llama.encode('abcd', { special: false, bos: false }), [id('a'), id('b'), id('c'), id('d')]); // 'abcd' is not a token: falls back to merges (none)
+  assert.deepEqual(llama.encode('ab ab', { special: false, bos: false }), [id('ab'), id('Ġ'), id('a'), id('b')].slice(0, 1).concat(llama.encode(' ab', { special: false, bos: false })));
+  // round trip is unaffected
+  for (const s of ['abc', 'ab abc', 'xabcx', 'Hello 123']) assert.equal(llama.decode(llama.encode(s, { special: false, bos: false })), s);
+  // the flag can be forced either way
+  assert.equal(new Tokenizer({ tokens, types, merges: [], pre: 'qwen2', ignoreMerges: true }).encode('abc', { special: false, bos: false }).length, 1);
+});

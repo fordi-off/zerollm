@@ -1,12 +1,12 @@
 import fs from 'node:fs';
 import { parseArgs, num } from '../util/args.js';
 import { encodeChat } from '../tokenizer/chat-templates.js';
-import { loadEngine, samplerFromFlags, templateOptions, installAbort, streamReply, formatStats, usePrefixCache, SAMPLER_HELP } from './common.js';
+import { loadEngine, samplerFromFlags, templateOptions, installAbort, streamReply, formatStats, usePrefixCache, describePrompt, SAMPLER_HELP } from './common.js';
 
-export const help = `run <model.gguf> -p "prompt" [--n 256] [--system "..."] [--ctx 2048] [--threads N] [--kernels auto|wasm|js] [--kv f32|f16] [--raw] [--think|--no-think] [--stop "str"] [--no-cache] [--cache-dir DIR] ${SAMPLER_HELP}`;
+export const help = `run <model.gguf> -p "prompt" [--n 256] [--system "..."] [--ctx 2048] [--threads N] [--kernels auto|wasm|js] [--kv f32|f16] [--raw] [--think|--no-think] [--stop "str"] [--no-cache] [--cache-dir DIR] [--show-prompt] ${SAMPLER_HELP}`;
 
 export async function run(argv) {
-  const { _, flags } = parseArgs(argv, { alias: { p: 'prompt', n: 'n' }, boolean: ['raw', 'think'] });
+  const { _, flags } = parseArgs(argv, { alias: { p: 'prompt', n: 'n' }, boolean: ['raw', 'think', 'show-prompt'] });
   let prompt = flags.prompt;
   if (typeof prompt !== 'string') {
     if (process.stdin.isTTY) throw new Error(`usage: zerollm ${help}`);
@@ -27,6 +27,7 @@ export async function run(argv) {
     ids = encodeChat(eng.tok, eng.kind, messages, templateOptions(eng, flags));
   }
 
+  if (flags['show-prompt']) describePrompt(eng, ids);
   const signal = { aborted: false };
   const dispose = installAbort(signal);
   const stats = {};

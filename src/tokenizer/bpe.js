@@ -79,11 +79,15 @@ export class Tokenizer {
    * @param {number|undefined} p.bos
    * @param {number|undefined} p.eos
    * @param {boolean} [p.addBos]
+   * @param {boolean} [p.ignoreMerges] use a whole pre-token directly when the vocabulary has it (default: true for Llama 3)
    */
   constructor(p) {
     this.tokens = p.tokens;
     this.types = p.types ?? [];
     this.kind = preKind(p.pre);
+    // Llama 3's tokenizer (tiktoken-derived; HF tokenizer.json: "ignore_merges": true) looks the whole pre-token up in the
+    // vocabulary first; its merge list does not always reproduce every vocabulary entry. Qwen2 does not do this.
+    this.ignoreMerges = p.ignoreMerges ?? this.kind === 'llama3';
     this.bosId = p.bos;
     this.eosId = p.eos;
     this.addBos = p.addBos ?? false;
@@ -138,6 +142,10 @@ export class Tokenizer {
   bpeWord(word) {
     const cached = this.cache.get(word);
     if (cached) return cached;
+    if (this.ignoreMerges) {
+      const whole = this.tokenToId.get(word);
+      if (whole !== undefined) { const ids = [whole]; if (this.cache.size > 50000) this.cache.clear(); this.cache.set(word, ids); return ids; }
+    }
     const n = word.length;
     let ids;
     if (n === 1) {

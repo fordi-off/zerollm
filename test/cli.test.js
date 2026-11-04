@@ -109,3 +109,15 @@ test('streamReply never erases printed text with the progress-line escape (termi
   assert.ok(!events.slice(firstOut).some((e) => e[0] === 'err' && e[1].includes('\x1b[K')), 'nothing erased after text');
   await eng.close();
 });
+
+test('--show-prompt prints the token count, ids and the text with control tokens visible', () => {
+  for (const arch of ['qwen3', 'llama']) {
+    const { path: p } = tinyFile({ arch, quant: 'q8_0', seed: 3 });
+    const r = spawnSync(process.execPath, [BIN, 'run', p, '--system', 'Be brief.', '-p', 'hello', '--n', '2', '--temp', '0', '--show-prompt', '--no-cache'], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /\[prompt: \d+ tokens, template (qwen|llama3)\]/);
+    assert.match(r.stderr, /\[ids: \d+( \d+)+\]/);
+    assert.match(r.stderr, arch === 'llama' ? /<\|begin_of_text\|><\|start_header_id\|>system<\|end_header_id\|>/ : /<\|im_start\|>system/);
+    assert.match(r.stderr, arch === 'llama' ? /<\|start_header_id\|>assistant<\|end_header_id\|>/ : /<\|im_start\|>assistant/);
+  }
+});
