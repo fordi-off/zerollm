@@ -36,3 +36,9 @@ Run `npm run app -- --data <folder containing models/>` (or `node app/main.js`).
 - [ ] `/proofread <tekst med feil>` fixes the text; the next message without a command behaves normally again.
 - [ ] Add a command in Settings > Kommandoer; drop a `.md` file into `skills/` while the app runs - it appears (after focusing the window or reopening the menu).
 - [ ] Skibeti37 chats that contain `commands` keep their chips.
+
+## A5 - long conversations
+- [ ] Set the context window to 2048 or 4096 (Innstillinger > Ytelse) and have a long conversation (15-20 exchanges). At some point the status line shows "Oppsummerer eldre meldinger..." once, then answers continue; the reply shows "Eldre meldinger er oppsummert".
+- [ ] After that, ask about a fact from the very beginning: the answer should still know it (from the summary). **Note how long the summary step and the following "Leser teksten" take** (8B with and without a small second model installed, e.g. Llama 3.2 1B).
+- [ ] Choose a "Modell for oppsummering" in Settings and confirm app.log says `summarizing with <that file>`; with too little free RAM it should fall back to the chat model (log line) instead of failing.
+- [ ] Editing an early message in a summarized chat does not use the stale summary.

@@ -71,6 +71,13 @@ export function createChatStore(paths) {
       return chatId;
     },
 
+    /** Rolling summary cache (Skibeti37 format): {summary, summarized_count}. */
+    loadSummary(id) {
+      file(id);
+      try { const d = JSON.parse(fs.readFileSync(path.join(summaryDir, `${id}.json`), 'utf8')); return { summary: String(d.summary ?? ''), summarized_count: Number(d.summarized_count) || 0 }; } catch { return { summary: '', summarized_count: 0 }; }
+    },
+    saveSummary(id, summary, count) { file(id); writeAtomic(path.join(summaryDir, `${id}.json`), { summary, summarized_count: count }); },
+
     rename(id, name) {
       const d = readRaw(id); if (!d) return false;
       d.name = cleanName(name); writeAtomic(file(id), d); return true;

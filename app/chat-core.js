@@ -105,3 +105,32 @@ export function stablePrefixIds(tools, { extraSystem = '' } = {}) {
   const len = all.reduce((m, ids) => Math.min(m, commonLen(all[0], ids)), all[0].length);
   return all[0].slice(0, len);
 }
+
+// --- rolling summary of old messages (same wording and cache format as Skibeti37)
+export const RECENT_KEEP = 6;      // newest messages always sent verbatim
+export const SUMMARIZE_AT = 0.6;   // start folding old messages into the summary at this share of the prompt budget
+
+export const SUMMARY_PREFIX =
+  'Summary of earlier parts of this conversation (older messages are compressed to save space, but the user still has the full ' +
+  'history saved). Keep replying in the language of the user\'s latest message:\n';
+
+/** Messages for the small model that folds `chunk` into the running summary. */
+export function summaryPrompt(existingSummary, chunk) {
+  const text = chunk.map((m) => `${m.role}: ${String(m.content).slice(0, 2500)}`).join('\n');
+  return [
+    { role: 'system', content: 'You maintain a running summary of a conversation between a user and an AI assistant. Merge the existing summary with the new messages below into one short, concrete summary that preserves important facts, names, numbers and decisions. Keep it under 300 words - prioritise the most recent and still-relevant content, and drop small talk and details that no longer matter. Write the summary in the same language as the messages below.' },
+    { role: 'user', content: `Existing summary:\n${existingSummary || '(none yet)'}\n\nNew messages to incorporate:\n${text}` },
+  ];
+}
+
+/** Split messages into passes small enough for the summarizing model's context (about `maxChars` characters each). */
+export function chunkForSummary(chunk, maxChars = 7000) {
+  const passes = []; let cur = []; let size = 0;
+  for (const m of chunk) {
+    const len = Math.min(String(m.content).length, 2500) + 12;
+    if (cur.length && size + len > maxChars) { passes.push(cur); cur = []; size = 0; }
+    cur.push(m); size += len;
+  }
+  if (cur.length) passes.push(cur);
+  return passes;
+}
