@@ -51,6 +51,7 @@ export function ensureDirs(paths) {
 
 /** Tiny file logger (also echoes to the console unless quiet). */
 export function createLogger(paths, { quiet = false } = {}) {
+  try { if (fs.statSync(paths.logPath).size > 2_000_000) fs.renameSync(paths.logPath, `${paths.logPath}.old`); } catch { /* no log yet */ }
   const write = (level, msg) => {
     const line = `${new Date().toISOString()} ${level} ${msg}`;
     try { fs.appendFileSync(paths.logPath, `${line}\n`); } catch { /* logging must never break the app */ }

@@ -4,7 +4,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadTokenizer, EngineMemoryError, defaultThreads } from '../src/index.js';
+import v8 from 'node:v8';
+import { loadTokenizer, EngineMemoryError, UnsupportedModelError, defaultThreads } from '../src/index.js';
+import { probeWasmFeatures, probeJsFeatures } from '../src/compute/wasm/features.js';
 import { defaultConfig, CONTEXT_STEPS } from './config.js';
 import { listModels, modelPath } from './models.js';
 import { createChatStore } from './chats.js';
@@ -134,7 +136,11 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
       });
     } catch (e) {
       log.error(`generation failed: ${e.stack ?? e}`);
-      const message = e instanceof EngineMemoryError ? memoryMessage(e) : String(e.message ?? e);
+      const message = e instanceof EngineMemoryError ? memoryMessage(e)
+        : e instanceof UnsupportedModelError ? `Denne modellen støttes ikke av motoren (${e.message}). Velg en annen modell.`
+          : /model file not found/.test(String(e.message)) ? 'Fant ikke modellfilen. Den kan ha blitt flyttet eller slettet.'
+            : /prompt is \d+ tokens but the context window/.test(String(e.message)) ? 'Meldingen er for lang for kontekstvinduet. Skriv kortere, eller øk kontekstvinduet i Innstillinger.'
+              : String(e.message ?? e);
       send('error', { message, code: e.code ?? null });
     } finally {
       if (current?.id === id) current = null;
@@ -186,6 +192,22 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
       if (cfg.last_model === filename) cfg.last_model = null;
       setConfig(cfg);
       return { ok: true };
+    },
+
+    /** Everything worth pasting into a bug report. */
+    async diagnostics() {
+      const cpus = os.cpus(); const wasm = probeWasmFeatures(); const js = probeJsFeatures(); const cfg = getConfig();
+      let logTail = ''; try { logTail = fs.readFileSync(paths.logPath, 'utf8').split('\n').slice(-80).join('\n'); } catch { /* no log */ }
+      const problems = [];
+      if (!wasm.simd) problems.push('WebAssembly SIMD finnes ikke: motoren kan ikke bruke de raske kjernene.');
+      if (!js.sharedArrayBuffer || !js.atomicsWait) problems.push('SharedArrayBuffer/Atomics.wait mangler: trådene kan ikke brukes.');
+      return {
+        system: { node: process.version, v8: process.versions.v8, platform: `${process.platform} ${process.arch} (${os.release()})`, cpu: cpus[0]?.model?.trim() ?? 'unknown', logicalCpus: cpus.length, ramTotal: os.totalmem(), ramFree: os.freemem(), heapLimit: v8.getHeapStatistics().heap_size_limit },
+        features: { simd: wasm.simd, relaxedSimd: wasm.relaxedSimd, threads: wasm.threads, sharedArrayBuffer: js.sharedArrayBuffer, atomicsWait: js.atomicsWait },
+        app: { dataFolder: paths.root, logFile: paths.logPath, contextWindow: cfg.context_window, threads: cfg.n_threads, loadedModel: host.loadedName },
+        models: listModels(paths, cfg).map((m) => ({ filename: m.filename, sizeBytes: m.sizeBytes, supported: m.supported, reason: m.reason, quant: m.quant, arch: m.arch, ramNeed: m.ramNeed })),
+        problems, logTail,
+      };
     },
 
     async list_models() { return listModels(paths, getConfig()); },

@@ -279,6 +279,13 @@ async function openChat(id) {
   for (const m of S.messages) buildMessageNode(m);
   for (const m of S.messages) if (m.role === 'assistant') { addActions(m, { last: m === S.messages.at(-1), truncated: false }); renderSources(m.node, m.sources); }
   updateWelcome(); setActive(S.chatId); refreshChips(); updateMeter(); scrollToBottom(true); S.stickBottom = true;
+  document.addEventListener('keydown', (e) => {
+    if ($('settings').open) return;
+    if (e.key === 'Escape' && S.busy && $('cmd-menu').hidden) { call('stop_generation').catch(() => {}); }
+    else if (e.altKey && (e.key === 'n' || e.key === 'N')) { e.preventDefault(); newChat(); }
+    else if (e.altKey && (e.key === 'b' || e.key === 'B')) { e.preventDefault(); $('app').classList.toggle('side-closed'); }
+    else if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey && !/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName ?? '')) { e.preventDefault(); $('input').focus(); }
+  });
   if (window.matchMedia('(max-width: 760px)').matches) $('app').classList.add('side-closed');
 }
 

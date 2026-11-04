@@ -37,7 +37,7 @@
             <div class="starters" id="starters"></div>
             <p class="notice" id="no-model" hidden></p>
           </div>
-          <div class="messages" id="messages"></div>
+          <div class="messages" id="messages" role="log" aria-live="polite" aria-relevant="additions"></div>
         </div>
         <button class="jump" id="jump" type="button" hidden aria-label="Til bunnen">↓</button>
       </section>
@@ -57,18 +57,20 @@
     </main>
   </div>
 
-  <dialog class="settings" id="settings">
-    <form method="dialog" class="settings-head"><h2 data-i18n="settingsTitle">Innstillinger</h2><button class="icon-btn" aria-label="Lukk" data-i18n-aria="close">✕</button></form>
+  <dialog class="settings" id="settings" aria-labelledby="settings-title">
+    <form method="dialog" class="settings-head"><h2 id="settings-title" data-i18n="settingsTitle">Innstillinger</h2><button class="icon-btn" aria-label="Lukk" data-i18n-aria="close">✕</button></form>
     <div class="tabs" role="tablist">
       <button type="button" role="tab" data-tab="models" aria-selected="true" data-i18n="tabModels">Modeller</button>
       <button type="button" role="tab" data-tab="documents" aria-selected="false" data-i18n="documentsTab">Dokumenter</button>
       <button type="button" role="tab" data-tab="skills" aria-selected="false" data-i18n="skillsTab">Kommandoer</button>
       <button type="button" role="tab" data-tab="performance" aria-selected="false" data-i18n="tabPerformance">Ytelse</button>
+      <button type="button" role="tab" data-tab="diagnostics" aria-selected="false" data-i18n="diagnosticsTab">Diagnose</button>
     </div>
     <div class="tab-body" id="tab-models"></div>
     <div class="tab-body" id="tab-documents" hidden></div>
     <div class="tab-body" id="tab-skills" hidden></div>
     <div class="tab-body" id="tab-performance" hidden></div>
+    <div class="tab-body" id="tab-diagnostics" hidden></div>
   </dialog>
 
   <div class="drop-hint" id="drop-hint" hidden data-i18n="dropHere">Slipp filen for å legge den ved</div>
