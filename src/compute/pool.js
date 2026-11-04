@@ -1,9 +1,22 @@
 // Main-thread side of the worker pool: spawns SPMD workers, issues one command per token via shared atomics
 // (no postMessage per token), and exposes the same interface as RefModel so generate() works unchanged.
+import os from 'node:os';
 import { Worker } from 'node:worker_threads';
 import { modelConfig } from '../model/config.js';
 import { CTRL, CMD_TOKEN, CMD_EXIT, CMD_KV_EXPORT, CMD_KV_IMPORT, MAX_BATCH, allocShared } from './layout.js';
 import { probeWasmFeatures } from './wasm/features.js';
+
+/**
+ * Barrier/command wait strategy. Spinning is fastest when every worker has a core to itself, but when the machine has
+ * spare logical processors (hyperthreads) a spinning worker can sit on the sibling of a busy core and slow it down,
+ * while sleeping workers let the OS spread the threads. Measured on a 6-core/12-thread laptop (5 interleaved rounds,
+ * Qwen3-4B Q4_K_M, 6 workers): spin=0 median 5.90 tok/s vs spin=20000 median 4.55; on a 4-vCPU VM with 4 workers
+ * spinning was ~20% faster. So: sleep immediately if there are at least 2 logical processors per worker, else spin.
+ * @param {number} workers @param {number} [logical]
+ */
+export function defaultSpin(workers, logical = os.availableParallelism?.() ?? os.cpus().length) {
+  return logical >= 2 * workers ? 0 : 20000;
+}
 
 export class PoolModel {
   /**
@@ -24,6 +37,8 @@ export class PoolModel {
     const cfg = this.cfg = modelConfig(g);
     this.ctx = Math.min(opts.ctx ?? 2048, cfg.nCtxTrain);
     this.n = Math.max(1, opts.workers ?? 1);
+    /** busy-wait iterations before a worker sleeps at a barrier / waits for a command (0 = sleep immediately) */
+    this.spin = opts.spin ?? defaultSpin(this.n);
     /** precision of the KV cache: f16 halves its memory (values are rounded to half precision) */
     this.kv = opts.kv ?? 'f32';
     if (this.kv !== 'f32' && this.kv !== 'f16') throw new Error(`kv must be f32 or f16 (got "${this.kv}")`);
@@ -57,7 +72,7 @@ export class PoolModel {
     this.exits = [];
     const ready = [];
     for (let id = 0; id < this.n; id++) {
-      const w = new Worker(url, { workerData: { id, n: this.n, cfg, tensors, path: g.path, ctx: this.ctx, shared: sh, spin: opts.spin ?? 20000, kernels: this.kernels, maxBatch: this.maxBatch, kvType: this.kv } });
+      const w = new Worker(url, { workerData: { id, n: this.n, cfg, tensors, path: g.path, ctx: this.ctx, shared: sh, spin: this.spin, kernels: this.kernels, maxBatch: this.maxBatch, kvType: this.kv } });
       this.workers.push(w);
       this.exits.push(new Promise((r) => w.once('exit', r)));
       ready.push(new Promise((resolve, reject) => {
