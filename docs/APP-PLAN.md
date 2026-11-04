@@ -117,6 +117,8 @@ Why BM25 first: it needs no model, no extra RAM, works on the locked-down machin
 
 ## 7. Milestones
 
+**Status (2026-11-04):** A0 done. A1 built and tested against the synthetic model (server, API, streaming chat, stop/continue/regenerate, context meter, prefill progress, settings, light/dark, phone width); what is still open for A1 is the manual check on the laptop with the NB Llama 8B (`docs/APP-CHECKS.md`). Math (KaTeX) is deferred. Chats live only in the page until A2. Start with `npm run app` (or `node app/main.js --data <folder>`).
+
 Every milestone leaves the app runnable and tested. S/M/L = relative size.
 
 - **A0 Foundations (S).** `app/` skeleton; zero-dep HTTP server with token + Origin checks; static serving; SSE channel; config + data folder; launcher (Edge `--app`, free port, single instance, heartbeat shutdown); `node --test` setup; a synthetic tiny model fixture so tests never need real models. *Done when:* `node app/main.js` opens a blank styled page that talks to the API; tests pass.

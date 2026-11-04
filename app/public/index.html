@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="nb">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Zerochat</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23d97757'/%3E%3Cpath d='M9 11h14l-9 10h9' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <div class="app" id="app">
+    <aside class="sidebar" id="sidebar">
+      <div class="side-top">
+        <button class="btn-new" id="btn-new" type="button"><span class="ico">＋</span><span data-i18n="newChat">Ny samtale</span></button>
+      </div>
+      <nav class="chat-list" id="chat-list" aria-label="Samtaler"></nav>
+      <div class="side-bottom">
+        <button class="side-link" id="btn-settings" type="button"><span class="ico">⚙</span><span data-i18n="settings">Innstillinger</span></button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <button class="icon-btn" id="btn-sidebar" type="button" aria-label="Vis/skjul sidepanel" data-i18n-aria="sidebarToggle">☰</button>
+        <div class="model-picker">
+          <button class="model-btn" id="model-btn" type="button" aria-haspopup="listbox" aria-expanded="false"><span id="model-name">…</span><span class="caret">▾</span></button>
+          <ul class="model-menu" id="model-menu" role="listbox" hidden></ul>
+        </div>
+        <div class="grow"></div>
+        <span class="status" id="status" aria-live="polite"></span>
+      </header>
+
+      <section class="scroller" id="scroller">
+        <div class="thread" id="thread">
+          <div class="welcome" id="welcome">
+            <h1 data-i18n="greeting">Hva kan jeg hjelpe deg med?</h1>
+            <div class="starters" id="starters"></div>
+            <p class="notice" id="no-model" hidden></p>
+          </div>
+          <div class="messages" id="messages"></div>
+        </div>
+        <button class="jump" id="jump" type="button" hidden aria-label="Til bunnen">↓</button>
+      </section>
+
+      <footer class="composer-wrap">
+        <form class="composer" id="composer" autocomplete="off">
+          <textarea id="input" rows="1" placeholder="Skriv en melding…" data-i18n-ph="inputPlaceholder"></textarea>
+          <button class="send" id="send" type="submit" aria-label="Send" disabled>↑</button>
+        </form>
+        <div class="meter" id="meter" aria-live="off"><div class="meter-bar"><div class="meter-fill" id="meter-fill"></div></div><span id="meter-text"></span></div>
+      </footer>
+    </main>
+  </div>
+
+  <dialog class="settings" id="settings">
+    <form method="dialog" class="settings-head"><h2 data-i18n="settingsTitle">Innstillinger</h2><button class="icon-btn" aria-label="Lukk" data-i18n-aria="close">✕</button></form>
+    <div class="tabs" role="tablist">
+      <button type="button" role="tab" data-tab="models" aria-selected="true" data-i18n="tabModels">Modeller</button>
+      <button type="button" role="tab" data-tab="performance" aria-selected="false" data-i18n="tabPerformance">Ytelse</button>
+    </div>
+    <div class="tab-body" id="tab-models"></div>
+    <div class="tab-body" id="tab-performance" hidden></div>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+
+  <script src="vendor/marked.min.js"></script>
+  <script src="vendor/highlight.min.js"></script>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
