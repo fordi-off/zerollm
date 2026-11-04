@@ -1,0 +1,6 @@
+models/
+*.gguf
+bench-out/
+node_modules/
+dist/
+*.kvcache
