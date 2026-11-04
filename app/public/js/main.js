@@ -11,7 +11,7 @@ const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls)
 
 const S = {
   models: [], model: null, settings: null, messages: [], // messages: [{role, content, ...extras from the file, node, bubble}]
-  chatId: null, chatName: null, idleWaiters: [],
+  chatId: null, chatName: null, idleWaiters: [], indexing: null, // indexing: {filename, done, total} while a document is being indexed (chat is locked)
   busy: false, runId: null, waiting: false, current: null, // current: {msg, bubble, status, bar}
   stickBottom: true,
 };
@@ -171,9 +171,25 @@ function showProgress(text, fraction) {
 }
 function hideProgress(c = S.current) { if (c?.status) { c.status.remove(); c.status = null; } }
 
+// ---------- lock while a document is indexed ----------
+function applyLock() {
+  const on = !!S.indexing;
+  $('app').classList.toggle('locked', on);
+  for (const id of ['input', 'btn-attach', 'btn-slash', 'model-btn']) $(id).disabled = on;
+  $('lock-banner').hidden = !on;
+  if (on) {
+    const { filename, done, total } = S.indexing;
+    $('lock-text').textContent = t('indexingLock', { name: filename, done, total: total || '…' });
+    $('lock-fill').style.width = total ? `${Math.round((done / total) * 100)}%` : '4%';
+    closeMenu();
+  } else $('input').focus();
+  updateSendEnabled();
+}
+
 // ---------- sending ----------
 function updateSendEnabled() {
   const btn = $('send');
+  if (S.indexing) { btn.disabled = true; btn.classList.remove('stop'); btn.textContent = '↑'; return; }
   if (S.busy) { btn.disabled = false; btn.classList.add('stop'); btn.textContent = '■'; btn.setAttribute('aria-label', t('stop')); return; }
   btn.classList.remove('stop'); btn.textContent = '↑'; btn.setAttribute('aria-label', t('send'));
   btn.disabled = !(S.model && currentModel()?.supported && $('input').value.trim());
@@ -193,11 +209,12 @@ async function startRun() {
   scrollToBottom(true); S.stickBottom = true;
   const history = S.messages.slice(0, -1).map(apiMsg);
   try { await call('send_message', { model: S.model, messages: history, chatId: S.chatId }); }
-  catch (e) { finishRun(); setMeta(reply, e.message === 'busy' ? t('busy') : `${t('error')}: ${e.message}`, 'err'); }
+  catch (e) { finishRun(); setMeta(reply, e.message === 'busy' ? t('busy') : e.message === 'indexing' ? t('indexingBlocked') : `${t('error')}: ${e.message}`, 'err'); }
 }
 
 async function sendDraft(raw) {
   if (S.busy || !raw.trim()) return;
+  if (S.indexing) { toast(t('indexingBlocked')); return; }
   const { text, commands } = extractCommands(raw);
   if (!text) { toast(t('writeAfterCommand')); return; }
   const user = { role: 'user', content: text.trim() };
@@ -297,7 +314,12 @@ function ours(d) {
 }
 const events = {
   docprogress(d) { onDocProgress(d); },
-  docindex(d) { onDocIndex(d); },
+  docindex(d) {
+    onDocIndex(d);
+    if (d.state === 'running') S.indexing = { filename: d.filename ?? '', done: d.done ?? 0, total: d.total ?? 0 };
+    else { if (d.state === 'error') toast(`${t('indexingError')}: ${d.message}`); S.indexing = null; refreshChips(); }
+    applyLock();
+  },
   download(d) { if (onDownloadEvent(d)) refreshState().catch(() => {}); },
   phase(d) {
     if (!ours(d)) return;
@@ -405,15 +427,20 @@ async function init() {
   window.__copyLabel = t('copy');
   initSettings({ refreshState, refreshCommands: loadCommands, getChatId: () => S.chatId, getModel: () => S.model, refreshDocs: refreshChips, applyLanguage: async (lang) => { await call('set_language', { lang }); await loadStrings(lang); refreshChatList(); window.__copyLabel = t('copy'); renderStarters(); renderModelPicker(); setMeter(0, S.settings?.contextWindow ?? 0); } });
   initChatList({ open: openChat, deleted: (id) => { if (id === S.chatId) newChat(); }, renamed: (id, name) => { if (id === S.chatId) S.chatName = name; } });
-  initDocuments({ getChatId: () => S.chatId, ensureChat, toast, onChange: () => updateMeter() });
+  initDocuments({ getChatId: () => S.chatId, ensureChat, toast, isLocked: () => !!S.indexing, onChange: () => updateMeter() });
   wireUi(); renderStarters(); refreshChatList(); loadCommands();
   initCommandMenu({ inputEl: $('input'), menuEl: $('cmd-menu'), afterInsert: () => { autoGrow(); updateSendEnabled(); updateMeter(); } });
   $('btn-slash').addEventListener('click', () => { loadCommands().then(() => { if (!openAll()) toast(t('noCommands')); }); $('input').focus(); });
-  S.models = initial.models; S.settings = initial.settings;
+  S.models = initial.models; S.settings = initial.settings; S.indexing = initial.indexing;
   S.model = initial.models.find((m) => m.filename === initial.lastModel && m.supported)?.filename ?? initial.models.find((m) => m.supported && m.active)?.filename ?? null;
   renderModelPicker(); setMeter(0, initial.settings.contextWindow);
   listen(events, { onConnection: (ok) => { if (!ok) $('status').textContent = t('openFromShortcut'); else if (!S.busy) $('status').textContent = ''; } });
-  $('input').focus();
+  applyLock();
 }
+
+window.addEventListener('unhandledrejection', (e) => {
+  const m = String(e.reason?.message ?? '');
+  if (m === 'indexing') { toast(t('indexingBlocked')); e.preventDefault(); } else if (m === 'busy') { toast(t('busy')); e.preventDefault(); }
+});
 
 init().catch((e) => { document.body.textContent = `${e.message}`; });

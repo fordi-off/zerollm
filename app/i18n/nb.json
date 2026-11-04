@@ -138,5 +138,8 @@
   "indexNow": "Indekser dokumenter",
   "indexed": "søkeindeks {done}/{total}",
   "indexing": "Lager søkeindeks… {done}/{total}",
-  "noIndex": "kun nøkkelord"
+  "noIndex": "kun nøkkelord",
+  "indexingLock": "Lager søkeindeks for «{name}»… {done}/{total}. Chat og modeller er låst til det er ferdig.",
+  "indexingBlocked": "Vent til indekseringen av dokumentet er ferdig.",
+  "indexingError": "Indekseringen feilet"
 }

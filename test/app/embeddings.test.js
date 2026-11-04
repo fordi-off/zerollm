@@ -82,3 +82,58 @@ test('without an embedding model nothing is indexed and everything still works; 
     assert.equal((await t.call('embedding_status')).missing, 0);
   } finally { await t.close(); }
 });
+
+test('while a document is being indexed, chat, summaries and model changes are refused; they work again afterwards', async () => {
+  const t = await startTestApp({ ctx: 4096, models: [{ name: 'tiny-llama.gguf', arch: 'llama' }, EMBED] });
+  try {
+    const chat = (await t.call('save_chat', { name: 'L', model: 'tiny-llama.gguf', messages: [] })).id;
+    const big = 'hello world og kommune barnehage skole. '.repeat(1200); // enough chunks to keep the encoder busy for a moment
+    const r = await t.call('add_document', { chatId: chat, filename: 'big.txt', content: big });
+    assert.equal(r.indexing, true);
+    const st = await t.call('state');
+    assert.ok(st.indexing && st.indexing.filename === 'big.txt', 'state reports the running index job');
+    const msg = [{ role: 'user', content: 'Hei' }];
+    await assert.rejects(t.call('send_message', { model: 'tiny-llama.gguf', messages: msg, chatId: chat }), /indexing/);
+    await assert.rejects(t.call('continue_message', { model: 'tiny-llama.gguf', messages: msg }), /indexing/);
+    await assert.rejects(t.call('summarize_document', { docId: r.id, model: 'tiny-llama.gguf' }), /indexing/);
+    await assert.rejects(t.call('set_context_window', { value: 2048 }), /indexing/);
+    await assert.rejects(t.call('unload_model'), /indexing/);
+    await assert.rejects(t.call('delete_model', { filename: 'tiny-llama.gguf' }), /indexing/);
+    await until(async () => (await t.call('state')).indexing === null, 60000);
+    const d = (await t.call('document_library'))[0]; assert.equal(d.embedded, d.chunks);
+    const ev = await t.runChat('tiny-llama.gguf', msg, { extra: { chatId: chat } });
+    assert.equal(ev.at(-1).type, 'done');
+  } finally { await t.close(); }
+});
+
+test('a document added while a reply is being written is indexed right after it; a second one waits for the first', async () => {
+  const t = await startTestApp({ ctx: 4096, models: [{ name: 'tiny-llama.gguf', arch: 'llama' }, EMBED] });
+  try {
+    const chat = (await t.call('save_chat', { name: 'P', model: 'tiny-llama.gguf', messages: [] })).id;
+    let added = null;
+    await t.runChat('tiny-llama.gguf', [{ role: 'user', content: 'Fortell' }], {
+      after: async (ev) => { if (ev.type === 'chunk' && !added) added = await t.call('add_document', { chatId: chat, filename: 'late.txt', content: TEXT }); },
+    });
+    assert.equal(added.indexing, false); assert.equal(added.deferred, true);
+    await until(async () => { const d = (await t.call('document_library'))[0]; return d?.embedded === d?.chunks && d.chunks > 0; }, 30000);
+    const a = await t.call('add_document', { chatId: chat, filename: 'a.txt', content: TEXT.repeat(40) });
+    const b = await t.call('add_document', { chatId: chat, filename: 'b.txt', content: TEXT });
+    assert.equal(a.indexing, true); assert.equal(b.indexing, false); assert.equal(b.deferred, true);
+    await until(async () => { const lib = await t.call('document_library'); return lib.length === 3 && lib.every((d) => d.embedded === d.chunks) && (await t.call('state')).indexing === null; }, 60000);
+  } finally { await t.close(); }
+});
+
+test('installing the search model (download finished) indexes the documents that have no vectors yet', async () => {
+  const http = await import('node:http');
+  const server = http.createServer((req, res) => { res.writeHead(200, { 'Content-Length': EMBED.raw.length }); res.end(EMBED.raw); });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const catalog = [{ id: 'emb', kind: 'embed', filename: 'dl-embed.gguf', displayName: 'emb', sizeBytes: EMBED.raw.length, ramGB: 0.1, url: `http://127.0.0.1:${server.address().port}/e.gguf` }];
+  const t = await startTestApp({ ctx: 4096, catalog });
+  try {
+    const chat = (await t.call('save_chat', { name: 'D', model: null, messages: [] })).id;
+    const r = await t.call('add_document', { chatId: chat, filename: 'k.txt', content: TEXT });
+    assert.equal(r.indexing, false);
+    await t.call('download_start', { ids: ['emb'] });
+    await until(async () => { const d = (await t.call('document_library'))[0]; return d.embedded === d.chunks && d.chunks > 0; }, 30000);
+  } finally { await t.close(); server.close(); }
+});

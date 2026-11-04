@@ -52,10 +52,10 @@ export function createEmbeddings({ paths, getConfig, log }) {
       catch (err) { log.error(`embedding the question failed, using keyword search only: ${err.message}`); return null; }
     },
     /** Embed many chunk texts with a temporary pool; frees its memory afterwards. */
-    async embedTexts(texts, { onProgress, signal } = {}) {
+    async embedTexts(texts, { onProgress, signal, threads: wanted } = {}) {
       const file = modelFile(); if (!file) throw new Error('Ingen søkemodell (embedding) er installert.');
       await closeResident(); // one pool at a time
-      const threads = Math.max(1, Math.min(getConfig().n_threads ?? 2, 4));
+      const threads = Math.max(1, wanted ?? Math.min(getConfig().n_threads ?? 2, 4));
       const e = await loadEmbedder(path.join(paths.modelsDir, file), { threads });
       try {
         const out = []; const BATCH = threads * 4;
