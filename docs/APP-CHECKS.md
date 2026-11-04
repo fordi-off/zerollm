@@ -42,3 +42,11 @@ Run `npm run app -- --data <folder containing models/>` (or `node app/main.js`).
 - [ ] After that, ask about a fact from the very beginning: the answer should still know it (from the summary). **Note how long the summary step and the following "Leser teksten" take** (8B with and without a small second model installed, e.g. Llama 3.2 1B).
 - [ ] Choose a "Modell for oppsummering" in Settings and confirm app.log says `summarizing with <that file>`; with too little free RAM it should fall back to the chat model (log line) instead of failing.
 - [ ] Editing an early message in a summarized chat does not use the stale summary.
+
+## A6 - documents
+- [ ] Attach a Norwegian .txt/.md (paperclip or drag it onto the window): a chip appears; click the name to switch it off/on, the x removes it.
+- [ ] Ask something that is in the document: the answer uses it and "Kilder · n utdrag" shows the excerpts. Ask something that is NOT in it: the model should say so.
+- [ ] **Note the wait** for the first token with 4 excerpts on the 8B model (the context meter shows the prompt size); try 2 excerpts in Innstillinger > Dokumenter. A follow-up question in the same chat should be quicker because the history is cached.
+- [ ] A big file (1-2 MB) indexes within a second or two and the app stays responsive.
+- [ ] Settings > Dokumenter: library lists the file; "Vis tekst" shows it; "Lag sammendrag" produces a summary (note how long it takes with and without a small second model); delete removes it from every chat.
+- [ ] Skibeti37's `documents/*.json` copied into this data folder show up and answer questions.

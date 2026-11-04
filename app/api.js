@@ -9,10 +9,11 @@ import { defaultConfig, CONTEXT_STEPS } from './config.js';
 import { listModels, modelPath } from './models.js';
 import { createChatStore } from './chats.js';
 import { createSkills } from './skills.js';
+import { createDocuments } from './documents.js';
 import { createDownloader, freeDiskBytes } from './downloader.js';
 import { CATALOG } from './catalog.js';
 import { createSummarizer } from './summarizer.js';
-import { buildMessages, fitToContext, looksLooped, stablePrefixIds, RECENT_KEEP, SUMMARIZE_AT, SUMMARY_PREFIX, SAMPLING, DEFAULT_MAX_TOKENS, CONTINUATION_PROMPT } from './chat-core.js';
+import { buildMessages, fitToContext, looksLooped, stablePrefixIds, withExcerpts, sourcesOf, RECENT_KEEP, SUMMARIZE_AT, SUMMARY_PREFIX, SAMPLING, DEFAULT_MAX_TOKENS, CONTINUATION_PROMPT } from './chat-core.js';
 
 const I18N_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'i18n');
 
@@ -20,6 +21,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
   let runSeq = 0;
   let current = null; // {id, abort: {aborted}}
   const chatStore = createChatStore(paths);
+  const docs = createDocuments(paths, chatStore);
   const skills = createSkills(paths);
   const summarizer = createSummarizer({ paths, host, getConfig, log });
   skills.seed();
@@ -46,6 +48,15 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
     if (!c.summary || c.summarized_count < 1 || c.summarized_count > historyLength - 1) return { summary: '', summarized: 0 };
     return { summary: c.summary, summarized: c.summarized_count };
   }
+  /** Excerpts of the chat's active documents for the last question (short follow-ups also use the question before). */
+  function excerptsFor(chatId, history, countTokens, ctxMax) {
+    if (!chatId) return [];
+    const users = history.filter((m) => m.role === 'user').map((m) => String(m.content));
+    const last = users.at(-1) ?? ''; let query = last;
+    if (last.split(/\s+/).length < 5 && users.length > 1) query = `${users.at(-2)} ${last}`;
+    try { return docs.retrieve(chatId, query, { k: getConfig().doc_chunks ?? 4, budgetTokens: Math.min(1500, Math.round(ctxMax * 0.25)), countTokens }); } catch { return []; }
+  }
+
   /** System-prompt additions after the base prompt: command instructions, then the rolling summary (the language reminder stays last). */
   const extraText = (history, summary) => [extraFor(history), summary ? SUMMARY_PREFIX + summary : ''].filter(Boolean).join('\n\n');
 
@@ -69,7 +80,8 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
       const count = (m) => engine.countPromptTokens(m);
       const withCont = (h) => (continuation ? [...h, { role: 'user', content: CONTINUATION_PROMPT }] : h);
       let { summary, summarized } = summaryState(chatId, history.length);
-      const build = () => buildMessages(withCont(history.slice(summarized)), { extraSystem: extraText(history, summary) });
+      const excerpts = continuation ? [] : excerptsFor(chatId, history, (t) => engine.countTokens(t), ctxMax);
+      const build = () => withExcerpts(buildMessages(withCont(history.slice(summarized)), { extraSystem: extraText(history, summary) }), excerpts);
 
       // Long conversation: fold the older messages into the rolling summary (cached on disk), keep the newest ones verbatim.
       const budget = ctxMax - DEFAULT_MAX_TOKENS - 64;
@@ -117,7 +129,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
       log.info(`done: ${stats.generated} tokens, prefill ${(stats.prefillMs / 1000).toFixed(1)}s (${stats.cachedTokens} cached of ${stats.promptTokens}), decode ${tokPerSec.toFixed(1)} tok/s - ${looped ? 'looped' : stats.stopReason}`);
       send('done', {
         stopReason: looped ? 'looped' : stats.stopReason, truncated: stats.stopReason === 'length', stopped: abort.aborted && !looped, looped,
-        trimmed: fitted.trimmed, compressed: summarized > 0, prefixCache, generated: stats.generated, promptTokens: stats.promptTokens, cachedTokens: stats.cachedTokens,
+        trimmed: fitted.trimmed, compressed: summarized > 0, sources: sourcesOf(excerpts), prefixCache, generated: stats.generated, promptTokens: stats.promptTokens, cachedTokens: stats.cachedTokens,
         prefillMs: stats.prefillMs, decodeMs: stats.decodeMs, tokPerSec, contextUsed, contextMax: ctxMax, model,
       });
     } catch (e) {
@@ -138,7 +150,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
       const models = listModels(paths, cfg);
       return {
         language: cfg.language, models, lastModel: cfg.last_model, loaded: host.loadedName,
-        settings: { utilityModel: cfg.utility_model, contextWindow: cfg.context_window, threads: cfg.n_threads, contextSteps: CONTEXT_STEPS, maxThreads: os.availableParallelism?.() ?? os.cpus().length, defaultThreads: defaultThreads() },
+        settings: { docChunks: cfg.doc_chunks ?? 4, utilityModel: cfg.utility_model, contextWindow: cfg.context_window, threads: cfg.n_threads, contextSteps: CONTEXT_STEPS, maxThreads: os.availableParallelism?.() ?? os.cpus().length, defaultThreads: defaultThreads() },
         system: { freeRam: os.freemem(), totalRam: os.totalmem() },
         busy: current !== null,
       };
@@ -187,6 +199,38 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
     async add_skill({ name, content }) { skills.add(name, content); return skills.list(); },
     async delete_skill({ id }) { skills.delete(id); return skills.list(); },
 
+    // ---- documents
+    async list_documents({ chatId }) { return docs.forChat(chatId); },
+    async available_documents({ chatId }) { return docs.available(chatId); },
+    async document_library() { return docs.library(); },
+    async add_document({ chatId, filename, content }) {
+      const r = docs.add(chatId, filename, content);
+      log.info(`document added: ${filename} (${r.chunks} chunks)`);
+      return { ...r, documents: docs.forChat(chatId) };
+    },
+    async attach_document({ chatId, docId }) { docs.attach(chatId, docId); return docs.forChat(chatId); },
+    async detach_document({ chatId, docId }) { docs.detach(chatId, docId); return docs.forChat(chatId); },
+    async toggle_document({ chatId, docId }) { return { active: docs.toggle(chatId, docId) }; },
+    async delete_document({ docId }) { docs.remove(docId); return { ok: true }; },
+    async preview_document({ docId }) { return docs.preview(docId); },
+    async set_doc_chunks({ value }) {
+      const v = Number(value); if (!Number.isInteger(v) || v < 1 || v > 10) throw new Error('invalid number of excerpts');
+      const cfg = getConfig(); cfg.doc_chunks = v; setConfig(cfg); return { ok: true };
+    },
+    /** Long job (minutes): summary of a whole document, with the small model when there is one. */
+    async summarize_document({ docId, model }) {
+      if (current) throw new Error('busy');
+      const parts = docs.textParts(docId);
+      if (!parts) throw new Error('document not found');
+      const id = ++runSeq; const abort = { aborted: false }; current = { id, abort, kind: 'summary' };
+      try {
+        if (!summarizer.pick(model) && model) await host.ensure(model);
+        const text = await summarizer.summarizeParts(parts, { chatFilename: model, signal: abort, onProgress: (done, total) => emit('docprogress', { docId, done, total }) });
+        if (text && !abort.aborted) docs.setSummary(docId, text);
+        return { summary: abort.aborted ? '' : text, aborted: abort.aborted };
+      } finally { current = null; }
+    },
+
     async list_chats() { return chatStore.list(); },
     async load_chat({ id }) { return chatStore.load(id); },
     async save_chat(p) { return { id: chatStore.save(p) }; },
@@ -217,7 +261,8 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
     async estimate_context({ model, messages, chatId }) {
       const tools = toolsFor(model);
       const { summary, summarized } = summaryState(chatId ?? null, messages.length);
-      const fitted = buildMessages(messages.slice(summarized), { extraSystem: extraText(messages, summary) });
+      const excerpts = excerptsFor(chatId ?? null, messages, (t) => tools.countTokens(t), Math.min(contextMax(), tools.cfg.nCtxTrain));
+      const fitted = withExcerpts(buildMessages(messages.slice(summarized), { extraSystem: extraText(messages, summary) }), excerpts);
       return { contextUsed: tools.countPromptTokens(fitted), contextMax: Math.min(contextMax(), tools.cfg.nCtxTrain), compressed: summarized > 0 };
     },
 

@@ -43,8 +43,11 @@
       </section>
 
       <footer class="composer-wrap">
+        <div class="doc-chips" id="doc-chips" hidden></div>
         <div class="cmd-menu" id="cmd-menu" role="listbox" hidden></div>
         <form class="composer" id="composer" autocomplete="off">
+          <button class="slash attach" id="btn-attach" type="button" aria-label="Legg ved dokument" data-i18n-aria="attach">📎</button>
+          <input type="file" id="file-input" accept=".txt,.md,.markdown,.csv,.tsv,.json,.log,.html,.htm,.xml,.yml,.yaml,.srt,.rst,.tex,text/*" multiple hidden>
           <button class="slash" id="btn-slash" type="button" aria-label="Kommandoer" data-i18n-aria="commandsMenu">/</button>
           <textarea id="input" rows="1" placeholder="Skriv en melding…" data-i18n-ph="inputPlaceholder"></textarea>
           <button class="send" id="send" type="submit" aria-label="Send" disabled>↑</button>
@@ -58,14 +61,17 @@
     <form method="dialog" class="settings-head"><h2 data-i18n="settingsTitle">Innstillinger</h2><button class="icon-btn" aria-label="Lukk" data-i18n-aria="close">✕</button></form>
     <div class="tabs" role="tablist">
       <button type="button" role="tab" data-tab="models" aria-selected="true" data-i18n="tabModels">Modeller</button>
+      <button type="button" role="tab" data-tab="documents" aria-selected="false" data-i18n="documentsTab">Dokumenter</button>
       <button type="button" role="tab" data-tab="skills" aria-selected="false" data-i18n="skillsTab">Kommandoer</button>
       <button type="button" role="tab" data-tab="performance" aria-selected="false" data-i18n="tabPerformance">Ytelse</button>
     </div>
     <div class="tab-body" id="tab-models"></div>
+    <div class="tab-body" id="tab-documents" hidden></div>
     <div class="tab-body" id="tab-skills" hidden></div>
     <div class="tab-body" id="tab-performance" hidden></div>
   </dialog>
 
+  <div class="drop-hint" id="drop-hint" hidden data-i18n="dropHere">Slipp filen for å legge den ved</div>
   <div class="toast" id="toast" role="status" hidden></div>
 
   <script src="vendor/marked.min.js"></script>
