@@ -91,3 +91,20 @@ test('prefix reuse: second turn only prefills the new tokens and matches a fresh
   assert.equal(s3.prefilled, 1);
   await assert.rejects(collect(m, Array.from({ length: 200 }, () => 1), {}), /context window/);
 });
+
+test('streamReply never erases printed text with the progress-line escape (terminal regression)', async () => {
+  const { loadEngine, streamReply } = await import('../src/cli/common.js');
+  const { path: p } = tinyFile({ arch: 'qwen3', quant: 'q8_0', seed: 5 });
+  const eng = loadEngine(p, {});
+  const events = [];
+  const out = { write: (s) => events.push(['out', s]) };
+  const err = { write: (s) => events.push(['err', s]) };
+  // prompt longer than 8 tokens so the progress line is shown
+  const ids = Array.from({ length: 20 }, (_, i) => 10 + i);
+  await streamReply(eng, ids, { sample: () => 65, maxTokens: 5, signal: { aborted: false }, out, err, progress: true });
+  const firstOut = events.findIndex((e) => e[0] === 'out');
+  assert.ok(firstOut > 0, 'some text was printed after progress output');
+  assert.ok(events.slice(0, firstOut).some((e) => e[0] === 'err' && e[1].startsWith('\rprefill')), 'progress was shown');
+  assert.ok(events.slice(0, firstOut).some((e) => e[0] === 'err' && e[1] === '\r\x1b[K'), 'progress erased before text');
+  assert.ok(!events.slice(firstOut).some((e) => e[0] === 'err' && e[1].includes('\x1b[K')), 'nothing erased after text');
+});
