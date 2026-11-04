@@ -81,3 +81,21 @@ test('embedder: progress callback, jobs beyond the worker count, js kernels, bad
     assert.equal((await emb.embed(['hello']))[0].length, 256, 'still usable after a failed job');
   } finally { await emb.close(); }
 });
+
+import { spawnSync } from 'node:child_process';
+test('CLI: `embed --compare` accepts a Skibeti37 document or a plain list; `--selftest` runs', async () => {
+  const p = file('cli.gguf', { quant: 'q8_0', seed: 11 });
+  const emb = await loadEmbedder(p, { threads: 1 });
+  let v; try { v = await emb.embed(['hello world', 'kommune og barnehage']); } finally { await emb.close(); }
+  const items = [{ text: 'hello world', embedding: Array.from(v[0]) }, { text: 'kommune og barnehage', embedding: Array.from(v[1]) }];
+  fs.writeFileSync(path.join(tmp, 'list.json'), JSON.stringify(items));
+  fs.writeFileSync(path.join(tmp, 'doc.json'), JSON.stringify({ id: 'x', filename: 'x.txt', summary: '', chunks: items }));
+  for (const f of ['list.json', 'doc.json']) {
+    const r = spawnSync(process.execPath, ['bin/zerollm.js', 'embed', p, '--compare', path.join(tmp, f), '--n', '2'], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /accents stripped \(BERT default\): 1\.0000 {2}1\.0000/);
+  }
+  const s = spawnSync(process.execPath, ['bin/zerollm.js', 'embed', p, '--selftest'], { encoding: 'utf8' });
+  assert.equal(s.status, 0, s.stderr);
+  assert.match(s.stdout, /triples ranked correctly/);
+});

@@ -19,6 +19,7 @@ export async function loadEmbedder(path, { threads, maxSeq = DEFAULT_MAX_SEQ, ke
   const tensors = {};
   for (const t of g.tensors) tensors[t.name] = { name: t.name, type: t.type, dims: t.dims, absOffset: t.absOffset, nBytes: t.nBytes, nElements: t.nElements };
   const url = new URL('./embed-worker.js', import.meta.url);
+  let alive = null;
   const workers = []; const idle = []; const pending = new Map(); const queue = []; let nextId = 1; let closed = false; let failure = null;
   const t0 = performance.now();
   const dispatch = () => { while (queue.length && idle.length) { const w = idle.pop(); const job = queue.shift(); pending.get(job.id).worker = w; w.postMessage({ type: 'job', id: job.id, ids: job.ids }); } };
@@ -43,7 +44,6 @@ export async function loadEmbedder(path, { threads, maxSeq = DEFAULT_MAX_SEQ, ke
   try { await Promise.all(ready); } catch (e) { await close(); throw e; } finally { clearInterval(keep); }
 
   // workers are unref'd (a forgotten close() must not hang the process), so keep the event loop alive while jobs are outstanding
-  let alive = null;
   const syncAlive = () => { if (pending.size > 0 && !alive) alive = setInterval(() => {}, 1000); else if (pending.size === 0 && alive) { clearInterval(alive); alive = null; } };
   function run(ids) {
     if (closed) return Promise.reject(new Error('embedder is closed'));
