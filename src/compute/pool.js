@@ -2,13 +2,13 @@
 // (no postMessage per token), and exposes the same interface as RefModel so generate() works unchanged.
 import { Worker } from 'node:worker_threads';
 import { modelConfig } from '../model/config.js';
-import { CTRL, CMD_TOKEN, CMD_EXIT, allocShared } from './layout.js';
+import { CTRL, CMD_TOKEN, CMD_EXIT, MAX_BATCH, allocShared, kvOffset } from './layout.js';
 import { probeWasmFeatures } from './wasm/features.js';
 
 export class PoolModel {
   /**
    * @param {import('../gguf/reader.js').GGUFFile} g
-   * @param {{ctx?: number, workers?: number, spin?: number, kernels?: 'auto'|'wasm'|'js', onProgress?: (done: number, total: number) => void}} [opts]
+   * @param {{ctx?: number, workers?: number, spin?: number, kernels?: 'auto'|'wasm'|'js', maxBatch?: number, onProgress?: (done: number, total: number) => void}} [opts]
    * @returns {Promise<PoolModel>}
    */
   static async create(g, opts = {}) {
@@ -31,7 +31,10 @@ export class PoolModel {
     this.failed = null;
     this.closed = false;
     this.issued = 0;
-    const sh = this.shared = allocShared(cfg, this.ctx);
+    /** largest prompt batch one pass may carry (weights are read once per batch) */
+    this.maxBatch = Math.max(1, Math.min(opts.maxBatch ?? 16, MAX_BATCH));
+    const sh = this.shared = allocShared(cfg, this.ctx, this.maxBatch);
+    this.kvView = new Float32Array(sh.kv);
     this.ctrl = new Int32Array(sh.ctrl);
     this.x = new Float32Array(sh.x);
     this.logits = new Float32Array(sh.logits);
@@ -51,7 +54,7 @@ export class PoolModel {
     this.exits = [];
     const ready = [];
     for (let id = 0; id < this.n; id++) {
-      const w = new Worker(url, { workerData: { id, n: this.n, cfg, tensors, path: g.path, ctx: this.ctx, shared: sh, spin: opts.spin ?? 20000, kernels: this.kernels } });
+      const w = new Worker(url, { workerData: { id, n: this.n, cfg, tensors, path: g.path, ctx: this.ctx, shared: sh, spin: opts.spin ?? 20000, kernels: this.kernels, maxBatch: this.maxBatch } });
       this.workers.push(w);
       this.exits.push(new Promise((r) => w.once('exit', r)));
       ready.push(new Promise((resolve, reject) => {
@@ -94,15 +97,27 @@ export class PoolModel {
    * @param {{logits?: boolean}} [opts] logits:false skips the output projection (prompt prefill)
    * @returns {Promise<Float32Array|null>} logits view over shared memory (valid until the next forward call)
    */
-  async forward(token, opts = {}) {
+  forward(token, opts = {}) { return this.forwardBatch([token], opts); }
+
+  /**
+   * Run several tokens (at consecutive positions) in ONE pass over the weights. Logits, if requested, are for the
+   * last token only.
+   * @param {ArrayLike<number>} tokens at most `maxBatch` of them
+   * @param {{logits?: boolean}} [opts]
+   * @returns {Promise<Float32Array|null>}
+   */
+  async forwardBatch(tokens, opts = {}) {
     if (this.failed) throw this.failed;
     if (this.closed) throw new Error('model is closed');
+    const B = tokens.length;
+    if (B < 1 || B > this.maxBatch) throw new Error(`batch of ${B} tokens (max ${this.maxBatch})`);
     const pos = this.tokens.length;
-    if (pos >= this.ctx) throw new Error(`context full (${this.ctx} tokens)`);
-    if (!(token >= 0 && token < this.cfg.vocabSize)) throw new Error(`token id ${token} out of range`);
+    if (pos + B > this.ctx) throw new Error(`context full (${this.ctx} tokens)`);
+    for (let i = 0; i < B; i++) if (!(tokens[i] >= 0 && tokens[i] < this.cfg.vocabSize)) throw new Error(`token id ${tokens[i]} out of range`);
     const { ctrl, n } = this;
     const want = opts.logits === false ? 0 : 1;
-    Atomics.store(ctrl, CTRL.TOKEN, token);
+    for (let i = 0; i < B; i++) Atomics.store(ctrl, CTRL.TOKENS + i, tokens[i]);
+    Atomics.store(ctrl, CTRL.BATCH, B);
     Atomics.store(ctrl, CTRL.POS, pos);
     Atomics.store(ctrl, CTRL.WANT_LOGITS, want);
     Atomics.store(ctrl, CTRL.CMD, CMD_TOKEN);
@@ -122,9 +137,18 @@ export class PoolModel {
         if (r.async) await r.value;
       }
     } finally { clearInterval(keepAlive); }
-    this.tokens.push(token);
+    for (let i = 0; i < B; i++) this.tokens.push(tokens[i]);
     return want ? this.logits : null;
   }
+
+  /** Whole [pos][kvDim] region of one layer's K (isV=0) or V (isV=1) cache, as a live view (for the prefix cache). */
+  kvRegion(layer, isV) {
+    const kvDim = this.cfg.nHeadKv * this.cfg.headDim;
+    return this.kvView.subarray(kvOffset(layer, isV, this.ctx, kvDim), kvOffset(layer, isV, this.ctx, kvDim) + this.ctx * kvDim);
+  }
+
+  /** After the KV regions were filled from a prefix cache: declare that the model now holds exactly `ids`. */
+  restorePrefix(ids) { this.tokens = Array.from(ids); }
 
   /** Roll the KV cache back to `n` positions (the cache itself is positional, so this is just bookkeeping). */
   truncate(n) { if (n < this.tokens.length) this.tokens.length = n; }

@@ -8,11 +8,16 @@ export const CTRL = Object.freeze({
   POS: 3,
   WANT_LOGITS: 4,
   ERROR: 5,     // worker id + 1 of the first failing worker
-  CMD: 6,       // 0 = run token, 1 = exit
+  CMD: 6,       // 0 = run tokens, 1 = exit
+  BATCH: 7,     // number of tokens in this command (1 = decode)
   BAR_COUNT: 16,
   BAR_GEN: 32,
-  SIZE: 48,
+  TOKENS: 48,   // token ids of the batch (up to MAX_BATCH)
+  SIZE: 48 + 64,
 });
+
+/** Largest prompt batch a pool can be asked to run in one pass. */
+export const MAX_BATCH = 64;
 
 export const CMD_TOKEN = 0;
 export const CMD_EXIT = 1;
@@ -40,13 +45,14 @@ export function kvOffset(layer, isV, ctx, kvDim, pos = 0) {
 }
 
 /** Allocate the SharedArrayBuffers a pool needs. */
-export function allocShared(cfg, ctx) {
+export function allocShared(cfg, ctx, maxBatch = 1) {
   const qDim = cfg.nHead * cfg.headDim;
   const kvDim = cfg.nHeadKv * cfg.headDim;
   const f32 = (n) => new SharedArrayBuffer(Math.max(1, n) * 4);
   return {
     ctrl: new SharedArrayBuffer(CTRL.SIZE * 4),
-    x: f32(cfg.nEmbd), q: f32(qDim), k: f32(kvDim), v: f32(kvDim), att: f32(qDim), hb: f32(cfg.nFF), logits: f32(cfg.vocabSize),
+    x: f32(cfg.nEmbd * maxBatch), q: f32(qDim * maxBatch), k: f32(kvDim * maxBatch), v: f32(kvDim * maxBatch), att: f32(qDim * maxBatch),
+    hb: f32(cfg.nFF * maxBatch), logits: f32(cfg.vocabSize),
     kv: f32(cfg.nLayer * 2 * ctx * kvDim),
   };
 }

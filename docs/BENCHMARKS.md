@@ -59,3 +59,20 @@ Per-token profile of worker 0 (`ZEROLLM_PROFILE=1`), ms/token:
 | js 4 threads | 283.4 | 221.2 | 0.2 | 2.0 | 57.4 | 2.6 |
 
 Takeaways: the kernel is ~90% of single-thread time at ~4.5 GB/s of weights per thread (instruction-bound, not memory-bound, so far below the DRAM ceiling); kernel time scales ~3.9x on 4 threads; barrier waits grow to ~14 ms/token (169 barriers, ~80 us each: load imbalance + VM scheduling jitter). Next levers: relaxed-SIMD dot / hoisting the f16 scale conversion in the kernel, fewer/cheaper barriers, quantizing activations once instead of per worker.
+
+### M7 (batched prefill), dev container, synthetic Qwen3-0.6B-shaped Q8_0 (random weights), wasm-simd, 96-token prompt
+
+`zerollm bench --kernels wasm --threads 1,4 --batch 1,8,16,32 --prompt-tokens 96 --n 8 --ctx 256`. 4-vCPU Xeon VM, NOT the target machine.
+
+| threads | batch | prefill tok/s | decode tok/s | prefill/decode |
+|---|---|---|---|---|
+| 1 | 1 (token by token) | 8.34 | 6.44 | 1.29x |
+| 1 | 8 | 19.41 | 6.49 | 2.99x |
+| 1 | 16 | 19.84 | 6.75 | 2.94x |
+| 1 | 32 | 18.23 | 6.62 | 2.75x |
+| 4 | 1 | 24.20 | 14.83 | 1.63x |
+| 4 | 8 | 42.33 | 13.61 | 3.11x |
+| 4 | 16 | 41.17 | 14.03 | 2.93x |
+| 4 | 32 | 39.36 | 14.91 | 2.64x |
+
+Batch 8-16 is the sweet spot (default 16). Matmul kernel time per prompt token drops from 135 ms (decode kernel) to 35 ms (1 thread). Profile of the batched path (ms/token): 1 thread: total 54.1 = kernels 34.9 + act-quantization 4.0 + attention 12.7 + other 2.4; 4 threads: total 23.4 = kernels 9.1 + quantization 4.1 + attention 3.9 + barriers 5.2 + other 1.1. Follow-ups: attention is still plain JS and grows with position (23% of 1-thread prefill at <100 tokens), and activation quantization (JS) is redone by every worker.

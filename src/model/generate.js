@@ -9,6 +9,27 @@ export function argmax(logits) {
 
 const yieldToEventLoop = () => new Promise((r) => setImmediate(r));
 
+
+/**
+ * Feed tokens `ids[from..]` through the model (batched when the model supports it). Returns the logits of the last
+ * token if `wantLogits`. Yields to the event loop between passes so Ctrl+C stays responsive.
+ * @returns {Promise<{logits: Float32Array|null, aborted: boolean}>}
+ */
+export async function prefillTokens(model, ids, { from = 0, wantLogits = true, signal, onProgress } = {}) {
+  const chunk = model.forwardBatch ? Math.max(1, model.maxBatch ?? 1) : 1;
+  let logits = null;
+  for (let i = from; i < ids.length;) {
+    if (signal?.aborted) return { logits: null, aborted: true };
+    const end = Math.min(ids.length, i + chunk);
+    const last = wantLogits && end === ids.length;
+    logits = chunk > 1 ? await model.forwardBatch(ids.slice(i, end), { logits: last }) : await model.forward(ids[i], { logits: last });
+    i = end;
+    onProgress?.(i - from, ids.length - from);
+    await yieldToEventLoop();
+  }
+  return { logits, aborted: false };
+}
+
 /** Length of the common prefix of two token arrays. */
 export function commonPrefix(a, b) {
   const n = Math.min(a.length, b.length);
@@ -46,13 +67,9 @@ export async function* generate(model, promptIds, opts = {}) {
   stats.stopReason = 'length';
 
   const t0 = performance.now();
-  let logits = null;
-  for (let i = reuse; i < promptIds.length; i++) {
-    if (opts.signal?.aborted) { stats.stopReason = 'aborted'; stats.prefillMs = performance.now() - t0; return; }
-    logits = await model.forward(promptIds[i], { logits: i === promptIds.length - 1 });
-    opts.onPrefillProgress?.(i + 1 - reuse, promptIds.length - reuse);
-    await yieldToEventLoop();
-  }
+  const pre = await prefillTokens(model, promptIds, { from: reuse, signal: opts.signal, onProgress: opts.onPrefillProgress });
+  let logits = pre.logits;
+  if (pre.aborted) { stats.stopReason = 'aborted'; stats.prefillMs = performance.now() - t0; return; }
   stats.prefillMs = performance.now() - t0;
   stats.prefilled = promptIds.length - reuse;
 

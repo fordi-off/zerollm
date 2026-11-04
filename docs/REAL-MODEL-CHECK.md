@@ -39,3 +39,17 @@ node bin/zerollm.js bench models/Qwen3-0.6B-Q8_0.gguf --kernels js,wasm --thread
 (`bench` may print "NO (differs ...)" for the output check: see docs/DECISIONS.md, M6 numerics; compare the text from step 1 instead.)
 
 3. Where the time goes (optional): set `ZEROLLM_PROFILE=1` (PowerShell: `$env:ZEROLLM_PROFILE=1`) before a `bench --kernels wasm --threads 6` run.
+
+## M7: batched prefill + system-prompt cache (after `git pull`)
+
+```
+node bin/zerollm.js bench models/Qwen3-0.6B-Q8_0.gguf --kernels wasm --threads 6 --batch 1,8,16,32 --prompt-tokens 128 --n 16
+```
+
+Expect prefill tok/s to be roughly 2-3x the decode tok/s at batch 8-16 (the "prefill/decode" column). Then the cache (use a system prompt of at least ~30 words; run the same command twice):
+
+```
+node bin/zerollm.js run models/Qwen3-0.6B-Q8_0.gguf --system "You are a careful assistant who always answers in complete sentences and explains each step of its reasoning clearly before giving a final answer." -p "What is the capital of France?" --temp 0 --n 30
+```
+
+First run ends with `system-prompt cache: saved`, the second with `system-prompt cache: hit` and the same answer; a `models\.zerollm-cache` folder appears (safe to delete).

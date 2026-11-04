@@ -1,9 +1,9 @@
 import fs from 'node:fs';
 import { parseArgs, num } from '../util/args.js';
 import { encodeChat } from '../tokenizer/chat-templates.js';
-import { loadEngine, samplerFromFlags, templateOptions, installAbort, streamReply, formatStats, SAMPLER_HELP } from './common.js';
+import { loadEngine, samplerFromFlags, templateOptions, installAbort, streamReply, formatStats, usePrefixCache, SAMPLER_HELP } from './common.js';
 
-export const help = `run <model.gguf> -p "prompt" [--n 256] [--system "..."] [--ctx 2048] [--threads N] [--kernels auto|wasm|js] [--raw] [--think|--no-think] [--stop "str"] ${SAMPLER_HELP}`;
+export const help = `run <model.gguf> -p "prompt" [--n 256] [--system "..."] [--ctx 2048] [--threads N] [--kernels auto|wasm|js] [--raw] [--think|--no-think] [--stop "str"] [--no-cache] [--cache-dir DIR] ${SAMPLER_HELP}`;
 
 export async function run(argv) {
   const { _, flags } = parseArgs(argv, { alias: { p: 'prompt', n: 'n' }, boolean: ['raw', 'think'] });
@@ -29,8 +29,13 @@ export async function run(argv) {
 
   const signal = { aborted: false };
   const dispose = installAbort(signal);
+  const stats = {};
+  if (eng.kind !== 'raw') {
+    const sys = typeof flags.system === 'string' ? [{ role: 'system', content: flags.system }] : [];
+    stats.prefixCache = await usePrefixCache(eng, flags, sys, ids, templateOptions(eng, flags), signal);
+  }
   const stops = typeof flags.stop === 'string' ? [flags.stop] : [];
-  const { stats } = await streamReply(eng, ids, { sample: samplerFromFlags(flags), maxTokens: num(flags.n, 256), stops, signal });
+  await streamReply(eng, ids, { sample: samplerFromFlags(flags), maxTokens: num(flags.n, 256), stops, signal, stats });
   dispose();
   process.stdout.write('\n');
   process.stderr.write(`${formatStats(eng, stats)}\n`);

@@ -1,19 +1,22 @@
-// SPMD worker. Every worker runs the same control flow for a token; phases are separated by barriers.
+// SPMD worker. Every worker runs the same control flow for a batch of tokens; phases are separated by barriers.
 // Each worker owns a contiguous row slice of every weight matrix, stored in its own private WebAssembly.Memory
 // (so the 4 GB wasm32 limit applies per worker, not to the whole model).
+//
+// A command carries B tokens at consecutive positions. B = 1 is normal decoding (single-vector SIMD kernels);
+// B > 1 is batched prefill: every weight tile is read once for all B tokens (matmul kernels).
 import fs from 'node:fs';
 import { parentPort, workerData } from 'node:worker_threads';
 import { readTensorBytes } from '../gguf/reader.js';
+import { GGML_TYPE } from '../gguf/types.js';
 import { Act, matvec, dequantRow, rmsnorm, softmax, silu, ropeTables, applyRope, rowBytes, quantizeAct } from './ref-kernels.js';
 import { instantiateKernels } from './wasm/kernels.js';
-import { GGML_TYPE } from '../gguf/types.js';
 import { Barrier } from './barrier.js';
 import { CTRL, CMD_EXIT, splitRows, splitRange, alignUp, kvOffset } from './layout.js';
 
-const { id, n, cfg, tensors, path, ctx, shared, spin, kernels } = workerData;
+const { id, n, cfg, tensors, path, ctx, shared, spin, kernels, maxBatch } = workerData;
 // opt-in profile of worker 0 (ZEROLLM_PROFILE=1): where does a token's time go?
 const prof = process.env.ZEROLLM_PROFILE === '1' && id === 0;
-const PT = { kernel: 0, quant: 0, attn: 0, barrier: 0, total: 0, tokens: 0 };
+const PT = { kernel: 0, quant: 0, attn: 0, barrier: 0, total: 0, tokens: 0, batches: 0 };
 
 /** Fatal errors: tell the pool, then stop. */
 function fail(e) {
@@ -32,6 +35,7 @@ function main() {
   const { nEmbd, nHead, nHeadKv, headDim, nRot, rmsEps, ropeType, nLayer, nFF, vocabSize } = cfg;
   const qDim = nHead * headDim;
   const kvDim = nHeadKv * headDim;
+  const BM = maxBatch;
 
   // ---------------------------------------------------------------- weight slices -> private wasm memory
   /** @type {Array<{key: string, t: any, r0: number, r1: number, off: number, bytes: number}>} */
@@ -54,13 +58,16 @@ function main() {
     addMat(`${l}.wo`, `${p}attn_output.weight`);
     addMat(`${l}.gate`, `${p}ffn_gate.weight`); addMat(`${l}.up`, `${p}ffn_up.weight`); addMat(`${l}.down`, `${p}ffn_down.weight`);
   }
-  // scratch for the SIMD kernels, in the same memory as the weights: quantized activation, its scales, f32 results
+  // scratch for the SIMD kernels, in the same memory as the weights
   const useWasm = kernels === 'wasm';
   const maxCols = Math.max(nEmbd, qDim, nFF);
   const maxRows = Math.max(1, ...plan.map((p) => p.r1 - p.r0));
-  const XQ = total; total += alignUp(maxCols, 64);
-  const XD = total; total += alignUp((maxCols / 32) * 4, 64);
-  const YO = total; total += alignUp(maxRows * 4, 64);
+  const maxRowsBatch = Math.max(1, ...plan.filter((p) => p.key !== 'embd' && p.key !== 'output').map((p) => p.r1 - p.r0));
+  const XQ = total; total += alignUp(maxCols, 64);                       // int8 activation (decode)
+  const XD = total; total += alignUp((maxCols / 32) * 4, 64);            // its f32 scales
+  const XQ16 = total; total += alignUp(BM * maxCols * 2, 64);            // int16-widened activations (batched)
+  const XDB = total; total += alignUp(BM * (maxCols / 32) * 4, 64);      // their scales
+  const YO = total; total += alignUp(Math.max(maxRows, BM * maxRowsBatch) * 4, 64); // f32 results
   const pages = Math.max(1, Math.ceil(total / 65536));
   if (pages > 65536) throw new Error(`worker ${id}: weight slice is ${(total / 2 ** 30).toFixed(2)} GB, over the 4 GB wasm32 limit; use more workers`);
   let mem;
@@ -70,14 +77,15 @@ function main() {
     throw new Error(`worker ${id}: could not allocate ${(total / 2 ** 20).toFixed(0)} MB of WebAssembly memory (${e.message}). Close other apps or use a smaller model/quant.`);
   }
   const fd = fs.openSync(path, 'r');
-  /** @type {Record<string, import('./ref-kernels.js').Weight>} */
+  /** @type {Record<string, any>} */
   const W = {};
   let loaded = 0; let lastPost = 0;
+  let outputNorm; let ropeFreqs; let layers;
   try {
     for (const p of plan) {
       const view = new Uint8Array(mem.buffer, p.off, p.bytes);
       if (p.bytes) readTensorBytes(fd, p.t, p.r0 * rowBytes(p.t.type, p.t.dims[0]), view);
-      W[p.key] = { type: p.t.type, rows: p.r1 - p.r0, cols: p.t.dims[0], data: view, off: p.off, kernel: null, nb: p.t.dims[0] / 32 };
+      W[p.key] = { type: p.t.type, rows: p.r1 - p.r0, cols: p.t.dims[0], data: view, off: p.off, kernel: null, mmKernel: null, nb: p.t.dims[0] / 32 };
       loaded += p.bytes;
       const now = performance.now();
       if (now - lastPost > 100) { lastPost = now; parentPort.postMessage({ type: 'progress', id, bytes: loaded }); }
@@ -90,9 +98,9 @@ function main() {
       else { const b = new Uint8Array(t.nBytes); readTensorBytes(fd, t, 0, b); dequantRow({ type: t.type, cols: t.nElements, data: b }, 0, f); }
       return f;
     };
-    var outputNorm = vec('output_norm.weight');
-    var ropeFreqs = cfg.hasRopeFreqs ? vec('rope_freqs.weight') : null;
-    var layers = [];
+    outputNorm = vec('output_norm.weight');
+    ropeFreqs = cfg.hasRopeFreqs ? vec('rope_freqs.weight') : null;
+    layers = [];
     for (let l = 0; l < nLayer; l++) {
       const p = `blk.${l}.`;
       const opt = (nm) => (tensors[p + nm] ? vec(p + nm) : null);
@@ -103,34 +111,18 @@ function main() {
       });
     }
   } finally { fs.closeSync(fd); }
+
   const xqv = new Int8Array(mem.buffer, XQ, maxCols);
   const xdv = new Float32Array(mem.buffer, XD, maxCols / 32);
-  const yv = new Float32Array(mem.buffer, YO, maxRows);
+  const xq16v = new Int16Array(mem.buffer, XQ16, BM * maxCols);
+  const xdBv = new Float32Array(mem.buffer, XDB, (BM * maxCols) / 32);
+  const yv = new Float32Array(mem.buffer, YO, Math.max(maxRows, BM * maxRowsBatch));
   if (useWasm) {
     const k = instantiateKernels(mem);
     for (const w of Object.values(W)) {
-      if (w.type === GGML_TYPE.Q8_0) w.kernel = k.matvec_q8_0;
-      else if (w.type === GGML_TYPE.Q4_0) w.kernel = k.matvec_q4_0;
+      if (w.type === GGML_TYPE.Q8_0) { w.kernel = k.matvec_q8_0; w.mmKernel = k.mm_q8_0; } else if (w.type === GGML_TYPE.Q4_0) { w.kernel = k.matvec_q4_0; w.mmKernel = k.mm_q4_0; }
     }
   }
-  /** Make `x` the current matmul input: quantize it into the kernels' scratch (and keep a JS Act for fallback types). */
-  let curAct = null;
-  const setAct = (x) => {
-    const t = prof ? performance.now() : 0;
-    curAct = new Act(x); if (useWasm) quantizeAct(x, xqv, xdv);
-    if (prof) PT.quant += performance.now() - t;
-  };
-  /** y[0..w.rows) = W_slice * current activation */
-  const mv = (w, y) => {
-    const t = prof ? performance.now() : 0;
-    mvInner(w, y);
-    if (prof) PT.kernel += performance.now() - t;
-  };
-  const mvInner = (w, y) => {
-    if (w.kernel) {
-      if (w.rows > 0) { w.kernel(w.off, XQ, XD, YO, w.rows, w.nb); y.set(yv.subarray(0, w.rows)); }
-    } else matvec(w, curAct, y);
-  };
 
   // ---------------------------------------------------------------- shared views + private scratch
   const ctrl = new Int32Array(shared.ctrl);
@@ -141,12 +133,13 @@ function main() {
   const rawBar = new Barrier(ctrl, CTRL.BAR_COUNT, CTRL.BAR_GEN, n, spin);
   const bar = prof ? { wait() { const t = performance.now(); rawBar.wait(); PT.barrier += performance.now() - t; } } : rawBar;
   const rope = ropeTables(cfg, ctx, ropeFreqs);
-  const xb = new Float32Array(nEmbd);
+  const xbP = new Float32Array(BM * nEmbd); // private normed copies, one per token
   const scores = new Float32Array(ctx);
   const qh = new Float32Array(headDim);
   const oh = new Float32Array(headDim);
-  const tmpA = new Float32Array(Math.max(nEmbd, nFF, qDim, kvDim));
-  const tmpB = new Float32Array(Math.max(nEmbd, nFF, qDim, kvDim));
+  const tmpA = new Float32Array(BM * Math.max(nEmbd, nFF));
+  const tmpB = new Float32Array(BM * Math.max(nEmbd, nFF));
+  const tmpF = new Float32Array(maxRows); // fallback matvec output
 
   const [qr0, qr1] = splitRows(qDim, n, id);
   const [kr0, kr1] = splitRows(kvDim, n, id);
@@ -155,92 +148,142 @@ function main() {
   const [kh0, kh1] = splitRange(nHeadKv, n, id);
   const [qh0, qh1] = splitRange(nHead, n, id);
   const [vr0, vr1] = splitRows(vocabSize, n, id);
+  const erN = er1 - er0; const frN = fr1 - fr0;
   const group = nHead / nHeadKv;
   const scale = 1 / Math.sqrt(headDim);
   const embd = W.embd; const outW = cfg.tiedEmbeddings ? W.embd : W.output;
 
+  // ---- matmul plumbing: "prep" makes B vectors the current input, "mm" multiplies a weight slice with them
+  let srcVec = null; let srcB = 0; let srcDim = 0;
+  /** B vectors of length `dim` stored back to back in `src` become the current matmul input (quantized once) */
+  function prep(src, B, dim) {
+    const t = prof ? performance.now() : 0;
+    srcVec = src; srcB = B; srcDim = dim;
+    if (useWasm) {
+      if (B === 1) quantizeAct(src.subarray(0, dim), xqv, xdv);
+      else {
+        const nbl = dim / 32;
+        for (let b = 0; b < B; b++) quantizeAct(src.subarray(b * dim, (b + 1) * dim), xq16v.subarray(b * dim, (b + 1) * dim), xdBv.subarray(b * nbl, (b + 1) * nbl));
+      }
+    }
+    if (prof) PT.quant += performance.now() - t;
+  }
+  /** dest[b * destStride + destOff + i] = (W_slice . vector_b)[i] */
+  function mm(w, dest, destStride, destOff) {
+    if (w.rows === 0) return;
+    const t = prof ? performance.now() : 0;
+    const B = srcB;
+    if (w.kernel) {
+      if (B === 1) {
+        w.kernel(w.off, XQ, XD, YO, w.rows, w.nb);
+        dest.set(yv.subarray(0, w.rows), destOff);
+      } else {
+        w.mmKernel(w.off, XQ16, XDB, YO, w.rows, w.nb, B);
+        for (let b = 0; b < B; b++) dest.set(yv.subarray(b * w.rows, (b + 1) * w.rows), b * destStride + destOff);
+      }
+    } else {
+      for (let b = 0; b < B; b++) {
+        matvec(w, new Act(srcVec.subarray(b * srcDim, (b + 1) * srcDim)), tmpF);
+        dest.set(tmpF.subarray(0, w.rows), b * destStride + destOff);
+      }
+    }
+    if (prof) PT.kernel += performance.now() - t;
+  }
+
   parentPort.postMessage({ type: 'ready', id, ms: performance.now() - t0, bytes: total, sliceBytes: loaded, kernels: useWasm ? 'wasm-simd' : 'js' });
 
-  // ---------------------------------------------------------------- the per-token SPMD program
-  function runToken(token, pos, wantLogits) {
-    if (token >= vr0 && token < vr1) dequantRow(embd, token - vr0, x); // the worker that owns this embedding row
+  // ---------------------------------------------------------------- the SPMD program for B tokens at pos0..pos0+B-1
+  function runBatch(B, pos0, wantLogits) {
+    for (let b = 0; b < B; b++) {
+      const token = Atomics.load(ctrl, CTRL.TOKENS + b);
+      if (token >= vr0 && token < vr1) dequantRow(embd, token - vr0, x.subarray(b * nEmbd, (b + 1) * nEmbd)); // the owner of this embedding row
+    }
     bar.wait();
 
     for (let l = 0; l < nLayer; l++) {
       const L = layers[l];
-      // P1: norm (redundant per worker) + my rows of q, k, v
-      rmsnorm(xb, x, L.attnNorm, rmsEps);
-      setAct(xb);
-      mv(W[`${l}.wq`], sq.subarray(qr0, qr1));
-      mv(W[`${l}.wk`], sk.subarray(kr0, kr1));
-      mv(W[`${l}.wv`], sv.subarray(kr0, kr1));
-      if (L.bq) for (let i = qr0; i < qr1; i++) sq[i] += L.bq[i];
-      if (L.bk) for (let i = kr0; i < kr1; i++) sk[i] += L.bk[i];
-      if (L.bv) for (let i = kr0; i < kr1; i++) sv[i] += L.bv[i];
+      // P1: norm (redundant per worker) + my rows of q, k, v for all B tokens
+      for (let b = 0; b < B; b++) rmsnorm(xbP, x, L.attnNorm, rmsEps, nEmbd, b * nEmbd, b * nEmbd);
+      prep(xbP, B, nEmbd);
+      mm(W[`${l}.wq`], sq, qDim, qr0);
+      mm(W[`${l}.wk`], sk, kvDim, kr0);
+      mm(W[`${l}.wv`], sv, kvDim, kr0);
+      for (let b = 0; b < B; b++) {
+        if (L.bq) for (let i = qr0; i < qr1; i++) sq[b * qDim + i] += L.bq[i];
+        if (L.bk) for (let i = kr0; i < kr1; i++) sk[b * kvDim + i] += L.bk[i];
+        if (L.bv) for (let i = kr0; i < kr1; i++) sv[b * kvDim + i] += L.bv[i];
+      }
       bar.wait();
 
-      // P2a: my KV heads: k-norm, RoPE, write K and V into the shared cache
+      // P2a: my KV heads: k-norm, RoPE, write K and V into the shared cache (all B positions)
       const ta = prof ? performance.now() : 0;
-      for (let hd = kh0; hd < kh1; hd++) {
-        if (L.kNorm) rmsnorm(sk, sk, L.kNorm, rmsEps, headDim, hd * headDim, hd * headDim);
-        applyRope(sk.subarray(hd * headDim, (hd + 1) * headDim), 1, headDim, nRot, ropeType, rope, pos);
-        kv.set(sk.subarray(hd * headDim, (hd + 1) * headDim), kvOffset(l, 0, ctx, kvDim, pos) + hd * headDim);
-        kv.set(sv.subarray(hd * headDim, (hd + 1) * headDim), kvOffset(l, 1, ctx, kvDim, pos) + hd * headDim);
+      for (let b = 0; b < B; b++) {
+        const pos = pos0 + b;
+        for (let hd = kh0; hd < kh1; hd++) {
+          const o = b * kvDim + hd * headDim;
+          if (L.kNorm) rmsnorm(sk, sk, L.kNorm, rmsEps, headDim, o, o);
+          applyRope(sk.subarray(o, o + headDim), 1, headDim, nRot, ropeType, rope, pos);
+          kv.set(sk.subarray(o, o + headDim), kvOffset(l, 0, ctx, kvDim, pos) + hd * headDim);
+          kv.set(sv.subarray(o, o + headDim), kvOffset(l, 1, ctx, kvDim, pos) + hd * headDim);
+        }
       }
       if (prof) PT.attn += performance.now() - ta;
       bar.wait();
 
-      // P2b: my query heads: q-norm, RoPE, attention over the cache
+      // P2b: my query heads: q-norm, RoPE, causal attention over the cache
       const tb = prof ? performance.now() : 0;
       const kBase = kvOffset(l, 0, ctx, kvDim); const vBase = kvOffset(l, 1, ctx, kvDim);
-      for (let hd = qh0; hd < qh1; hd++) {
-        qh.set(sq.subarray(hd * headDim, (hd + 1) * headDim));
-        if (L.qNorm) rmsnorm(qh, qh, L.qNorm, rmsEps, headDim);
-        applyRope(qh, 1, headDim, nRot, ropeType, rope, pos);
-        const kvh = Math.floor(hd / group);
-        for (let t = 0; t <= pos; t++) {
-          const ko = kBase + t * kvDim + kvh * headDim;
-          let s = 0;
-          for (let i = 0; i < headDim; i++) s += qh[i] * kv[ko + i];
-          scores[t] = s * scale;
+      for (let b = 0; b < B; b++) {
+        const pos = pos0 + b;
+        for (let hd = qh0; hd < qh1; hd++) {
+          qh.set(sq.subarray(b * qDim + hd * headDim, b * qDim + (hd + 1) * headDim));
+          if (L.qNorm) rmsnorm(qh, qh, L.qNorm, rmsEps, headDim);
+          applyRope(qh, 1, headDim, nRot, ropeType, rope, pos);
+          const kvh = Math.floor(hd / group);
+          for (let t = 0; t <= pos; t++) {
+            const ko = kBase + t * kvDim + kvh * headDim;
+            let s = 0;
+            for (let i = 0; i < headDim; i++) s += qh[i] * kv[ko + i];
+            scores[t] = s * scale;
+          }
+          softmax(scores, pos + 1);
+          oh.fill(0);
+          for (let t = 0; t <= pos; t++) {
+            const p = scores[t];
+            const vo = vBase + t * kvDim + kvh * headDim;
+            for (let i = 0; i < headDim; i++) oh[i] += p * kv[vo + i];
+          }
+          att.set(oh, b * qDim + hd * headDim);
         }
-        softmax(scores, pos + 1);
-        oh.fill(0);
-        for (let t = 0; t <= pos; t++) {
-          const p = scores[t];
-          const vo = vBase + t * kvDim + kvh * headDim;
-          for (let i = 0; i < headDim; i++) oh[i] += p * kv[vo + i];
-        }
-        att.set(oh, hd * headDim);
       }
       if (prof) PT.attn += performance.now() - tb;
       bar.wait();
 
       // P3: output projection, residual add into my rows of x
-      setAct(att);
-      mv(W[`${l}.wo`], tmpA);
-      for (let i = 0; i < er1 - er0; i++) x[er0 + i] += tmpA[i];
+      prep(att, B, qDim);
+      mm(W[`${l}.wo`], tmpA, erN, 0);
+      for (let b = 0; b < B; b++) for (let i = 0; i < erN; i++) x[b * nEmbd + er0 + i] += tmpA[b * erN + i];
       bar.wait();
 
       // P4: FFN norm + my rows of gate/up -> SwiGLU
-      rmsnorm(xb, x, L.ffnNorm, rmsEps);
-      setAct(xb);
-      mv(W[`${l}.gate`], tmpA);
-      mv(W[`${l}.up`], tmpB);
-      for (let i = 0; i < fr1 - fr0; i++) hb[fr0 + i] = silu(tmpA[i]) * tmpB[i];
+      for (let b = 0; b < B; b++) rmsnorm(xbP, x, L.ffnNorm, rmsEps, nEmbd, b * nEmbd, b * nEmbd);
+      prep(xbP, B, nEmbd);
+      mm(W[`${l}.gate`], tmpA, frN, 0);
+      mm(W[`${l}.up`], tmpB, frN, 0);
+      for (let b = 0; b < B; b++) for (let i = 0; i < frN; i++) hb[b * nFF + fr0 + i] = silu(tmpA[b * frN + i]) * tmpB[b * frN + i];
       bar.wait();
 
       // P5: down projection, residual add
-      setAct(hb);
-      mv(W[`${l}.down`], tmpA);
-      for (let i = 0; i < er1 - er0; i++) x[er0 + i] += tmpA[i];
+      prep(hb, B, nFF);
+      mm(W[`${l}.down`], tmpA, erN, 0);
+      for (let b = 0; b < B; b++) for (let i = 0; i < erN; i++) x[b * nEmbd + er0 + i] += tmpA[b * erN + i];
       bar.wait();
     }
 
-    if (wantLogits) {
-      rmsnorm(xb, x, outputNorm, rmsEps);
-      setAct(xb);
-      mv(outW, logits.subarray(vr0, vr1));
+    if (wantLogits) { // only for the LAST token of the batch
+      rmsnorm(xbP, x, outputNorm, rmsEps, nEmbd, (B - 1) * nEmbd, 0);
+      prep(xbP, 1, nEmbd);
+      mm(outW, logits, 0, vr0);
     }
   }
 
@@ -253,15 +296,16 @@ function main() {
     }
     seen = Atomics.load(ctrl, CTRL.CMD_SEQ);
     if (Atomics.load(ctrl, CTRL.CMD) === CMD_EXIT) break;
+    const B = Atomics.load(ctrl, CTRL.BATCH);
     const tt = prof ? performance.now() : 0;
-    runToken(Atomics.load(ctrl, CTRL.TOKEN), Atomics.load(ctrl, CTRL.POS), Atomics.load(ctrl, CTRL.WANT_LOGITS) === 1);
-    if (prof) { PT.total += performance.now() - tt; PT.tokens++; }
+    runBatch(B, Atomics.load(ctrl, CTRL.POS), Atomics.load(ctrl, CTRL.WANT_LOGITS) === 1);
+    if (prof) { PT.total += performance.now() - tt; PT.tokens += B; PT.batches++; }
     Atomics.add(ctrl, CTRL.DONE, 1);
     Atomics.notify(ctrl, CTRL.DONE);
   }
   if (prof && PT.tokens) {
     const per = (v) => (v / PT.tokens).toFixed(2);
     const other = PT.total - PT.kernel - PT.quant - PT.attn - PT.barrier;
-    process.stderr.write(`[profile worker 0, ms/token over ${PT.tokens} tokens] total ${per(PT.total)} | matmul kernels ${per(PT.kernel)} | act quantization ${per(PT.quant)} | attention+rope ${per(PT.attn)} | barrier waits ${per(PT.barrier)} | other (norms, residuals, swiglu, copies) ${per(other)}\n`);
+    process.stderr.write(`[profile worker 0, ms/token over ${PT.tokens} tokens in ${PT.batches} passes] total ${per(PT.total)} | matmul kernels ${per(PT.kernel)} | act quantization ${per(PT.quant)} | attention+rope ${per(PT.attn)} | barrier waits ${per(PT.barrier)} | other (norms, residuals, swiglu, copies) ${per(other)}\n`);
   }
 }
