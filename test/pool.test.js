@@ -268,3 +268,43 @@ test('batched prefill + decode afterwards equals the pure token-by-token run; tr
     assert.deepEqual([...l1], [...l2]);
   } finally { await a.close(); await b.close(); }
 });
+
+// ------------------------------------------------------------------------------------------------ f16 KV cache
+test('f16 KV cache: SIMD and JS paths agree; differences from the f32 cache stay at the int8-activation noise floor; memory shrinks', async () => {
+  const { g } = tinyFile({ arch: 'qwen3', quant: 'q8_0', seed: 3 });
+  const toks = Array.from({ length: 20 }, (_, i) => (i * 29 + 7) % 250);
+  const run = async (kv, kernels) => {
+    const p = await PoolModel.create(g, { ctx: 64, workers: 3, kernels, kv });
+    const bytes = p.workerInfo.reduce((a, i) => a + i.bytes, 0);
+    const out = []; for (const t of toks) out.push(Float32Array.from(await p.forward(t)));
+    await p.close();
+    return { out, bytes };
+  };
+  const f32 = await run('f32', 'wasm'); const f16 = await run('f16', 'wasm'); const f16js = await run('f16', 'js');
+  assert.ok(f16.bytes < f32.bytes, `worker memory shrinks (${f16.bytes} < ${f32.bytes})`);
+  const cos = (a, b) => { let d = 0, x = 0, y = 0; for (let i = 0; i < a.length; i++) { d += a[i] * b[i]; x += a[i] * a[i]; y += b[i] * b[i]; } return d / Math.sqrt(x * y); };
+  const rel = (a, b) => { let m = 0, top = 0; for (let i = 0; i < a.length; i++) { m = Math.max(m, Math.abs(a[i] - b[i])); top = Math.max(top, Math.abs(b[i])); } return m / top; };
+  toks.forEach((_, i) => {
+    assert.ok(rel(f16.out[i], f16js.out[i]) < 2e-2 && cos(f16.out[i], f16js.out[i]) > 0.9999, `f16: simd vs js at ${i}`);
+    assert.ok(rel(f16.out[i], f32.out[i]) < 5e-2 && cos(f16.out[i], f32.out[i]) > 0.998, `f16 vs f32 KV at ${i}: ${rel(f16.out[i], f32.out[i])}`);
+  });
+  assert.ok(toks.filter((_, i) => rel(f16.out[i], f16js.out[i]) < 1e-3).length >= toks.length - 3, 'SIMD and JS f16 paths agree to rounding noise almost everywhere');
+});
+
+test('f16 KV cache: prefix-cache export/import round trip is exact', async () => {
+  const { PrefixCache, modelFingerprint } = await import('../src/model/prefix-cache.js');
+  const { prefillTokens } = await import('../src/model/generate.js');
+  const fs = await import('node:fs'); const os = await import('node:os');
+  const { g, path: mp } = tinyFile({ arch: 'llama', quant: 'q8_0', seed: 8 });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zerollm-f16cache-'));
+  const cache = new PrefixCache(dir, modelFingerprint(mp, 'wasm/kv-f16'));
+  const prefix = Array.from({ length: 21 }, (_, i) => (i * 17 + 5) % 250);
+  const a = await PoolModel.create(g, { ctx: 64, workers: 2, kv: 'f16' });
+  const b = await PoolModel.create(g, { ctx: 64, workers: 3, kv: 'f16' }); // different worker count on purpose
+  try {
+    await prefillTokens(a, prefix, { wantLogits: false });
+    await cache.save(a, prefix);
+    assert.equal(await cache.load(b, prefix), true);
+    for (const t of [9, 33, 120]) assert.deepEqual([...await b.forward(t)], [...await a.forward(t)].map((v) => v), `token ${t}`);
+  } finally { await a.close(); await b.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});

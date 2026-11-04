@@ -4,9 +4,9 @@ import { Tokenizer } from '../tokenizer/bpe.js';
 import { generate } from '../model/generate.js';
 import { parseArgs, num } from '../util/args.js';
 import { formatBytes } from '../util/log.js';
-import { createModel, defaultThreads } from './common.js';
+import { createModel, defaultThreads, kvFromFlags } from './common.js';
 
-export const help = 'bench <model.gguf> [--threads 1,2,4,6] [--kernels js,wasm] [--batch 1,16] [--prompt-tokens 32] [--n 32] [--ctx 512] [--spin N]';
+export const help = 'bench <model.gguf> [--threads 1,2,4,6] [--kernels js,wasm] [--batch 1,16] [--kv f32|f16] [--prompt-tokens 32] [--n 32] [--ctx 512] [--spin N]';
 
 const TEXT = 'The quick brown fox jumps over the lazy dog. In 1969, humans first walked on the Moon, and computers of the era had less memory than a modern greeting card. ';
 
@@ -34,7 +34,7 @@ export async function run(argv) {
   let base = null; let baseOut = null; let allSame = true;
   for (const kernels of kernelList) for (const threads of list) for (const maxBatch of batchList) {
     const t0 = performance.now();
-    const model = await createModel(g, { threads, ctx, kernels, maxBatch, spin: flags.spin === undefined ? undefined : num(flags.spin, 20000) });
+    const model = await createModel(g, { threads, ctx, kernels, maxBatch, kv: kvFromFlags(flags), spin: flags.spin === undefined ? undefined : num(flags.spin, 20000) });
     const kname = model.kernels === 'wasm' ? 'wasm-simd' : 'js';
     const loadS = (performance.now() - t0) / 1000;
     const stats = {}; const out = [];

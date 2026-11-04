@@ -3,7 +3,7 @@ import { parseArgs, num } from '../util/args.js';
 import { encodeChat } from '../tokenizer/chat-templates.js';
 import { loadEngine, samplerFromFlags, templateOptions, installAbort, streamReply, formatStats, usePrefixCache, SAMPLER_HELP } from './common.js';
 
-export const help = `run <model.gguf> -p "prompt" [--n 256] [--system "..."] [--ctx 2048] [--threads N] [--kernels auto|wasm|js] [--raw] [--think|--no-think] [--stop "str"] [--no-cache] [--cache-dir DIR] ${SAMPLER_HELP}`;
+export const help = `run <model.gguf> -p "prompt" [--n 256] [--system "..."] [--ctx 2048] [--threads N] [--kernels auto|wasm|js] [--kv f32|f16] [--raw] [--think|--no-think] [--stop "str"] [--no-cache] [--cache-dir DIR] ${SAMPLER_HELP}`;
 
 export async function run(argv) {
   const { _, flags } = parseArgs(argv, { alias: { p: 'prompt', n: 'n' }, boolean: ['raw', 'think'] });

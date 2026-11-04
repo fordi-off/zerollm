@@ -46,6 +46,13 @@ export function kernelsFromFlags(flags) {
 }
 
 /** @param {Record<string, any>} flags */
+export function kvFromFlags(flags) {
+  const k = flags.kv === undefined ? 'f32' : String(flags.kv);
+  if (k !== 'f32' && k !== 'f16') throw new Error(`--kv must be f32 or f16 (got "${k}")`);
+  return k;
+}
+
+/** @param {Record<string, any>} flags */
 export function threadsFromFlags(flags) {
   if (flags.threads === undefined || flags.threads === 'auto' || flags.threads === true) return defaultThreads();
   const n = num(flags.threads, 1);
@@ -64,9 +71,10 @@ function loadProgress() {
  * Create the compute model: the single-thread reference path for 1 thread, the SPMD worker pool otherwise.
  * @param {import('../gguf/reader.js').GGUFFile} g
  */
-export async function createModel(g, { threads, ctx, spin, kernels = 'auto', maxBatch, onProgress }) {
+export async function createModel(g, { threads, ctx, spin, kernels = 'auto', maxBatch, kv = 'f32', onProgress }) {
   // `--threads 1 --kernels js` is the plain single-thread reference path (the test oracle); everything else uses the pool
-  const model = threads === 1 && kernels === 'js' ? new RefModel(g, { ctx, onProgress }) : await PoolModel.create(g, { ctx, workers: threads, spin, kernels, maxBatch, onProgress });
+  // (the reference path keeps an f32 KV cache, so --kv f16 uses the pool even with --threads 1 --kernels js)
+  const model = threads === 1 && kernels === 'js' && kv === 'f32' ? new RefModel(g, { ctx, onProgress }) : await PoolModel.create(g, { ctx, workers: threads, spin, kernels, maxBatch, kv, onProgress });
   if (process.stderr.isTTY) process.stderr.write('\r\x1b[K');
   return model;
 }
@@ -84,10 +92,17 @@ export async function loadEngine(modelPath, flags) {
   assertSupportedTensorTypes(g);
   const ctx = num(flags.ctx, 2048);
   const threads = threadsFromFlags(flags);
-  const est = estimateRam(g, cfg, { ctx });
-  if (est.total > os.freemem() * 0.9) warn(`estimated RAM need ${formatBytes(est.total)} vs ${formatBytes(os.freemem())} free: close other apps or lower --ctx.`);
+  const kv = kvFromFlags(flags);
+  const est = estimateRam(g, cfg, { ctx, threads, kvBytes: kv === 'f16' ? 2 : 4 });
+  const free = os.freemem();
+  if (est.perWorker > 3.8 * 2 ** 30) throw new Error(`the busiest worker would need ${formatBytes(est.perWorker)} of WebAssembly memory, over the 4 GB wasm32 limit: use more --threads, a smaller --ctx or --kv f16`);
+  if (est.total > free * 0.9) {
+    const alt = kv === 'f32' ? estimateRam(g, cfg, { ctx, threads, kvBytes: 2 }) : null;
+    const advice = alt && alt.total <= free * 0.9 ? `--kv f16 would bring it to ${formatBytes(alt.total)}` : 'try --kv f16, a smaller --ctx, a smaller quantization, or close other apps';
+    warn(`estimated RAM need ${formatBytes(est.total)} (weights ${formatBytes(est.weights)} + KV cache ${formatBytes(est.kv)} + runtime) vs ${formatBytes(free)} free: ${advice}.`);
+  }
   const tok = Tokenizer.fromGGUF(g);
-  const model = await createModel(g, { threads, ctx, kernels: kernelsFromFlags(flags), maxBatch: flags.batch === undefined ? undefined : num(flags.batch, 16), spin: flags.spin === undefined ? undefined : num(flags.spin, 20000), onProgress: loadProgress() });
+  const model = await createModel(g, { threads, ctx, kernels: kernelsFromFlags(flags), kv: kvFromFlags(flags), maxBatch: flags.batch === undefined ? undefined : num(flags.batch, 16), spin: flags.spin === undefined ? undefined : num(flags.spin, 20000), onProgress: loadProgress() });
   let kind = typeof flags.template === 'string' ? flags.template : flags.raw ? 'raw' : detectTemplate(cfg.arch, g.get('tokenizer.chat_template'), tok);
   if (!TEMPLATE_KINDS.includes(kind)) { await model.close?.(); throw new Error(`unknown --template "${kind}" (use ${TEMPLATE_KINDS.join(', ')})`); }
   return {
@@ -114,7 +129,7 @@ export async function usePrefixCache(eng, flags, systemMessages, promptIds, tmpl
   const prefix = encodeChat(eng.tok, eng.kind, systemMessages, { ...tmplOpts, generationPrompt: false });
   if (prefix.length < MIN_CACHED_PREFIX || prefix.length >= promptIds.length || prefix.some((t, i) => t !== promptIds[i])) return 'skip';
   const dir = typeof flags['cache-dir'] === 'string' ? flags['cache-dir'] : path.join(path.dirname(eng.g.path), '.zerollm-cache');
-  const cache = new PrefixCache(dir, modelFingerprint(eng.g.path, eng.model.kernels === 'wasm' ? 'wasm' : 'js'));
+  const cache = new PrefixCache(dir, modelFingerprint(eng.g.path, `${eng.model.kernels === 'wasm' ? 'wasm' : 'js'}/kv-${eng.model.kv ?? 'f32'}`));
   if (await cache.load(eng.model, prefix)) return 'hit';
   const r = await prefillTokens(eng.model, prefix, { wantLogits: false, signal });
   if (r.aborted) return 'skip';

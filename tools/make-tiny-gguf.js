@@ -2,7 +2,7 @@
 // Generate a tiny random GGUF model (with a small byte-level BPE tokenizer) for tests.
 //   node tools/make-tiny-gguf.js out.gguf [--arch qwen3|llama|qwen2] [--quant f32|q8_0|q4_0] [--seed N] [--tied]
 import fs from 'node:fs';
-import { buildGGUF } from './gguf-writer.js';
+import { buildGGUF, writeGGUF } from './gguf-writer.js';
 import { GGUF_TYPE, GGML_TYPE } from '../src/gguf/types.js';
 import { quantizeQ8_0, quantizeQ4_0 } from '../src/compute/quant.js';
 import { randomQuantBlocks } from './random-blocks.js';
@@ -18,7 +18,7 @@ export const TINY_MERGES = [
 
 /**
  * @param {{arch?: string, quant?: 'f32'|'q8_0'|'q4_0'|'q5_0'|'q4_k'|'q5_k'|'q6_k'|'q4_k_m', seed?: number, tied?: boolean, nEmbd?: number, nLayer?: number,
- *          nHead?: number, nHeadKv?: number, headDim?: number, nFF?: number, ctx?: number, alignment?: number, ropeFreqs?: boolean, padVocabTo?: number}} [o]
+ *          nHead?: number, nHeadKv?: number, headDim?: number, nFF?: number, ctx?: number, alignment?: number, ropeFreqs?: boolean, padVocabTo?: number, outFile?: string}} [o]
  * @returns {{ buffer: Buffer, tokens: string[], cfg: object }}
  */
 export function makeTinyModel(o = {}) {
@@ -133,7 +133,9 @@ export function makeTinyModel(o = {}) {
     kv('tokenizer.ggml.add_bos_token', GGUF_TYPE.BOOL, arch === 'llama'),
     kv('tokenizer.chat_template', GGUF_TYPE.STRING, chatTemplate),
   ];
-  const buffer = buildGGUF({ metadata, tensors, alignment: o.alignment ?? 32 });
+  let buffer = null;
+  if (o.outFile) writeGGUF(o.outFile, { metadata, tensors, alignment: o.alignment ?? 32 }); // streamed: no second in-memory copy
+  else buffer = buildGGUF({ metadata, tensors, alignment: o.alignment ?? 32 });
   return { buffer, tokens, cfg: { arch, nEmbd, nLayer, nHead, nHeadKv, headDim, nFF, vocab, tied, bos, eos } };
 }
 

@@ -67,3 +67,19 @@ node bin/zerollm.js bench models/Qwen3-4B-Q4_K_M.gguf --threads 6 --batch 1,16 -
 `info` should list Q4_K and Q6_K (and show 4.5 / 6.56 bits per weight) with every type marked supported. The answer must be coherent and mention Paris; if the text is garbled, send the exact output (a wrong bit layout gives gibberish immediately). Compare with `--kernels js --threads 1` for a few tokens if you want to cross-check the SIMD path against the reference (slow on a 4B model: use `--n 8`).
 
 Note: these first-version K-quant kernels are slower per weight than Q8_0 and have no batched prefill yet (see docs/BENCHMARKS.md); speed work is M9.
+
+## M9: 8B models and memory (after `git pull`)
+
+`info` now prints a RAM estimate for both KV precisions and warns if the model will not fit in the free RAM; `run`/`chat`/`bench` accept `--kv f16` (half-size KV cache).
+
+For the Qwen3-8B Q4_K_M file (about 5 GB; download into `models\`), close the browser and other heavy apps first, then:
+
+```
+node bin/zerollm.js info models/Qwen3-8B-Q4_K_M.gguf --threads 6
+node bin/zerollm.js run models/Qwen3-8B-Q4_K_M.gguf -p "What is the capital of France? Answer in one sentence." --temp 0 --n 60 --kv f16
+node bin/zerollm.js bench models/Qwen3-8B-Q4_K_M.gguf --threads 6 --batch 1,16 --prompt-tokens 64 --n 16 --kv f16
+```
+
+Paste the three outputs, and tell me the RAM figure Task Manager shows for node while it runs. Also compare long-context speed: `bench ... --prompt-tokens 1000 --ctx 1100` (needs a few minutes).
+
+Per-kernel numbers for your CPU (shows which formats are slow on your machine): `node tools/kbench.mjs`.

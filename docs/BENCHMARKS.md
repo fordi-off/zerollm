@@ -140,3 +140,23 @@ Model-level effect on the Q4_K_M-style 0.6B-shaped file (before -> after, decode
 | after | 55.8 | 18.1 |
 
 Before, attention cost grew linearly with context and at a 384-token prompt was larger than all matmuls combined (decode fell ~40% below its short-context speed); now it is ~12% of the token time at that length. One barrier per layer fewer (5 instead of 6: K/V no longer cross workers).
+
+### M9 memory measurements (dev container, linux): 8B-shaped model and KV precision
+
+**8B-shaped synthetic Q4_K_M-style model** (random raw blocks; hidden 4096, 36 layers, 32/8 heads, head_dim 128, FFN 12288, vocab 151936, untied output; 8.19B parameters; 5.43 GB file because this mix uses Q6_K for every attn_v / ffn_down; a real Q4_K_M is ~5.0 GB). `zerollm run ... --threads 4 --ctx 2048 --no-cache`, 65-token prompt, 4 generated tokens, VmHWM sampled from /proc:
+
+| --kv | peak RSS | load | prefill tok/s | decode tok/s |
+|---|---|---|---|---|
+| f32 | 5.27 GiB | 7.1 s (cold file cache) | 1.45 | 1.38 |
+| f16 | 5.27 GiB | 1.7 s | 1.90 | 1.83 |
+
+RSS is identical because KV pages are only resident once touched (65 tokens touch ~20 MB of the 576 MB reserved) and matches the estimator (weights 4.71 GiB + runtime ~0.4 GiB). Speeds are for a 4-vCPU 2.1 GHz VM and say nothing about the target laptop (the f32/f16 speed difference is noise plus the cold first read). `info` predicts for ctx 2048 / 6 threads: 6.15 GB total with f32 KV, 5.86 GB with f16, busiest worker 1.0 GB.
+
+**KV cache growth, measured** (Q8_0 0.6B-shaped model, 4 threads, batch 16, 3000-token prompt, ctx 3100; KV = 229 KB/token f32, 115 KB/token f16):
+
+| --kv | baseline (16-token prompt) | with 3000-token context | growth | predicted |
+|---|---|---|---|---|
+| f32 | 850 MiB | 1485 MiB | +635 MiB | +640 MiB |
+| f16 | 850 MiB | 1158 MiB | +308 MiB | +320 MiB |
+
+With the f16 cache at that 3000-token context: prefill 29.3 tok/s, decode 18.5 tok/s (4 threads).

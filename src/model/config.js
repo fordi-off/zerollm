@@ -100,15 +100,25 @@ export function kvBytesPerToken(c, bytesPerValue = 4) {
 
 /**
  * Rough RAM estimate for running a model.
+ *  weights  matrix bytes (every worker holds a row slice, so the total is the file's tensor data)
+ *  kv       KV cache for `ctx` tokens at `kvBytes` per value (4 = f32, 2 = f16)
+ *  scratch  per-worker activation / kernel buffers
+ *  runtime  node + V8 + one isolate per worker
+ *  perWorker  the busiest worker's WebAssembly.Memory (must stay under the 4 GB wasm32 limit)
  * @param {import('../gguf/reader.js').GGUFFile} g
  * @param {ModelConfig|null} cfg
- * @param {{ctx?: number, kvBytes?: number}} [opts]
+ * @param {{ctx?: number, kvBytes?: number, threads?: number}} [opts]
  */
 export function estimateRam(g, cfg, opts = {}) {
-  const weights = g.tensors.reduce((s, t) => s + (t.nBytes ?? 0), 0);
+  const threads = Math.max(1, opts.threads ?? 1);
   const ctx = opts.ctx ?? Math.min(2048, cfg?.nCtxTrain ?? 2048);
-  const kv = cfg ? kvBytesPerToken(cfg, opts.kvBytes ?? 4) * ctx : 0;
-  const scratch = 100 * 1024 * 1024;
-  const runtime = 400 * 1024 * 1024; // node + v8 + workers
-  return { weights, kv, scratch, runtime, ctx, total: weights + kv + scratch + runtime };
+  const weights = g.tensors.reduce((s, t) => s + (t.nBytes ?? 0), 0);
+  const kvPerToken = cfg ? kvBytesPerToken(cfg, opts.kvBytes ?? 4) : 0;
+  const kv = kvPerToken * ctx;
+  const scratch = threads * 8 * 1024 * 1024;
+  const runtime = 250 * 1024 * 1024 + threads * 40 * 1024 * 1024;
+  // busiest worker: an even share of the weights plus the KV heads it owns (ceil(nHeadKv / threads) of nHeadKv)
+  const heads = cfg ? Math.ceil(cfg.nHeadKv / Math.min(threads, cfg.nHeadKv)) / cfg.nHeadKv : 1;
+  const perWorker = weights / threads + kv * heads + 8 * 1024 * 1024;
+  return { weights, kv, scratch, runtime, ctx, perWorker, total: weights + kv + scratch + runtime };
 }

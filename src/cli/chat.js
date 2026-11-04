@@ -3,7 +3,7 @@ import { parseArgs, num } from '../util/args.js';
 import { encodeChat } from '../tokenizer/chat-templates.js';
 import { loadEngine, samplerFromFlags, templateOptions, streamReply, formatStats, usePrefixCache, SAMPLER_HELP } from './common.js';
 
-export const help = `chat <model.gguf> [--system "..."] [--n 512] [--ctx 2048] [--threads N] [--kernels auto|wasm|js] [--think|--no-think] [--no-cache] [--cache-dir DIR] ${SAMPLER_HELP}`;
+export const help = `chat <model.gguf> [--system "..."] [--n 512] [--ctx 2048] [--threads N] [--kernels auto|wasm|js] [--kv f32|f16] [--think|--no-think] [--no-cache] [--cache-dir DIR] ${SAMPLER_HELP}`;
 
 const COMMANDS = '/reset  clear conversation   /system <text>  set system prompt (resets)   /think  /nothink  toggle Qwen3 thinking   /exit';
 
