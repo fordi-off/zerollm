@@ -57,3 +57,10 @@ Run `npm run app -- --data <folder containing models/>` (or `node app/main.js`).
 - [ ] Settings > Diagnose: report is complete; "Kopier rapport" puts it on the clipboard.
 - [ ] Esc stops a reply; Alt+N / Alt+B work; `/` outside the text box jumps to it.
 - [ ] Tab through the page: every control reachable, focus ring visible; dark mode readable.
+
+## Search model (embeddings) - do this one first
+- [ ] Download `nomic-embed-text` from Settings > Models > Download models (or put `nomic-embed-text-v1.5.Q4_K_M.gguf` in `models/`).
+- [ ] **Ground truth:** `node bin/zerollm.js embed models/nomic-embed-text-v1.5.Q4_K_M.gguf --compare documents/<a document Skibeti37 made>.json --n 5` - every similarity should be about 0.99 or higher (it prints one line with accents stripped and one with accents kept; tell me both). Lower values mean a mistake in my encoder.
+- [ ] `node bin/zerollm.js embed models/nomic-embed-text-v1.5.Q4_K_M.gguf "Hva er en kommune?" "Kommunen har ansvar for skoler" "Pizza med ost"` - the first two should be clearly more similar than either is to the third.
+- [ ] `node tools/embed-bench.mjs models/nomic-embed-text-v1.5.Q4_K_M.gguf` - note chunks/second.
+- [ ] Add a document in the app: Settings > Dokumenter shows "Lager søkeindeks… n/m" then "søkeindeks m/m"; a question phrased with different words than the text still finds the right passage.

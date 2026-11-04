@@ -5,6 +5,11 @@ const HF = 'https://huggingface.co';
 
 export const CATALOG = [
   {
+    id: 'nomic-embed', kind: 'embed', filename: 'nomic-embed-text-v1.5.Q4_K_M.gguf', displayName: 'nomic-embed-text v1.5 (søkemodell)',
+    sizeBytes: 84_000_000, ramGB: 0.4, languages: 'en',
+    url: `${HF}/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q4_K_M.gguf`,
+  },
+  {
     id: 'nb-llama-3.1-8b', filename: 'nb-llama-3.1-8b-instruct-q4_k_m.gguf', displayName: 'NB Llama 3.1 8B (norsk)',
     sizeBytes: 4_920_000_000, ramGB: 6.5, recommended: true, languages: 'no',
     url: `${HF}/NbAiLab/nb-llama-3.1-8B-Instruct-Q4_K_M-GGUF/resolve/main/nb-llama-3.1-8b-instruct-q4_k_m.gguf`,

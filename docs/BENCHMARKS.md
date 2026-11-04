@@ -223,3 +223,10 @@ File: Qwen3-8B-Q4_K_M.gguf, 4.68 GB (Q4_K x217 = 3.45 GB, Q6_K x37 = 1.23 GB, F3
 ### NB Llama 3.1 8B Instruct Q4_K_M on the target laptop (user-measured): first Norwegian model
 
 File nb-llama-3.1-8b-q4_k_m.gguf (4.58 GB, Q4_K x193 + Q6_K x33, 8.03B parameters, 32 layers, hidden 4096, FFN 14336, vocab 128256, untied output, rope_freqs.weight, BOS `<|begin_of_text|>` 128000, GGUF EOS `<|end_of_text|>` 128001, **no embedded chat template** -> the engine fell back to the Llama 3 framing and also stops on `<|eot_id|>`). `run --system "Du er en hjelpsom assistent som alltid svarer på norsk." -p "Hva er hovedstaden i Norge? Svar med én setning." --temp 0 --kv f16`: **"Oslo er hovedstaden i Norge."** (one sentence as asked; the generic Llama 3.2 1B answered with two sentences and a spelling slip). Prompt 51 tokens, prefill 6.37 tok/s, decode 3.24 tok/s, RSS 4.94 GB (estimate 5.35 GB with f16 KV).
+
+## Embedding encoder (nomic-embed-text-shaped synthetic Q4_K_M model, 768 wide, 12 layers, 300-token sequences), dev VM 4 vCPU
+| workers | tokens/s | ms per 300-token text |
+|---|---|---|
+| 1 | 30 | 10158 |
+| 2 | 59 | 5107 |
+Profile of one worker: 86 % K-quant matmul kernels, 4 % activation quantization, 6 % attention, 3 % other. (Laptop numbers pending: `node tools/embed-bench.mjs`.)

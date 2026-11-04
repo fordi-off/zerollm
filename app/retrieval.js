@@ -67,8 +67,8 @@ export function bm25(chunks, query, { k1 = 1.5, b = 0.75 } = {}) {
  * @param {{text: string, filename: string}[]} chunks
  * @param {{k?: number, budgetTokens?: number, countTokens?: (text: string) => number}} o
  */
-export function selectExcerpts(chunks, query, { k = 4, budgetTokens = 1200, countTokens = (t) => Math.ceil(t.length / 3.5) } = {}) {
-  let ranked = bm25(chunks, query);
+export function selectExcerpts(chunks, query, { k = 4, budgetTokens = 1200, countTokens = (t) => Math.ceil(t.length / 3.5), ranked: given = null } = {}) {
+  let ranked = given ?? bm25(chunks, query);
   if (ranked.length === 0) {
     const seen = new Map(); ranked = [];
     chunks.forEach((c, index) => { const n = seen.get(c.filename) ?? 0; if (n < Math.max(1, Math.ceil(k / 2))) { seen.set(c.filename, n + 1); ranked.push({ index, score: 0 }); } });
@@ -81,4 +81,24 @@ export function selectExcerpts(chunks, query, { k = 4, budgetTokens = 1200, coun
     picked.push(r); used += cost;
   }
   return picked.sort((a, b) => a.index - b.index);
+}
+
+const dot = (a, b) => { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; };
+const norm = (a) => Math.sqrt(dot(a, a)) || 1e-12;
+
+/** Rank chunks by cosine similarity to a query vector; chunks without a (matching) embedding are skipped. @returns {{index: number, score: number}[]} */
+export function vectorRank(chunks, queryVec) {
+  const qn = norm(queryVec); const out = [];
+  chunks.forEach((c, index) => { const e = c.embedding; if (Array.isArray(e) && e.length === queryVec.length) out.push({ index, score: dot(e, queryVec) / (norm(e) * qn) }); });
+  return out.sort((a, b) => b.score - a.score);
+}
+
+/**
+ * Reciprocal-rank fusion of several rankings (best first): robust against the scores being on different scales.
+ * `scoreOf` optionally supplies the score to report per index (e.g. the cosine similarity).
+ */
+export function fuseRankings(lists, { k = 60, scoreOf = null } = {}) {
+  const fused = new Map();
+  for (const list of lists) list.forEach((r, rank) => fused.set(r.index, (fused.get(r.index) ?? 0) + 1 / (k + rank + 1)));
+  return [...fused].map(([index, f]) => ({ index, score: scoreOf?.(index) ?? f, fused: f })).sort((a, b) => b.fused - a.fused);
 }

@@ -9,6 +9,7 @@ const COMMANDS = {
   run: 'Generate text from a prompt',
   chat: 'Interactive chat',
   bench: 'Benchmark prefill + decode',
+  embed: 'Embedding model check: similarities of texts, or compare with vectors stored by another app (--compare documents/x.json)',
   serve: 'OpenAI-compatible HTTP server',
 };
 

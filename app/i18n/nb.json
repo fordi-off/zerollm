@@ -131,5 +131,12 @@
   "diagLog": "Siste logglinjer",
   "diagOk": "Alt som trengs er på plass.",
   "shortcuts": "Hurtigtaster",
-  "shortcutsText": "Enter sender · Shift+Enter ny linje · Esc stopper svaret · Alt+N ny samtale · Alt+B sidepanel · / åpner kommandoer"
+  "shortcutsText": "Enter sender · Shift+Enter ny linje · Esc stopper svaret · Alt+N ny samtale · Alt+B sidepanel · / åpner kommandoer",
+  "searchModel": "Søkemodell",
+  "searchModelOn": "Installert: {file}. Dokumenter søkes på betydning, ikke bare ord.",
+  "searchModelOff": "Ikke installert. Uten den søkes det bare på nøkkelord. Last ned «nomic-embed-text» under Modeller → Last ned modeller.",
+  "indexNow": "Indekser dokumenter",
+  "indexed": "søkeindeks {done}/{total}",
+  "indexing": "Lager søkeindeks… {done}/{total}",
+  "noIndex": "kun nøkkelord"
 }

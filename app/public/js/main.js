@@ -1,7 +1,7 @@
 import { call, listen, hasToken } from './api.js';
 import { loadStrings, t, apply } from './i18n.js';
 import { renderMarkdown } from './markdown.js';
-import { initSettings, openSettings, onDownloadEvent, onDocProgress } from './settings.js';
+import { initSettings, openSettings, onDownloadEvent, onDocProgress, onDocIndex } from './settings.js';
 import { initCommandMenu, loadCommands, extractCommands, openAll } from './commands.js';
 import { initDocuments, refreshChips, renderSources } from './documents.js';
 import { initChatList, refreshChatList, setActive } from './chats.js';
@@ -297,6 +297,7 @@ function ours(d) {
 }
 const events = {
   docprogress(d) { onDocProgress(d); },
+  docindex(d) { onDocIndex(d); },
   download(d) { if (onDownloadEvent(d)) refreshState().catch(() => {}); },
   phase(d) {
     if (!ours(d)) return;
