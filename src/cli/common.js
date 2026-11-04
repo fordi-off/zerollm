@@ -82,23 +82,25 @@ export function installAbort(signal, rl = null) {
  * Generate and stream a reply to stdout.
  * @returns {Promise<{text: string, stats: any}>}
  */
-export async function streamReply(eng, promptIds, { sample, maxTokens, stops = [], signal, out = process.stdout }) {
+export async function streamReply(eng, promptIds, { sample, maxTokens, stops = [], signal, out = process.stdout, err = process.stderr, progress = err.isTTY }) {
   const stats = {};
   const dec = eng.tok.streamDecoder();
   const filter = new StopFilter(stops);
-  const show = process.stderr.isTTY;
   let text = '';
-  const emit = (s) => { if (s) { out.write(s); text += s; } };
+  // The progress line lives on stderr and is erased exactly once, BEFORE any reply text is written. Never erase
+  // after text has been printed: on a terminal that would wipe the last line of the answer.
+  let progressShown = false;
+  const clearProgress = () => { if (progressShown) { err.write('\r\x1b[K'); progressShown = false; } };
+  const emit = (s) => { if (s) { clearProgress(); out.write(s); text += s; } };
   for await (const id of generate(eng.model, promptIds, {
     maxTokens, sample, stopIds: eng.stopIds, signal, stats,
-    onPrefillProgress: show ? (d, n) => { if (n > 8) process.stderr.write(`\rprefill ${d}/${n}`); } : undefined,
+    onPrefillProgress: progress ? (d, n) => { if (n > 8) { err.write(`\rprefill ${d}/${n}`); progressShown = true; } } : undefined,
   })) {
-    if (show && stats.generated === 0) process.stderr.write('\r\x1b[K');
     emit(filter.push(dec.push(id)));
     if (filter.stopped) { signal.aborted = true; stats.stopReason = 'stop-string'; }
   }
-  if (show) process.stderr.write('\r\x1b[K');
-  if (!filter.stopped) emit(filter.push(dec.flush())), emit(filter.flush());
+  if (!filter.stopped) { emit(filter.push(dec.flush())); emit(filter.flush()); }
+  clearProgress(); // only does anything if no reply text was ever written
   return { text, stats };
 }
 
