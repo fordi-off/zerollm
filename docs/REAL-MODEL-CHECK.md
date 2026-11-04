@@ -83,3 +83,29 @@ node bin/zerollm.js bench models/Qwen3-8B-Q4_K_M.gguf --threads 6 --batch 1,16 -
 Paste the three outputs, and tell me the RAM figure Task Manager shows for node while it runs. Also compare long-context speed: `bench ... --prompt-tokens 1000 --ctx 1100` (needs a few minutes).
 
 Per-kernel numbers for your CPU (shows which formats are slow on your machine): `node tools/kbench.mjs`.
+
+## Performance diagnosis on the target laptop (decode got slower after the kernel changes)
+
+After the K-quant/attention work, Qwen3-4B Q4_K_M prefill improved (5.96 -> 8.23 tok/s) but decode went 5.77 -> 4.4-4.8 tok/s, while `tools/kbench.mjs` shows fast kernels (Q4_K 9.4 Gw/s/thread). Three runs tell where the time goes (PowerShell):
+
+```
+node tools/kbench.mjs
+```
+
+(compares the two integer-dot forms of the K-quant decode kernels: `extmul` is the default, `wide` is the older form; which is faster depends on the CPU)
+
+```
+$env:ZEROLLM_PROFILE=1
+node bin/zerollm.js bench models/Qwen3-4B-Q4_K_M.gguf --threads 6 --batch 1 --prompt-tokens 16 --n 24
+```
+
+(prints, for worker 0, ms per token spent in matmul kernels / activation quantization / attention / barrier waits / other)
+
+```
+$env:ZEROLLM_KDOT="wide"
+node bin/zerollm.js bench models/Qwen3-4B-Q4_K_M.gguf --threads 6 --batch 1 --prompt-tokens 16 --n 24
+Remove-Item Env:ZEROLLM_KDOT
+Remove-Item Env:ZEROLLM_PROFILE
+```
+
+Run the plain bench twice if the numbers look odd: laptop power state, background apps and thermal limits move decode speed by 10-20% between runs.
