@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 // Generate a tiny random GGUF model (with a small byte-level BPE tokenizer) for tests.
-//   node tools/make-tiny-gguf.js out.gguf [--arch qwen3|llama|qwen2] [--quant f32|q8_0] [--seed N] [--tied]
+//   node tools/make-tiny-gguf.js out.gguf [--arch qwen3|llama|qwen2] [--quant f32|q8_0|q4_0] [--seed N] [--tied]
 import fs from 'node:fs';
 import { buildGGUF } from './gguf-writer.js';
 import { GGUF_TYPE, GGML_TYPE } from '../src/gguf/types.js';
-import { quantizeQ8_0 } from '../src/compute/quant.js';
+import { quantizeQ8_0, quantizeQ4_0 } from '../src/compute/quant.js';
 import { BYTE_TO_CHAR } from '../src/tokenizer/bytes.js';
 import { mulberry32, gaussian } from '../src/util/rng.js';
 import { parseArgs, num } from '../src/util/args.js';
@@ -15,8 +15,8 @@ export const TINY_MERGES = [
 ];
 
 /**
- * @param {{arch?: string, quant?: 'f32'|'q8_0', seed?: number, tied?: boolean, nEmbd?: number, nLayer?: number,
- *          nHead?: number, nHeadKv?: number, headDim?: number, nFF?: number, ctx?: number, alignment?: number}} [o]
+ * @param {{arch?: string, quant?: 'f32'|'q8_0'|'q4_0', seed?: number, tied?: boolean, nEmbd?: number, nLayer?: number,
+ *          nHead?: number, nHeadKv?: number, headDim?: number, nFF?: number, ctx?: number, alignment?: number, ropeFreqs?: boolean, padVocabTo?: number}} [o]
  * @returns {{ buffer: Buffer, tokens: string[], cfg: object }}
  */
 export function makeTinyModel(o = {}) {
@@ -48,6 +48,8 @@ export function makeTinyModel(o = {}) {
   } else {
     bos = addSpecial('<|endoftext|>'); addSpecial('<|im_start|>'); eos = addSpecial('<|im_end|>');
   }
+  // optional padding with unique dummy tokens (to benchmark real-model shapes)
+  while (tokens.length < (o.padVocabTo ?? 0)) { types.push(1); tokens.push(`\u0100pad${tokens.length}`); }
   const vocab = tokens.length;
 
   // --- tensors
@@ -57,6 +59,7 @@ export function makeTinyModel(o = {}) {
     const f = new Float32Array(n);
     for (let i = 0; i < n; i++) f[i] = gaussian(rand) * std;
     if (quant === 'q8_0' && ne0 % 32 === 0) tensors.push({ name, dims: [ne0, ne1], type: GGML_TYPE.Q8_0, data: quantizeQ8_0(f) });
+    else if (quant === 'q4_0' && ne0 % 32 === 0) tensors.push({ name, dims: [ne0, ne1], type: GGML_TYPE.Q4_0, data: quantizeQ4_0(f) });
     else tensors.push({ name, dims: [ne0, ne1], type: GGML_TYPE.F32, data: new Uint8Array(f.buffer) });
   };
   const vec = (name, n) => {
@@ -72,6 +75,10 @@ export function makeTinyModel(o = {}) {
   const qDim = nHead * headDim;
   const kvDim = nHeadKv * headDim;
   mat('token_embd.weight', nEmbd, vocab);
+  if (o.ropeFreqs) { // Llama 3.1 style per-dimension frequency factors
+    const f = new Float32Array(headDim / 2).map((_, i) => 1 + 3 * (i / (headDim / 2)));
+    tensors.push({ name: 'rope_freqs.weight', dims: [headDim / 2], type: GGML_TYPE.F32, data: new Uint8Array(f.buffer) });
+  }
   vec('output_norm.weight', nEmbd);
   if (!tied) mat('output.weight', nEmbd, vocab);
   for (let l = 0; l < nLayer; l++) {
@@ -120,7 +127,7 @@ export function makeTinyModel(o = {}) {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const { _, flags } = parseArgs(process.argv.slice(2), { boolean: ['tied'] });
-  if (!_[0]) { console.error('usage: make-tiny-gguf.js out.gguf [--arch qwen3|llama|qwen2] [--quant f32|q8_0] [--seed N] [--tied]'); process.exit(1); }
+  if (!_[0]) { console.error('usage: make-tiny-gguf.js out.gguf [--arch qwen3|llama|qwen2] [--quant f32|q8_0|q4_0] [--seed N] [--tied]'); process.exit(1); }
   const { buffer } = makeTinyModel({
     arch: typeof flags.arch === 'string' ? flags.arch : undefined,
     quant: typeof flags.quant === 'string' ? /** @type {any} */ (flags.quant) : undefined,

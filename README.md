@@ -2,7 +2,7 @@
 
 A zero-dependency, pure-code local LLM inference engine in Node.js (plus hand-emitted WebAssembly SIMD kernels) that runs GGUF models on a plain laptop CPU: no admin rights, no native addons, no cloud, no Ollama/llama.cpp.
 
-Status: early development. See `docs/BRIEF.md` for the full plan and milestone list.
+Status: early development (M0-M3 done: doctor, GGUF reader, tokenizer, reference forward pass). See `docs/BRIEF.md` for the plan.
 
 ## Quick start
 
