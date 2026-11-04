@@ -71,6 +71,17 @@ export function createChatStore(paths) {
       return chatId;
     },
 
+    /** {docId: active} of the documents attached to a chat. */
+    attachedDocs(id) { const d = readRaw(id); return d && typeof d.attached_docs === 'object' && d.attached_docs ? { ...d.attached_docs } : {}; },
+    /** Change the attached documents of an existing chat: fn(map) mutates and returns nothing. False if the chat does not exist. */
+    editAttached(id, fn) {
+      const d = readRaw(id); if (!d) return false;
+      d.attached_docs = d.attached_docs && typeof d.attached_docs === 'object' ? d.attached_docs : {};
+      fn(d.attached_docs); writeAtomic(file(id), d); return true;
+    },
+    /** Ids of every chat file (for removing a deleted document from all of them). */
+    ids() { try { return fs.readdirSync(paths.chatsDir).filter((f) => f.endsWith('.json') && !f.startsWith('_') && ID_RE.test(f.slice(0, -5))).map((f) => f.slice(0, -5)); } catch { return []; } },
+
     /** Rolling summary cache (Skibeti37 format): {summary, summarized_count}. */
     loadSummary(id) {
       file(id);

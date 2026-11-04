@@ -1,8 +1,9 @@
 import { call, listen, hasToken } from './api.js';
 import { loadStrings, t, apply } from './i18n.js';
 import { renderMarkdown } from './markdown.js';
-import { initSettings, openSettings, onDownloadEvent } from './settings.js';
+import { initSettings, openSettings, onDownloadEvent, onDocProgress } from './settings.js';
 import { initCommandMenu, loadCommands, extractCommands, openAll } from './commands.js';
+import { initDocuments, refreshChips, renderSources } from './documents.js';
 import { initChatList, refreshChatList, setActive } from './chats.js';
 
 const $ = (id) => document.getElementById(id);
@@ -168,7 +169,7 @@ function showProgress(text, fraction) {
   c.bar.hidden = fraction == null;
   if (fraction != null) c.fill.style.width = `${Math.round(fraction * 100)}%`;
 }
-function hideProgress() { const c = S.current; if (c?.status) { c.status.remove(); c.status = null; } }
+function hideProgress(c = S.current) { if (c?.status) { c.status.remove(); c.status = null; } }
 
 // ---------- sending ----------
 function updateSendEnabled() {
@@ -231,7 +232,7 @@ async function continueReply() {
 
 function finishRun() {
   const c = S.current; S.current = null; S.runId = null; S.waiting = false;
-  if (c) { c.msg.bubble.classList.remove('caret-blink'); hideProgress(); paintMessage(c.msg); }
+  if (c) { c.msg.bubble.classList.remove('caret-blink'); hideProgress(c); paintMessage(c.msg); }
   setBusy(false); updateMeter();
   const w = S.idleWaiters; S.idleWaiters = []; for (const r of w) r();
 }
@@ -250,6 +251,16 @@ async function persist() {
     await refreshChatList();
   } catch (e) { toast(`${t('error')}: ${e.message}`); }
 }
+/** Make sure the conversation exists as a file (documents attach to a saved chat). */
+async function ensureChat() {
+  if (S.chatId) return S.chatId;
+  const msgs = S.messages.filter((m) => m.role === 'user' || m.content).map(plain);
+  const name = S.chatName ?? t('newChat');
+  const r = await call('save_chat', { id: null, name, model: S.model, messages: msgs });
+  S.chatId = r.id; S.chatName = msgs.some((m) => m.role === 'user') ? S.chatName : null;
+  setActive(r.id); await refreshChatList();
+  return S.chatId;
+}
 function whenIdle() { return S.busy ? new Promise((r) => S.idleWaiters.push(r)) : Promise.resolve(); }
 async function stopAndWait() { if (S.busy) { call('stop_generation').catch(() => {}); await whenIdle(); } }
 
@@ -266,8 +277,8 @@ async function openChat(id) {
   if (data.model && S.models.some((m) => m.filename === data.model && m.supported)) { S.model = data.model; renderModelPicker(); }
   S.messages = data.messages;
   for (const m of S.messages) buildMessageNode(m);
-  for (const m of S.messages) if (m.role === 'assistant') addActions(m, { last: m === S.messages.at(-1), truncated: false });
-  updateWelcome(); setActive(S.chatId); updateMeter(); scrollToBottom(true); S.stickBottom = true;
+  for (const m of S.messages) if (m.role === 'assistant') { addActions(m, { last: m === S.messages.at(-1), truncated: false }); renderSources(m.node, m.sources); }
+  updateWelcome(); setActive(S.chatId); refreshChips(); updateMeter(); scrollToBottom(true); S.stickBottom = true;
   if (window.matchMedia('(max-width: 760px)').matches) $('app').classList.add('side-closed');
 }
 
@@ -278,6 +289,7 @@ function ours(d) {
   return d.runId === S.runId;
 }
 const events = {
+  docprogress(d) { onDocProgress(d); },
   download(d) { if (onDownloadEvent(d)) refreshState().catch(() => {}); },
   phase(d) {
     if (!ours(d)) return;
@@ -306,6 +318,8 @@ const events = {
     if (d.looped) setMeta(msg, t('looped'), 'warn');
     else if (d.stopped) setMeta(msg, t('stopped'), 'warn');
     else if (truncated) setMeta(msg, t('cut'), 'warn');
+    msg.sources = d.sources?.length ? d.sources : undefined; if (!msg.sources) delete msg.sources;
+    renderSources(msg.node, msg.sources);
     if (d.compressed) setMeta(msg, t('compressedNote'));
     if (d.trimmed) setMeta(msg, t('trimmed'), 'warn');
     if (d.contextMax) setMeter(Math.min(d.contextMax, d.contextUsed + (d.generated ?? 0)), d.contextMax);
@@ -316,8 +330,8 @@ const events = {
     if (!ours(d)) return;
     const msg = S.current.msg;
     finishRun();
-    setMeta(msg, `${t('error')}: ${d.message}`, 'err');
     addActions(msg, { last: true, truncated: false });
+    setMeta(msg, `${t('error')}: ${d.message}`, 'err');
     persist();
   },
 };
@@ -361,7 +375,7 @@ function renderStarters() {
 
 async function newChat() {
   await stopAndWait();
-  S.chatId = null; S.chatName = null; resetView(); setActive(null);
+  S.chatId = null; S.chatName = null; resetView(); setActive(null); refreshChips();
   setMeter(0, S.settings?.contextWindow ?? 0); $('input').value = ''; autoGrow(); updateSendEnabled(); $('input').focus();
 }
 
@@ -381,8 +395,9 @@ async function init() {
   window.__lang = initial.language;
   await loadStrings(initial.language);
   window.__copyLabel = t('copy');
-  initSettings({ refreshState, refreshCommands: loadCommands, applyLanguage: async (lang) => { await call('set_language', { lang }); await loadStrings(lang); refreshChatList(); window.__copyLabel = t('copy'); renderStarters(); renderModelPicker(); setMeter(0, S.settings?.contextWindow ?? 0); } });
+  initSettings({ refreshState, refreshCommands: loadCommands, getChatId: () => S.chatId, getModel: () => S.model, refreshDocs: refreshChips, applyLanguage: async (lang) => { await call('set_language', { lang }); await loadStrings(lang); refreshChatList(); window.__copyLabel = t('copy'); renderStarters(); renderModelPicker(); setMeter(0, S.settings?.contextWindow ?? 0); } });
   initChatList({ open: openChat, deleted: (id) => { if (id === S.chatId) newChat(); }, renamed: (id, name) => { if (id === S.chatId) S.chatName = name; } });
+  initDocuments({ getChatId: () => S.chatId, ensureChat, toast, onChange: () => updateMeter() });
   wireUi(); renderStarters(); refreshChatList(); loadCommands();
   initCommandMenu({ inputEl: $('input'), menuEl: $('cmd-menu'), afterInsert: () => { autoGrow(); updateSendEnabled(); updateMeter(); } });
   $('btn-slash').addEventListener('click', () => { loadCommands().then(() => { if (!openAll()) toast(t('noCommands')); }); $('input').focus(); });

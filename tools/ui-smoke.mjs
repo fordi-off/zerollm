@@ -39,7 +39,7 @@ try {
 
   // ---- chat history flow (functional checks, not just screenshots)
   const check = (cond, what) => { if (!cond) errors.push(`CHECK FAILED: ${what}`); };
-  const flowApp = await startTestApp(); // fresh data folder: the screenshot runs above already saved chats
+  const flowApp = await startTestApp({ ctx: 4096 }); // fresh data folder: the screenshot runs above already saved chats
   const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
   const page = await ctx.newPage();
   page.on('pageerror', (e) => errors.push(`flow: ${e.message}`));
@@ -55,7 +55,7 @@ try {
   // new chat, then a second chat
   await page.click('#btn-new'); check(await page.locator('.msg').count() === 0, 'new chat is empty');
   await send('Helt annen samtale');
-  await page.waitForFunction(() => document.querySelectorAll('.chat-row').length === 2, null, { timeout: 5000 }).catch(() => {});
+  await page.waitForFunction(() => document.querySelectorAll('.chat-row').length === 3, null, { timeout: 5000 }).catch(() => {});
   check(await page.locator('.chat-row').count() === 2, 'two chats listed');
   await page.screenshot({ path: path.join(out, 'flow-1-two-chats.png') });
   // open the older chat
@@ -103,10 +103,31 @@ try {
   await page.waitForSelector('.skill-box:has-text("/test")');
   await page.screenshot({ path: path.join(out, 'flow-5-skills.png') });
   await page.keyboard.press('Escape');
+  // documents: attach a text file, chip, question -> sources under the reply, library tab
+  await page.click('#btn-new');
+  await page.setInputFiles('#file-input', { name: 'kommune.txt', mimeType: 'text/plain', buffer: Buffer.from('Kommunen har ansvar for skoler og barnehager. '.repeat(40)) });
+  await page.waitForSelector('.doc-chip');
+  check((await page.locator('.doc-chip .nm').textContent()) === 'kommune.txt', 'document chip shown');
+  const before2 = await page.locator('.msg.assistant .meta').count();
+  await page.fill('#input', 'Hvem har ansvar for barnehager?'); await page.press('#input', 'Enter');
+  await page.waitForFunction((k) => document.querySelectorAll('.msg.assistant .meta').length > k, before2, { timeout: 30000 });
+  await page.waitForSelector('.doc-sources summary');
+  await page.click('.doc-sources summary');
+  await page.screenshot({ path: path.join(out, 'flow-6-sources.png') });
+  check((await page.locator('.doc-source b').first().textContent()) === 'kommune.txt', 'source names the document');
+  await page.click('.doc-chip .nm'); await page.waitForSelector('.doc-chip.off', { timeout: 3000 }).catch(() => errors.push('CHECK FAILED: chip toggles off'));
+  await page.click('#btn-settings'); await page.click('.tabs [data-tab="documents"]');
+  await page.waitForSelector('#tab-documents .model-row');
+  await page.screenshot({ path: path.join(out, 'flow-7-doclib.png') });
+  await page.keyboard.press('Escape');
+  // reload: the chat keeps its document and the sources
+  await page.reload(); await page.waitForSelector('.chat-row');
+  await page.locator('.chat-row .chat-item', { hasText: 'Hvem har ansvar' }).click();
+  await page.waitForSelector('.doc-chip'); await page.waitForSelector('.doc-sources');
   // delete (two clicks)
   const row = page.locator('.chat-row', { hasText: 'Omdøpt' }); await row.hover();
   await row.locator('.chat-act').nth(1).click(); await row.locator('.chat-act.armed').click();
-  await page.waitForFunction(() => document.querySelectorAll('.chat-row').length === 2, null, { timeout: 5000 }).catch(async () => { await page.screenshot({ path: path.join(out, 'flow-fail-delete.png') }); errors.push(`CHECK FAILED: delete (rows: ${await page.locator('.chat-row').count()}, armed: ${await page.locator('.chat-act.armed').count()})`); });
+  await page.waitForFunction(() => document.querySelectorAll('.chat-row').length === 3, null, { timeout: 5000 }).catch(async () => { await page.screenshot({ path: path.join(out, 'flow-fail-delete.png') }); errors.push(`CHECK FAILED: delete (rows: ${await page.locator('.chat-row').count()}, armed: ${await page.locator('.chat-act.armed').count()})`); });
   await page.screenshot({ path: path.join(out, 'flow-3-after-delete.png') });
   await ctx.close(); await flowApp.close();
 

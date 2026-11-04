@@ -24,7 +24,7 @@ export function resolvePaths(root) {
 }
 
 export function defaultConfig() {
-  return { context_window: DEFAULT_CONTEXT, n_threads: defaultThreads(), utility_model: null, last_model: null, language: 'nb', models: {} };
+  return { context_window: DEFAULT_CONTEXT, n_threads: defaultThreads(), utility_model: null, doc_chunks: 4, last_model: null, language: 'nb', models: {} };
 }
 
 /** Read config.json (creating it with defaults when missing). Unknown keys are preserved. */

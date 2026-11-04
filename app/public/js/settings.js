@@ -32,7 +32,7 @@ export async function openSettings(tab) {
 async function render() {
   const st = await call('state');
   apply($('settings'));
-  renderModels(st); renderPerformance(st); await renderSkills();
+  renderModels(st); renderPerformance(st); await renderSkills(); await renderDocuments(st);
 }
 
 const fmtSpeed = (b) => `${(b / 1e6).toFixed(1)} MB/s`;
@@ -190,4 +190,50 @@ async function renderSkills() {
     catch (ex) { err.textContent = ex.message; err.hidden = false; }
   });
   box.append(form);
+}
+
+// ---- documents tab: the shared library
+const progressLabels = new Map(); // docId -> element
+export function onDocProgress(d) { const e = progressLabels.get(d.docId); if (e) e.textContent = t('summarizingDoc', { done: d.done, total: d.total }); }
+
+async function renderDocuments(st) {
+  const box = $('tab-documents'); box.textContent = '';
+  box.append(el('p', 'hint', t('docsHint')));
+  const n = el('input'); n.type = 'number'; n.min = 1; n.max = 10; n.value = st.settings.docChunks; n.style.width = '70px'; n.setAttribute('aria-label', t('docChunksSetting'));
+  n.addEventListener('change', async () => { try { await call('set_doc_chunks', { value: Number(n.value) }); } catch { /* invalid number: ignored */ } });
+  box.append(row(t('docChunksSetting'), t('docChunksHint'), n));
+  const docs = await call('document_library');
+  progressLabels.clear();
+  if (docs.length === 0) { box.append(el('p', 'notice', t('noDocs'))); return; }
+  box.append(el('h3', '', t('docLibrary')));
+  const chatId = hooks.getChatId();
+  const attached = new Set(chatId ? (await call('list_documents', { chatId })).map((d) => d.id) : []);
+  for (const d of docs) {
+    const r = el('div', 'model-row'); const top = el('div', 'top');
+    top.append(el('strong', 'dl-name', d.filename));
+    const tools = el('div', 'model-tools');
+    if (chatId && !attached.has(d.id)) {
+      const add = el('button', 'btn primary', t('addToChat')); add.type = 'button';
+      add.addEventListener('click', async () => { await call('attach_document', { chatId, docId: d.id }); await hooks.refreshDocs(); await renderDocuments(st); });
+      tools.append(add);
+    }
+    const sum = el('button', 'btn', t('summarizeDoc')); sum.type = 'button'; const status = el('span', 'hint');
+    sum.addEventListener('click', async () => {
+      sum.disabled = true; progressLabels.set(d.id, status); status.textContent = t('summarizingDoc', { done: 0, total: '?' });
+      try { await call('summarize_document', { docId: d.id, model: hooks.getModel() }); } catch (e) { status.textContent = e.message; sum.disabled = false; return; }
+      await renderDocuments(st);
+    });
+    const show = el('button', 'btn', t('showText')); show.type = 'button';
+    const pv = el('div', 'doc-preview'); pv.hidden = true;
+    show.addEventListener('click', async () => { if (pv.hidden) { const p = await call('preview_document', { docId: d.id }); pv.textContent = p?.fullText.slice(0, 20000) ?? ''; } pv.hidden = !pv.hidden; });
+    const del = el('button', 'btn', t('deleteSkill')); del.type = 'button'; let armed = null;
+    del.addEventListener('click', async () => {
+      if (!armed) { del.textContent = t('docDeleteConfirm'); del.classList.add('danger'); armed = setTimeout(() => { armed = null; del.textContent = t('deleteSkill'); del.classList.remove('danger'); }, 3000); return; }
+      clearTimeout(armed); await call('delete_document', { docId: d.id }); await hooks.refreshDocs(); await renderDocuments(st);
+    });
+    tools.append(sum, show, del, status);
+    r.append(top, el('div', 'sub', `${t('docParts', { n: d.chunks })}`), tools);
+    if (d.summary) r.append(el('div', 'doc-summary-text', d.summary));
+    r.append(pv); box.append(r);
+  }
 }
