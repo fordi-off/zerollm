@@ -213,3 +213,9 @@ File: Qwen3-8B-Q4_K_M.gguf, 4.68 GB (Q4_K x217 = 3.45 GB, Q6_K x37 = 1.23 GB, F3
 - Load time 2.4-2.7 s (file in the OS cache), effective weight bandwidth 14.8-15.9 GB/s.
 - Output: "The capital of France is Paris." and coherent multi-turn chat. (The second chat answer contains a factual error about European traffic; that is model quality for a 4-bit 8B in non-thinking mode, the text itself is fluent and on topic.)
 - **Brief M9 criterion ("Qwen3 8B Q4 runs in <= ~9 GB RAM at >= ~2 tok/s decode, documented"): met** -- ~5.0 GB RSS (estimator: 5.48 GB at full 2048-token context), 2.9-3.2 tok/s decode. The projection made earlier from the 4B result (2.5-2.7 tok/s) was slightly pessimistic.
+
+### Llama 3.2 1B Instruct Q8_0 on the target laptop (user-measured): first real Llama file
+
+`info`: architecture llama, 16 layers, hidden 2048, 32/8 heads, head_dim 64, FFN 8192, vocab 128256, RoPE adjacent pairs base 500000 + `rope_freqs.weight`, tied embeddings, 1.24B parameters, Q8_0 (1.22 GB), template = the simple Llama 3 one (no "Cutting Knowledge Date" header, so none is added), BOS 128000 `<|begin_of_text|>`, EOS 128009 `<|eot_id|>`. `tokenize "Hello, world! 12345"` -> ids `9906 11 1917 0 220 4513 1774` (pieces Hello , Ġworld ! Ġ 123 45), exactly the tiktoken/cl100k ids. `run --show-prompt` rendered `<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n...<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n` (22 tokens); answer "The capital of France is Paris.", stopped by `<|eot_id|>`.
+
+6 threads, wasm-simd: prefill 39.8-53.2 tok/s, decode 15.3-16.8 tok/s (~19.5 GB/s effective weight bandwidth, the best of any model so far), RSS 1.6 GB (estimate 1.87 GB). Multi-turn `chat` reused the history from the KV cache (22, 66, 100 tokens cached). Speed across models tracks file size: Qwen3 0.6B Q8_0 (0.6 GB) ~28, Llama 3.2 1B Q8_0 (1.2 GB) ~16, Qwen3 4B Q4_K_M (2.3 GB) ~5.5, Qwen3 8B Q4_K_M (4.7 GB) ~3 tok/s.
