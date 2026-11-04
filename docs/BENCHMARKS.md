@@ -186,3 +186,14 @@ Profile of worker 0, decode, 4B Q4_K_M, 6 threads (`ZEROLLM_PROFILE=1`, ms/token
 | wide | 201.6 | 154.5 (77%) | 12.5 (6%) | 0.8 | 31.0 (15%) | 2.8 |
 
 Interpretation: the cache-resident kernel speeds predict ~89 ms of matmul per worker per token, observed 155 ms, so the kernels stall on DRAM (~15 GB/s seen by the kernels vs a 25-35 GB/s ceiling); ~180 barriers per token average ~190 us of waiting each (imbalance and/or SMT contention from spinning workers); JS activation quantization costs 6%. Projection (not a measurement) for 8B Q4_K_M at ~2.1x the weight bytes: roughly 2.5-2.7 tok/s decode.
+
+### Barrier wait strategy A/B on the target laptop (user-measured, `tools/abbench.mjs`, 5 interleaved rounds, 15 s pauses)
+
+Qwen3-4B Q4_K_M, 6 workers, batch 1, 16-token prompt, 24 generated tokens:
+
+| spin | decode tok/s per round | median (min-max) | prefill median |
+|---|---|---|---|
+| 0 (sleep at once) | 5.90, 4.55, 4.80, 6.04, 6.06 | **5.90** (4.55-6.06) | 4.48 |
+| 20000 (spin first) | 4.28, 5.64, 4.57, 4.55, 4.55 | 4.55 (4.28-5.64) | 4.36 |
+
+spin=0 won 4 of 5 rounds, median +30% (ranges overlap, so not airtight); results cluster in two modes (~6.0 vs ~4.55), consistent with spinning workers landing on the hyperthread siblings of busy cores. On the 4-vCPU dev VM (no spare hyperthreads) spinning was ~20% faster. The pool therefore defaults to `spin = 0` when logical processors >= 2 x workers, else 20000 (`--spin N` overrides).

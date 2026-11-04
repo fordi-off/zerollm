@@ -308,3 +308,15 @@ test('f16 KV cache: prefix-cache export/import round trip is exact', async () =>
     for (const t of [9, 33, 120]) assert.deepEqual([...await b.forward(t)], [...await a.forward(t)].map((v) => v), `token ${t}`);
   } finally { await a.close(); await b.close(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('default spin: sleep right away when there are >= 2 logical processors per worker, spin otherwise; explicit spin wins', async () => {
+  const { defaultSpin } = await import('../src/compute/pool.js');
+  assert.equal(defaultSpin(6, 12), 0);   // the 6-core / 12-thread laptop
+  assert.equal(defaultSpin(4, 8), 0);
+  assert.equal(defaultSpin(6, 8), 20000);
+  assert.equal(defaultSpin(4, 4), 20000); // the 4-vCPU dev VM
+  assert.equal(defaultSpin(2, 3), 20000);
+  const { g } = tinyFile({ arch: 'qwen3', quant: 'q8_0' });
+  const a = await PoolModel.create(g, { ctx: 8, workers: 2, spin: 1234 });
+  try { assert.equal(a.spin, 1234); } finally { await a.close(); }
+});
