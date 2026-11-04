@@ -16,11 +16,11 @@ const CASES = [
 function runKernel(name, type, blockElems, rows, nb, wbytes, x) {
   const cols = nb * blockElems; const abl = cols / 32;
   const al = (v) => Math.ceil(v / 64) * 64;
-  const wOff = 64; const xqOff = al(wOff + wbytes.length); const xdOff = al(xqOff + cols); const yOff = al(xdOff + abl * 4);
+  const wOff = 64; const xqOff = al(wOff + wbytes.length); const xdOff = al(xqOff + cols); const xsOff = al(xdOff + abl * 4); const yOff = al(xsOff + abl * 4);
   const mem = new WebAssembly.Memory({ initial: Math.ceil((yOff + rows * 4 + 64) / 65536) });
   new Uint8Array(mem.buffer, wOff, wbytes.length).set(wbytes);
-  quantizeAct(x, new Int8Array(mem.buffer, xqOff, cols), new Float32Array(mem.buffer, xdOff, abl));
-  instantiateKernels(mem)[name](wOff, xqOff, xdOff, yOff, rows, nb);
+  quantizeAct(x, new Int8Array(mem.buffer, xqOff, cols), new Float32Array(mem.buffer, xdOff, abl), new Float32Array(mem.buffer, xsOff, abl));
+  instantiateKernels(mem)[name](wOff, xqOff, xdOff, xsOff, yOff, rows, nb);
   return Float32Array.from(new Float32Array(mem.buffer, yOff, rows));
 }
 
@@ -56,6 +56,42 @@ for (const [label, type, blockElems, kname] of CASES) {
       const want = matvec({ type, rows, cols, data: wbytes }, new Act(x), new Float32Array(rows));
       const rms = Math.sqrt(want.reduce((a, v) => a + v * v, 0) / rows) || 1;
       got.forEach((g, r) => { assert.ok(Number.isFinite(g)); assert.ok(Math.abs(g - want[r]) <= 1e-4 * rms + 1e-6, `fill 0x${fill.toString(16)} row ${r}: ${g} vs ${want[r]}`); });
+    }
+  });
+}
+
+
+// ------------------------------------------------------------------------------------- batched K-quant kernels (M9a)
+for (const [label, type, blockElems, single, batch] of [
+  ['Q5_0', GGML_TYPE.Q5_0, 32, 'matvec_q5_0', 'mm_q5_0'],
+  ['Q4_K', GGML_TYPE.Q4_K, 256, 'matvec_q4_k', 'mm_q4_k'],
+  ['Q5_K', GGML_TYPE.Q5_K, 256, 'matvec_q5_k', 'mm_q5_k'],
+  ['Q6_K', GGML_TYPE.Q6_K, 256, 'matvec_q6_k', 'mm_q6_k'],
+]) {
+  test(`${label} batched kernel is BIT-IDENTICAL to the decode kernel for every row/token tile shape`, () => {
+    const rand = mulberry32(91);
+    const shapes = [[1, 1, 1], [2, 1, 4], [3, 2, 5], [5, 1, 7], [4, 3, 8], [7, 2, 13], [2, 1, 16], [1, 2, 3]];
+    for (const [rows, nb, ntok] of shapes) {
+      const cols = nb * blockElems; const abl = cols / 32;
+      const wbytes = randomQuantBlocks(type, rows * nb, rand);
+      const xs = Array.from({ length: ntok }, () => Float32Array.from({ length: cols }, () => gaussian(rand)));
+      const al = (v) => Math.ceil(v / 64) * 64;
+      const wOff = 64; const xq8 = al(wOff + wbytes.length); const xd1 = al(xq8 + cols); const xs1 = al(xd1 + abl * 4);
+      const y1 = al(xs1 + abl * 4); const xq16 = al(y1 + rows * 4); const xdB = al(xq16 + ntok * cols * 2);
+      const xsB = al(xdB + ntok * abl * 4); const yB = al(xsB + ntok * abl * 4); const total = yB + ntok * rows * 4 + 64;
+      const mem = new WebAssembly.Memory({ initial: Math.ceil(total / 65536) });
+      const k = instantiateKernels(mem);
+      new Uint8Array(mem.buffer, wOff, wbytes.length).set(wbytes);
+      const q16 = new Int16Array(mem.buffer, xq16, ntok * cols); const dB = new Float32Array(mem.buffer, xdB, ntok * abl); const sB = new Float32Array(mem.buffer, xsB, ntok * abl);
+      xs.forEach((x, t) => quantizeAct(x, q16.subarray(t * cols, (t + 1) * cols), dB.subarray(t * abl, (t + 1) * abl), sB.subarray(t * abl, (t + 1) * abl)));
+      k[batch](wOff, xq16, xdB, xsB, yB, rows, nb, ntok);
+      const got = Float32Array.from(new Float32Array(mem.buffer, yB, ntok * rows));
+      for (let t = 0; t < ntok; t++) {
+        quantizeAct(xs[t], new Int8Array(mem.buffer, xq8, cols), new Float32Array(mem.buffer, xd1, abl), new Float32Array(mem.buffer, xs1, abl));
+        k[single](wOff, xq8, xd1, xs1, y1, rows, nb);
+        const want = new Float32Array(mem.buffer, y1, rows);
+        for (let r = 0; r < rows; r++) assert.equal(got[t * rows + r], want[r], `${label} rows=${rows} nb=${nb} ntok=${ntok} token ${t} row ${r}`);
+      }
     }
   });
 }

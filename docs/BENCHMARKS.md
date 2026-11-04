@@ -102,3 +102,20 @@ Profile, Q4_K_M-style, 1 thread decode: 197 ms/token, 94% in the matmul kernels.
 `run ... "What is the capital of France? Answer in one sentence." --temp 0`: "The capital of France is Paris." (prompt 24 tok, decode 4.30 tok/s over only 7 generated tokens incl. warm-up, RSS 2.61 GB). First real-model confirmation of the Q4_K/Q6_K layouts and SIMD kernels.
 
 Observations: decode 5.8 tok/s clears the brief's ">= ~4 tok/s for 4B Q4" target; ~14.4 GB/s of the ~25-35 GB/s ceiling (so some headroom). Prefill is NOT faster than decode for K-quants (1.04x): they have no batched kernels yet, so a 64-token prompt takes ~11 s. Projection (not a measurement): 8B Q4_K_M (~4.7 GB) at ~14 GB/s effective would decode at roughly 3 tok/s.
+
+### Kernel micro-benchmark (tools/kbench.mjs), dev container: compute-bound speed per kernel, weights cache-resident
+
+`node tools/kbench.mjs` (1024 x 2048 weights, batch 16, 1 thread, 4-vCPU Xeon VM; G weights/s, batch column = G weight-token products/s). Shows what each format costs when memory is not the limit.
+
+| format | decode | batched x16 | notes |
+|---|---|---|---|
+| Q8_0 | 11.4-13.1 | 15.6-17.3 | |
+| Q4_0 | 9.6-10.8 | 14.5-16.5 | |
+| Q5_0 | 7.1-7.3 | 12.5 | |
+| Q4_K | 5.4-5.5 (was 4.6) | 5.8-5.9 | |
+| Q5_K | 4.3-4.5 (was 3.7) | 5.5 | |
+| Q6_K | 2.6 | 4.4 | slowest; 21% of the weights but ~35% of the matmul time in a Q4_K_M model |
+
+Experiment that shaped the design: replacing widen+dot with `i16x8.extmul` + pairwise adds (no widening) made decode 25-35% faster for Q4_K/Q5_K but batched kernels 20-50% slower (there the weights are widened once per tile and reused for 4 tokens) and Q5_0/Q6_K decode no better, so the final kernels are a hybrid (extmul for Q4_K/Q5_K/Q6_K decode; widened tiles for every batched kernel; Q5_0 decode as before). Wasm op count is not machine instruction count: on x64 V8 an extmul costs several instructions.
+
+Model-level effect on the Q4_K_M-style 0.6B-shaped file (before -> after, decode / prefill tok/s): 1 thread 4.30/5.47 -> 4.85/7.32; 4 threads 13.7/17.0 -> 15.5/22.0. Smaller than the kernel gains because attention (JS, grows with context) and activation quantization (JS, repeated by every worker) are still outside the kernels.

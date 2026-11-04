@@ -67,6 +67,8 @@ function main() {
   const XD = total; total += alignUp((maxCols / 32) * 4, 64);            // its f32 scales
   const XQ16 = total; total += alignUp(BM * maxCols * 2, 64);            // int16-widened activations (batched)
   const XDB = total; total += alignUp(BM * (maxCols / 32) * 4, 64);      // their scales
+  const XS = total; total += alignUp((maxCols / 32) * 4, 64);            // per-block quant sums (decode; used by Q4_K/Q5_K)
+  const XSB = total; total += alignUp(BM * (maxCols / 32) * 4, 64);      // same for batches
   const YO = total; total += alignUp(Math.max(maxRows, BM * maxRowsBatch) * 4, 64); // f32 results
   const pages = Math.max(1, Math.ceil(total / 65536));
   if (pages > 65536) throw new Error(`worker ${id}: weight slice is ${(total / 2 ** 30).toFixed(2)} GB, over the 4 GB wasm32 limit; use more workers`);
@@ -116,16 +118,21 @@ function main() {
   const xdv = new Float32Array(mem.buffer, XD, maxCols / 32);
   const xq16v = new Int16Array(mem.buffer, XQ16, BM * maxCols);
   const xdBv = new Float32Array(mem.buffer, XDB, (BM * maxCols) / 32);
+  const xsv = new Float32Array(mem.buffer, XS, maxCols / 32);
+  const xsBv = new Float32Array(mem.buffer, XSB, (BM * maxCols) / 32);
   const yv = new Float32Array(mem.buffer, YO, Math.max(maxRows, BM * maxRowsBatch));
   if (useWasm) {
     const k = instantiateKernels(mem);
     for (const w of Object.values(W)) {
-      // Q8_0 / Q4_0 have batched (matmul) kernels; Q5_0 and the K-quants only have decode kernels, which batched
-      // prefill applies once per token (correct, but the weights are then re-read for every token).
-      if (w.type === GGML_TYPE.Q8_0) { w.kernel = k.matvec_q8_0; w.mmKernel = k.mm_q8_0; } else if (w.type === GGML_TYPE.Q4_0) { w.kernel = k.matvec_q4_0; w.mmKernel = k.mm_q4_0; } else if (w.type === GGML_TYPE.Q5_0) w.kernel = k.matvec_q5_0;
-      else if (w.type === GGML_TYPE.Q4_K) w.kernel = k.matvec_q4_k;
-      else if (w.type === GGML_TYPE.Q5_K) w.kernel = k.matvec_q5_k;
-      else if (w.type === GGML_TYPE.Q6_K) w.kernel = k.matvec_q6_k;
+      // Q8_0 / Q4_0 kernels take (w, xq, xd, y, rows, nb[, ntok]); Q5_0 and the K-quants additionally take the per-block
+      // quant sums (w, xq, xd, xs, y, rows, nb[, ntok]).
+      const set = (kernel, mmKernel, useXs) => { w.kernel = kernel; w.mmKernel = mmKernel; w.useXs = useXs; };
+      if (w.type === GGML_TYPE.Q8_0) set(k.matvec_q8_0, k.mm_q8_0, false);
+      else if (w.type === GGML_TYPE.Q4_0) set(k.matvec_q4_0, k.mm_q4_0, false);
+      else if (w.type === GGML_TYPE.Q5_0) set(k.matvec_q5_0, k.mm_q5_0, true);
+      else if (w.type === GGML_TYPE.Q4_K) set(k.matvec_q4_k, k.mm_q4_k, true);
+      else if (w.type === GGML_TYPE.Q5_K) set(k.matvec_q5_k, k.mm_q5_k, true);
+      else if (w.type === GGML_TYPE.Q6_K) set(k.matvec_q6_k, k.mm_q6_k, true);
     }
   }
 
@@ -165,10 +172,10 @@ function main() {
     const t = prof ? performance.now() : 0;
     srcVec = src; srcB = B; srcDim = dim;
     if (useWasm) {
-      if (B === 1) quantizeAct(src.subarray(0, dim), xqv, xdv);
+      if (B === 1) quantizeAct(src.subarray(0, dim), xqv, xdv, xsv);
       else {
         const nbl = dim / 32;
-        for (let b = 0; b < B; b++) quantizeAct(src.subarray(b * dim, (b + 1) * dim), xq16v.subarray(b * dim, (b + 1) * dim), xdBv.subarray(b * nbl, (b + 1) * nbl));
+        for (let b = 0; b < B; b++) quantizeAct(src.subarray(b * dim, (b + 1) * dim), xq16v.subarray(b * dim, (b + 1) * dim), xdBv.subarray(b * nbl, (b + 1) * nbl), xsBv.subarray(b * nbl, (b + 1) * nbl));
       }
     }
     if (prof) PT.quant += performance.now() - t;
@@ -180,16 +187,10 @@ function main() {
     const B = srcB;
     if (w.kernel) {
       if (B === 1) {
-        w.kernel(w.off, XQ, XD, YO, w.rows, w.nb);
+        if (w.useXs) w.kernel(w.off, XQ, XD, XS, YO, w.rows, w.nb); else w.kernel(w.off, XQ, XD, YO, w.rows, w.nb);
         dest.set(yv.subarray(0, w.rows), destOff);
-      } else if (!w.mmKernel) {
-        for (let b = 0; b < B; b++) { // no batched kernel for this format: decode kernel per token
-          quantizeAct(srcVec.subarray(b * srcDim, (b + 1) * srcDim), xqv, xdv);
-          w.kernel(w.off, XQ, XD, YO, w.rows, w.nb);
-          dest.set(yv.subarray(0, w.rows), b * destStride + destOff);
-        }
       } else {
-        w.mmKernel(w.off, XQ16, XDB, YO, w.rows, w.nb, B);
+        if (w.useXs) w.mmKernel(w.off, XQ16, XDB, XSB, YO, w.rows, w.nb, B); else w.mmKernel(w.off, XQ16, XDB, YO, w.rows, w.nb, B);
         for (let b = 0; b < B; b++) dest.set(yv.subarray(b * w.rows, (b + 1) * w.rows), b * destStride + destOff);
       }
     } else {

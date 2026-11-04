@@ -33,8 +33,12 @@ export class Act {
   }
 }
 
-/** Q8_0-style activation quantization with f32 scales. d = amax/127, q = round(x/d). */
-export function quantizeAct(x, q, d) {
+/**
+ * Q8_0-style activation quantization with f32 scales. d = amax/127, q = round(x/d).
+ * Optionally also writes the integer sum of each block's quants into `s` (used by the Q4_K/Q5_K min correction).
+ * @param {Float32Array} x @param {Int8Array|Int16Array} q @param {Float32Array} d @param {Float32Array} [s]
+ */
+export function quantizeAct(x, q, d, s) {
   const nb = x.length / QK;
   for (let b = 0; b < nb; b++) {
     const o = b * QK;
@@ -43,10 +47,14 @@ export function quantizeAct(x, q, d) {
     const scale = amax / 127;
     d[b] = scale;
     const inv = scale ? 1 / scale : 0;
+    let sum = 0;
     for (let i = 0; i < QK; i++) {
       const v = x[o + i] * inv;
-      q[o + i] = v < 0 ? -Math.round(-v) : Math.round(v);
+      const r = v < 0 ? -Math.round(-v) : Math.round(v);
+      q[o + i] = r;
+      sum += r;
     }
+    if (s) s[b] = sum;
   }
 }
 
