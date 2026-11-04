@@ -160,3 +160,29 @@ RSS is identical because KV pages are only resident once touched (65 tokens touc
 | f16 | 850 MiB | 1158 MiB | +308 MiB | +320 MiB |
 
 With the f16 cache at that 3000-token context: prefill 29.3 tok/s, decode 18.5 tok/s (4 threads).
+
+### Target laptop (user-measured), after the K-quant / SIMD-attention / f16-KV work: Ryzen 5 7530U, Node 26.5.1, Windows
+
+`node tools/kbench.mjs` (1 thread, weights cache-resident; G weights/s, batch column = G weight-token products/s):
+
+| format | decode | batched x16 | batch speedup |
+|---|---|---|---|
+| Q8_0 | 12.7-13.4 | 22.0-24.5 | 1.7-1.8x |
+| Q4_0 | 10.0-10.6 | 20.6-22.2 | 2.1x |
+| Q5_0 | 7.2-7.7 | 16.6-17.0 | 2.2-2.3x |
+| Q4_K | 8.8-9.4 (wide form: 8.6) | 15.3-16.2 | 1.7x |
+| Q5_K | 7.2 (wide: 6.9) | 12.3-12.4 | 1.7x |
+| Q6_K | 4.8-5.0 (wide: 4.7) | 10.8-11.1 | 2.3x |
+
+The extmul and wide integer-dot forms for K-quant decode are within 2-4% of each other on this CPU (extmul marginally ahead), unlike the dev VM where extmul was 15-30% ahead: default stays extmul.
+
+**Qwen3-4B Q4_K_M, 6 threads** (`bench --threads 6 --batch 1,16 --prompt-tokens 64 --n 16`): prefill 4.80 (batch 1) / **8.23** (batch 16) tok/s, decode 4.40 / 4.81 tok/s. Earlier run before the K-quant batch kernels: prefill 5.96, decode 5.77. Repeated runs of essentially the same code gave decode 4.40, 4.81, 5.31 and 5.77 tok/s: **run-to-run variation on this laptop is about +-15%** (power state, background load), so single runs cannot show differences below that.
+
+Profile of worker 0, decode, 4B Q4_K_M, 6 threads (`ZEROLLM_PROFILE=1`, ms/token):
+
+| dot form | total | matmul kernels | act quantization | attention | barrier waits | other |
+|---|---|---|---|---|---|---|
+| extmul | 209.2 | 157.8 (75%) | 12.4 (6%) | 0.8 | 35.3 (17%) | 2.9 |
+| wide | 201.6 | 154.5 (77%) | 12.5 (6%) | 0.8 | 31.0 (15%) | 2.8 |
+
+Interpretation: the cache-resident kernel speeds predict ~89 ms of matmul per worker per token, observed 155 ms, so the kernels stall on DRAM (~15 GB/s seen by the kernels vs a 25-35 GB/s ceiling); ~180 barriers per token average ~190 us of waiting each (imbalance and/or SMT contention from spinning workers); JS activation quantization costs 6%. Projection (not a measurement) for 8B Q4_K_M at ~2.1x the weight bytes: roughly 2.5-2.7 tok/s decode.
