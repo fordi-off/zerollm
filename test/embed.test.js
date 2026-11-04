@@ -97,5 +97,5 @@ test('CLI: `embed --compare` accepts a Skibeti37 document or a plain list; `--se
   }
   const s = spawnSync(process.execPath, ['bin/zerollm.js', 'embed', p, '--selftest'], { encoding: 'utf8' });
   assert.equal(s.status, 0, s.stderr);
-  assert.match(s.stdout, /triples ranked correctly/);
+  assert.match(s.stdout, /English triples: \d+\/4 ranked correctly/);
 });
