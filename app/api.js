@@ -8,6 +8,7 @@ import { loadTokenizer, EngineMemoryError, defaultThreads } from '../src/index.j
 import { defaultConfig, CONTEXT_STEPS } from './config.js';
 import { listModels, modelPath } from './models.js';
 import { createChatStore } from './chats.js';
+import { createSkills } from './skills.js';
 import { createDownloader, freeDiskBytes } from './downloader.js';
 import { CATALOG } from './catalog.js';
 import { buildMessages, fitToContext, looksLooped, stablePrefixIds, SAMPLING, DEFAULT_MAX_TOKENS, CONTINUATION_PROMPT } from './chat-core.js';
@@ -18,6 +19,10 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
   let runSeq = 0;
   let current = null; // {id, abort: {aborted}}
   const chatStore = createChatStore(paths);
+  const skills = createSkills(paths);
+  skills.seed();
+  /** Instruction text for the slash commands on the last user message (they apply to that one reply). */
+  const extraFor = (history) => skills.bodies([...history].reverse().find((m) => m.role === 'user')?.commands) ?? '';
   const downloader = createDownloader({ paths, log, emit, catalog, retryDelayMs });
   const tokenizers = new Map(); // filename -> PromptTools (weights not loaded)
 
@@ -50,7 +55,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
 
       const msgs = continuation ? [...history, { role: 'user', content: CONTINUATION_PROMPT }] : history;
       const ctxMax = engine.ctx;
-      const fitted = fitToContext(buildMessages(msgs), (m) => engine.countPromptTokens(m), ctxMax, DEFAULT_MAX_TOKENS);
+      const fitted = fitToContext(buildMessages(msgs, { extraSystem: extraFor(history) }), (m) => engine.countPromptTokens(m), ctxMax, DEFAULT_MAX_TOKENS);
       const contextUsed = engine.countPromptTokens(fitted.messages);
       log.info(`generating: ${model} | ${contextUsed}/${ctxMax} ctx tokens${fitted.trimmed ? ' | prompt trimmed to fit' : ''}`);
 
@@ -149,6 +154,11 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
 
     async set_last_model({ filename }) { const cfg = getConfig(); cfg.last_model = filename; setConfig(cfg); return { ok: true }; },
 
+    async list_commands() { return skills.commands(); },
+    async list_skills() { return skills.list(); },
+    async add_skill({ name, content }) { skills.add(name, content); return skills.list(); },
+    async delete_skill({ id }) { skills.delete(id); return skills.list(); },
+
     async list_chats() { return chatStore.list(); },
     async load_chat({ id }) { return chatStore.load(id); },
     async save_chat(p) { return { id: chatStore.save(p) }; },
@@ -178,7 +188,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
     /** Exact prompt size for the context meter (works without loading the model's weights). */
     async estimate_context({ model, messages }) {
       const tools = toolsFor(model);
-      const fitted = buildMessages(messages);
+      const fitted = buildMessages(messages, { extraSystem: extraFor(messages) });
       return { contextUsed: tools.countPromptTokens(fitted), contextMax: Math.min(contextMax(), tools.cfg.nCtxTrain) };
     },
 

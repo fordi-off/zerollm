@@ -29,3 +29,10 @@ Run `npm run app -- --data <folder containing models/>` (or `node app/main.js`).
 - [ ] Unplug the network for a few seconds during a download: it retries and continues.
 - [ ] All catalog URLs work (each shows a size close to the listed one); report any 404.
 - [ ] KV f32/f16 selector changes the RAM estimate; delete model asks for confirmation and removes the file.
+
+## A4 - skills
+- [ ] Type `/` or press the `/` button: the menu lists /humanize, /shorten, /simple, /norwegian, /proofread, /bokmal, /nynorsk, /tutor; arrows + Tab/Enter pick one, Esc closes.
+- [ ] `/shorten Forklar hva en kommune er` gives a clearly shorter answer than the same question without the command; the chip `/shorten` shows under the message.
+- [ ] `/proofread <tekst med feil>` fixes the text; the next message without a command behaves normally again.
+- [ ] Add a command in Settings > Kommandoer; drop a `.md` file into `skills/` while the app runs - it appears (after focusing the window or reopening the menu).
+- [ ] Skibeti37 chats that contain `commands` keep their chips.

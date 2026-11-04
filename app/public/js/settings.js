@@ -32,7 +32,7 @@ export async function openSettings(tab) {
 async function render() {
   const st = await call('state');
   apply($('settings'));
-  renderModels(st); renderPerformance(st);
+  renderModels(st); renderPerformance(st); await renderSkills();
 }
 
 const fmtSpeed = (b) => `${(b / 1e6).toFixed(1)} MB/s`;
@@ -155,4 +155,34 @@ function renderPerformance(st) {
     row(t('theme'), '', theme),
     row(t('reset'), '', reset),
   );
+}
+
+async function renderSkills() {
+  const box = $('tab-skills'); box.textContent = '';
+  box.append(el('p', 'hint', t('skillsHint')));
+  const skills = await call('list_skills');
+  for (const s of skills) {
+    const b = el('div', 'skill-box'); const h = el('h4'); h.append(el('span', '', s.name));
+    const del = el('button', 'btn', t('deleteSkill')); del.type = 'button';
+    let armed = null;
+    del.addEventListener('click', async () => {
+      if (!armed) { del.textContent = t('confirmDelete'); del.classList.add('danger'); armed = setTimeout(() => { armed = null; del.textContent = t('deleteSkill'); del.classList.remove('danger'); }, 3000); return; }
+      clearTimeout(armed); await call('delete_skill', { id: s.id }); await hooks.refreshCommands(); await renderSkills();
+    });
+    h.append(del); b.append(h);
+    for (const c of s.commands) { const r = el('div', 'skill-cmd'); r.append(el('b', '', `/${c.command}`), document.createTextNode(`  ${c.description}`)); b.append(r); }
+    box.append(b);
+  }
+  const form = el('form', 'skill-form'); form.append(el('h4', '', t('addSkill')));
+  const name = el('input'); name.placeholder = t('skillName'); name.maxLength = 60;
+  const content = el('textarea'); content.placeholder = t('skillContent');
+  const err = el('div', 'form-error'); err.hidden = true;
+  const save = el('button', 'btn primary', t('saveSkill')); save.type = 'submit';
+  form.append(name, content, err, save);
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault(); err.hidden = true;
+    try { await call('add_skill', { name: name.value, content: content.value }); await hooks.refreshCommands(); await renderSkills(); }
+    catch (ex) { err.textContent = ex.message; err.hidden = false; }
+  });
+  box.append(form);
 }

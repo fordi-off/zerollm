@@ -2,6 +2,7 @@ import { call, listen, hasToken } from './api.js';
 import { loadStrings, t, apply } from './i18n.js';
 import { renderMarkdown } from './markdown.js';
 import { initSettings, openSettings, onDownloadEvent } from './settings.js';
+import { initCommandMenu, loadCommands, extractCommands, openAll } from './commands.js';
 import { initChatList, refreshChatList, setActive } from './chats.js';
 
 const $ = (id) => document.getElementById(id);
@@ -66,9 +67,9 @@ function updateMeter() {
   clearTimeout(meterTimer);
   meterTimer = setTimeout(async () => {
     if (!S.model || S.busy) return;
-    const msgs = S.messages.map(({ role, content }) => ({ role, content }));
-    const draft = $('input').value.trim();
-    if (draft) msgs.push({ role: 'user', content: draft });
+    const msgs = S.messages.map(apiMsg);
+    const draft = extractCommands($('input').value.trim());
+    if (draft.text || draft.commands.length) msgs.push({ role: 'user', content: draft.text, ...(draft.commands.length ? { commands: draft.commands } : {}) });
     if (msgs.length === 0) { setMeter(0, S.settings?.contextWindow ?? 0); return; }
     try { const r = await call('estimate_context', { model: S.model, messages: msgs }); setMeter(r.contextUsed, r.contextMax); } catch { /* model not readable */ }
   }, 350);
@@ -88,7 +89,7 @@ function buildMessageNode(msg) {
   msg.node = wrap; msg.bubble = bubble;
   paintMessage(msg);
   $('messages').append(wrap);
-  if (msg.role === 'user') addUserActions(msg);
+  if (msg.role === 'user') { addCommandChips(msg); addUserActions(msg); }
   return wrap;
 }
 let paintQueued = new Set();
@@ -100,6 +101,14 @@ function schedulePaint(msg) {
   if (paintQueued.has(msg)) return; paintQueued.add(msg);
   requestAnimationFrame(() => { paintQueued.delete(msg); paintMessage(msg); if (msg === S.current?.msg) msg.bubble.classList.add('caret-blink'); scrollToBottom(); });
 }
+function addCommandChips(msg) {
+  msg.node.querySelector('.msg-cmds')?.remove();
+  if (!msg.commands?.length) return;
+  const chips = el('div', 'msg-cmds');
+  for (const c of msg.commands) chips.append(el('span', 'cmd-chip', `/${c}`));
+  msg.bubble.after(chips);
+}
+
 function addUserActions(msg) {
   const bar = el('div', 'actions');
   const add = (label, fn) => { const b = el('button', 'act', label); b.type = 'button'; b.addEventListener('click', fn); bar.append(b); };
@@ -181,14 +190,17 @@ async function startRun() {
   showProgress(t('loadingModel'), null);
   reply.bubble.classList.add('caret-blink');
   scrollToBottom(true); S.stickBottom = true;
-  const history = S.messages.slice(0, -1).map(({ role, content }) => ({ role, content }));
+  const history = S.messages.slice(0, -1).map(apiMsg);
   try { await call('send_message', { model: S.model, messages: history }); }
   catch (e) { finishRun(); setMeta(reply, e.message === 'busy' ? t('busy') : `${t('error')}: ${e.message}`, 'err'); }
 }
 
-async function sendDraft(text) {
-  if (S.busy || !text.trim()) return;
+async function sendDraft(raw) {
+  if (S.busy || !raw.trim()) return;
+  const { text, commands } = extractCommands(raw);
+  if (!text) { toast(t('writeAfterCommand')); return; }
   const user = { role: 'user', content: text.trim() };
+  if (commands.length) user.commands = commands;
   const reply = { role: 'assistant', content: '' };
   S.messages.push(user, reply);
   buildMessageNode(user); buildMessageNode(reply); updateWelcome();
@@ -213,7 +225,7 @@ async function continueReply() {
   reply.node.querySelectorAll('.meta, .actions').forEach((n) => n.remove());
   S.current = { msg: reply }; S.waiting = true; S.runId = null; setBusy(true);
   showProgress(t('loadingModel'), null); reply.bubble.classList.add('caret-blink');
-  const history = S.messages.map(({ role, content }) => ({ role, content }));
+  const history = S.messages.map(apiMsg);
   try { await call('continue_message', { model: S.model, messages: history }); } catch (e) { finishRun(); setMeta(reply, `${t('error')}: ${e.message}`, 'err'); }
 }
 
@@ -225,6 +237,7 @@ function finishRun() {
 }
 
 // ---------- saving chats ----------
+const apiMsg = ({ role, content, commands }) => (commands?.length ? { role, content, commands } : { role, content });
 const UI_KEYS = new Set(['node', 'bubble']);
 const plain = (m) => Object.fromEntries(Object.entries(m).filter(([k]) => !UI_KEYS.has(k)));
 async function persist() {
@@ -367,9 +380,11 @@ async function init() {
   window.__lang = initial.language;
   await loadStrings(initial.language);
   window.__copyLabel = t('copy');
-  initSettings({ refreshState, applyLanguage: async (lang) => { await call('set_language', { lang }); await loadStrings(lang); refreshChatList(); window.__copyLabel = t('copy'); renderStarters(); renderModelPicker(); setMeter(0, S.settings?.contextWindow ?? 0); } });
+  initSettings({ refreshState, refreshCommands: loadCommands, applyLanguage: async (lang) => { await call('set_language', { lang }); await loadStrings(lang); refreshChatList(); window.__copyLabel = t('copy'); renderStarters(); renderModelPicker(); setMeter(0, S.settings?.contextWindow ?? 0); } });
   initChatList({ open: openChat, deleted: (id) => { if (id === S.chatId) newChat(); }, renamed: (id, name) => { if (id === S.chatId) S.chatName = name; } });
-  wireUi(); renderStarters(); refreshChatList();
+  wireUi(); renderStarters(); refreshChatList(); loadCommands();
+  initCommandMenu({ inputEl: $('input'), menuEl: $('cmd-menu'), afterInsert: () => { autoGrow(); updateSendEnabled(); updateMeter(); } });
+  $('btn-slash').addEventListener('click', () => { loadCommands().then(() => { if (!openAll()) toast(t('noCommands')); }); $('input').focus(); });
   S.models = initial.models; S.settings = initial.settings;
   S.model = initial.models.find((m) => m.filename === initial.lastModel && m.supported)?.filename ?? initial.models.find((m) => m.supported && m.active)?.filename ?? null;
   renderModelPicker(); setMeter(0, initial.settings.contextWindow);
