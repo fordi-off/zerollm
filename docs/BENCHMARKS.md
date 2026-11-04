@@ -197,3 +197,19 @@ Qwen3-4B Q4_K_M, 6 workers, batch 1, 16-token prompt, 24 generated tokens:
 | 20000 (spin first) | 4.28, 5.64, 4.57, 4.55, 4.55 | 4.55 (4.28-5.64) | 4.36 |
 
 spin=0 won 4 of 5 rounds, median +30% (ranges overlap, so not airtight); results cluster in two modes (~6.0 vs ~4.55), consistent with spinning workers landing on the hyperthread siblings of busy cores. On the 4-vCPU dev VM (no spare hyperthreads) spinning was ~20% faster. The pool therefore defaults to `spin = 0` when logical processors >= 2 x workers, else 20000 (`--spin N` overrides).
+
+### M9 acceptance: Qwen3-8B Q4_K_M on the target laptop (user-measured): Ryzen 5 7530U, Node 26.5.1, Windows, 7.0 GB RAM free at the start
+
+File: Qwen3-8B-Q4_K_M.gguf, 4.68 GB (Q4_K x217 = 3.45 GB, Q6_K x37 = 1.23 GB, F32 x145), 8.19B parameters, 36 layers, 32/8 heads, untied output. `info` estimated 5.76 GB (f32 KV) / 5.48 GB (f16 KV) at ctx 2048 with 6 threads. All runs: 6 threads, wasm-simd kernels, `--kv f16`.
+
+| run | prompt | prefill tok/s | decode tok/s | RSS |
+|---|---|---|---|---|
+| `run` "capital of France" (`--temp 0`) | 24 tok | 5.33 | 2.86 | 5.04 GB |
+| `bench` batch 1 | 64 tok | 3.68 | 2.95 | 5.02 GB |
+| `bench` batch 16 | 64 tok | 6.96 | 3.17 | 4.98 GB |
+| `chat`, turn 1 | 24 tok | 6.35 | 3.10 | 4.97 GB |
+| `chat`, turn 2 (20 tokens of history reused from the KV cache) | 71 tok | 7.16 | 3.13 | 4.92 GB |
+
+- Load time 2.4-2.7 s (file in the OS cache), effective weight bandwidth 14.8-15.9 GB/s.
+- Output: "The capital of France is Paris." and coherent multi-turn chat. (The second chat answer contains a factual error about European traffic; that is model quality for a 4-bit 8B in non-thinking mode, the text itself is fluent and on topic.)
+- **Brief M9 criterion ("Qwen3 8B Q4 runs in <= ~9 GB RAM at >= ~2 tok/s decode, documented"): met** -- ~5.0 GB RSS (estimator: 5.48 GB at full 2048-token context), 2.9-3.2 tok/s decode. The projection made earlier from the 4B result (2.5-2.7 tok/s) was slightly pessimistic.
