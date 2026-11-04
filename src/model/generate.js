@@ -48,7 +48,9 @@ export function commonPrefix(a, b) {
  * @param {{forward: Function, truncate: Function, tokens: number[], pos: number, ctx: number}} model
  * @param {number[]} promptIds
  * @param {{maxTokens?: number, sample?: (logits: Float32Array, history: number[]) => number, stopIds?: Set<number>,
- *          signal?: {aborted: boolean}, stats?: object, onPrefillProgress?: (done: number, total: number) => void}} [opts]
+ *          signal?: {aborted: boolean}, stats?: object, onPrefillProgress?: (done: number, total: number) => void,
+ *          penalizePrompt?: boolean}} [opts]  penalizePrompt=false: the sampler's repetition penalties only see the generated tokens
+ *          (the prompt - e.g. document excerpts the answer should quote - is not penalised); default true like llama.cpp
  */
 export async function* generate(model, promptIds, opts = {}) {
   const sample = opts.sample ?? argmax;
@@ -78,7 +80,7 @@ export async function* generate(model, promptIds, opts = {}) {
   try {
     for (let n = 0; n < max; n++) {
       if (opts.signal?.aborted) { stats.stopReason = 'aborted'; break; }
-      const id = sample(logits, history);
+      const id = sample(logits, opts.penalizePrompt === false ? history.slice(promptIds.length) : history);
       if (stop.has(id)) { stats.stopReason = 'stop'; break; }
       yield id;
       history.push(id);
