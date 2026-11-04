@@ -1,9 +1,9 @@
 import readline from 'node:readline';
 import { parseArgs, num } from '../util/args.js';
 import { encodeChat } from '../tokenizer/chat-templates.js';
-import { loadEngine, samplerFromFlags, templateOptions, streamReply, formatStats, SAMPLER_HELP } from './common.js';
+import { loadEngine, samplerFromFlags, templateOptions, streamReply, formatStats, usePrefixCache, SAMPLER_HELP } from './common.js';
 
-export const help = `chat <model.gguf> [--system "..."] [--n 512] [--ctx 2048] [--threads N] [--kernels auto|wasm|js] [--think|--no-think] ${SAMPLER_HELP}`;
+export const help = `chat <model.gguf> [--system "..."] [--n 512] [--ctx 2048] [--threads N] [--kernels auto|wasm|js] [--think|--no-think] [--no-cache] [--cache-dir DIR] ${SAMPLER_HELP}`;
 
 const COMMANDS = '/reset  clear conversation   /system <text>  set system prompt (resets)   /think  /nothink  toggle Qwen3 thinking   /exit';
 
@@ -48,7 +48,9 @@ export async function run(argv) {
     signal.aborted = false;
     busy = true;
     try {
-      const { text, stats } = await streamReply(eng, ids, { sample, maxTokens, signal });
+      const stats = {};
+      stats.prefixCache = await usePrefixCache(eng, flags, system ? [{ role: 'system', content: system }] : [], ids, { ...templateOptions(eng, flags), think }, signal);
+      const { text } = await streamReply(eng, ids, { sample, maxTokens, signal, stats });
       messages.push({ role: 'assistant', content: text });
       process.stdout.write('\n');
       process.stderr.write(`${formatStats(eng, stats)}\n`);

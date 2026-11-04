@@ -4,13 +4,19 @@ import { readGGUF } from '../gguf/reader.js';
 import { modelConfig, estimateRam } from '../model/config.js';
 import { RefModel } from '../model/forward.js';
 import { PoolModel } from '../compute/pool.js';
-import { generate } from '../model/generate.js';
+import path from 'node:path';
+import { generate, prefillTokens } from '../model/generate.js';
+import { PrefixCache, modelFingerprint } from '../model/prefix-cache.js';
+import { encodeChat } from '../tokenizer/chat-templates.js';
 import { Tokenizer } from '../tokenizer/bpe.js';
 import { detectTemplate, stopTokenIds, TEMPLATE_KINDS } from '../tokenizer/chat-templates.js';
 import { createSampler } from '../sampling/sampler.js';
 import { StopFilter } from '../sampling/stop.js';
 import { num } from '../util/args.js';
 import { formatBytes, warn } from '../util/log.js';
+
+/** Shorter system prompts are not worth a cache file. */
+export const MIN_CACHED_PREFIX = 32;
 
 export const SAMPLER_HELP = '--temp 0.7 --top-k 40 --top-p 0.9 --min-p 0 --repeat-penalty 1 --seed N  (--temp 0 = greedy)';
 
@@ -58,9 +64,9 @@ function loadProgress() {
  * Create the compute model: the single-thread reference path for 1 thread, the SPMD worker pool otherwise.
  * @param {import('../gguf/reader.js').GGUFFile} g
  */
-export async function createModel(g, { threads, ctx, spin, kernels = 'auto', onProgress }) {
+export async function createModel(g, { threads, ctx, spin, kernels = 'auto', maxBatch, onProgress }) {
   // `--threads 1 --kernels js` is the plain single-thread reference path (the test oracle); everything else uses the pool
-  const model = threads === 1 && kernels === 'js' ? new RefModel(g, { ctx, onProgress }) : await PoolModel.create(g, { ctx, workers: threads, spin, kernels, onProgress });
+  const model = threads === 1 && kernels === 'js' ? new RefModel(g, { ctx, onProgress }) : await PoolModel.create(g, { ctx, workers: threads, spin, kernels, maxBatch, onProgress });
   if (process.stderr.isTTY) process.stderr.write('\r\x1b[K');
   return model;
 }
@@ -80,7 +86,7 @@ export async function loadEngine(modelPath, flags) {
   const est = estimateRam(g, cfg, { ctx });
   if (est.total > os.freemem() * 0.9) warn(`estimated RAM need ${formatBytes(est.total)} vs ${formatBytes(os.freemem())} free: close other apps or lower --ctx.`);
   const tok = Tokenizer.fromGGUF(g);
-  const model = await createModel(g, { threads, ctx, kernels: kernelsFromFlags(flags), spin: flags.spin === undefined ? undefined : num(flags.spin, 20000), onProgress: loadProgress() });
+  const model = await createModel(g, { threads, ctx, kernels: kernelsFromFlags(flags), maxBatch: flags.batch === undefined ? undefined : num(flags.batch, 16), spin: flags.spin === undefined ? undefined : num(flags.spin, 20000), onProgress: loadProgress() });
   let kind = typeof flags.template === 'string' ? flags.template : flags.raw ? 'raw' : detectTemplate(cfg.arch, g.get('tokenizer.chat_template'), tok);
   if (!TEMPLATE_KINDS.includes(kind)) { await model.close?.(); throw new Error(`unknown --template "${kind}" (use ${TEMPLATE_KINDS.join(', ')})`); }
   return {
@@ -95,6 +101,23 @@ export async function loadEngine(modelPath, flags) {
 /** Template options derived from flags + model. */
 export function templateOptions(eng, flags) {
   return { arch: eng.cfg.arch, jinja: eng.jinja, think: flags.think === true };
+}
+
+/**
+ * Make sure the KV state of the system-prompt prefix is in the model, from the on-disk cache when possible.
+ * Only acts on a fresh model (pos 0). Returns 'hit' | 'saved' | 'off' | 'skip' | 'unsaved'.
+ * @param {number[]} promptIds full prompt   @param {{role: string, content: string}[]} systemMessages usually [] or one system message
+ */
+export async function usePrefixCache(eng, flags, systemMessages, promptIds, tmplOpts, signal) {
+  if (flags.cache === false || eng.kind === 'raw' || eng.model.pos !== 0) return 'off';
+  const prefix = encodeChat(eng.tok, eng.kind, systemMessages, { ...tmplOpts, generationPrompt: false });
+  if (prefix.length < MIN_CACHED_PREFIX || prefix.length >= promptIds.length || prefix.some((t, i) => t !== promptIds[i])) return 'skip';
+  const dir = typeof flags['cache-dir'] === 'string' ? flags['cache-dir'] : path.join(path.dirname(eng.g.path), '.zerollm-cache');
+  const cache = new PrefixCache(dir, modelFingerprint(eng.g.path, eng.model.kernels === 'wasm' ? 'wasm' : 'js'));
+  if (cache.load(eng.model, prefix)) return 'hit';
+  const r = await prefillTokens(eng.model, prefix, { wantLogits: false, signal });
+  if (r.aborted) return 'skip';
+  try { cache.save(eng.model, prefix); return 'saved'; } catch (e) { warn(`could not write the system-prompt cache (${e.message}); continuing without it`); return 'unsaved'; }
 }
 
 /** Install a SIGINT handler that sets `signal.aborted`; a second Ctrl+C exits immediately. Returns a disposer. */
@@ -114,8 +137,7 @@ export function installAbort(signal, rl = null) {
  * Generate and stream a reply to stdout.
  * @returns {Promise<{text: string, stats: any}>}
  */
-export async function streamReply(eng, promptIds, { sample, maxTokens, stops = [], signal, out = process.stdout, err = process.stderr, progress = err.isTTY }) {
-  const stats = {};
+export async function streamReply(eng, promptIds, { sample, maxTokens, stops = [], signal, out = process.stdout, err = process.stderr, progress = err.isTTY, stats = {} }) {
   const dec = eng.tok.streamDecoder();
   const filter = new StopFilter(stops);
   let text = '';
@@ -141,6 +163,7 @@ export function formatStats(eng, stats) {
   const parts = [
     `prompt ${stats.promptTokens} tok${stats.cachedTokens ? ` (${stats.cachedTokens} cached)` : ''}, prefill ${rate(stats.prefilled ?? 0, stats.prefillMs)}`,
     `generated ${stats.generated} tok, decode ${rate(stats.generated, stats.decodeMs)}`,
+    ...(stats.prefixCache === 'hit' || stats.prefixCache === 'saved' ? [`system-prompt cache: ${stats.prefixCache}`] : []),
     `stop: ${stats.stopReason}`,
     `RSS ${formatBytes(process.memoryUsage().rss)}`,
   ];

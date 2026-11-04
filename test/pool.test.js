@@ -212,3 +212,53 @@ test('F16/F32 weights fall back to JS kernels inside a SIMD pool (mixed-type mod
     for (const t of [4, 8, 15]) assert.deepEqual([...await pool.forward(t)], [...ref.forward(t)]); // F32 path has no SIMD kernel: still exact
   } finally { await pool.close(); }
 });
+
+// ------------------------------------------------------------------------------------------------ batched prefill (M7)
+for (const kernels of ['wasm', 'js']) {
+  test(`forwardBatch is BIT-IDENTICAL to token-by-token forward (${kernels} kernels), any batch size / split point`, async () => {
+    for (const [arch, quant] of [['qwen3', 'q8_0'], ['llama', 'q4_0'], ['qwen2', 'q8_0']]) {
+      const { g } = tinyFile({ arch, quant, seed: 41 });
+      const toks = Array.from({ length: 23 }, (_, i) => (i * 37 + 11) % 250);
+      const seq = await PoolModel.create(g, { ctx: 64, workers: 3, kernels });
+      const wantAll = [];
+      for (const t of toks) wantAll.push(Float32Array.from(await seq.forward(t)));
+      await seq.close();
+      for (const sizes of [[23], [1, 22], [5, 5, 5, 5, 3], [7, 16], [16, 7], [2, 3, 4, 5, 6, 3], [4, 4, 4, 4, 4, 3]]) {
+        const pool = await PoolModel.create(g, { ctx: 64, workers: 3, kernels, maxBatch: 16 });
+        try {
+          let i = 0;
+          for (const sz of sizes) {
+            if (sz > pool.maxBatch) { // oversize batches are rejected
+              await assert.rejects(pool.forwardBatch(toks.slice(i, i + sz)), /batch of/);
+              const half = Math.ceil(sz / 2);
+              await pool.forwardBatch(toks.slice(i, i + half), { logits: false });
+              const got = await pool.forwardBatch(toks.slice(i + half, i + sz));
+              assert.deepEqual([...got], [...wantAll[i + sz - 1]]);
+            } else {
+              const got = await pool.forwardBatch(toks.slice(i, i + sz));
+              assert.deepEqual([...got], [...wantAll[i + sz - 1]], `${arch}/${quant} sizes=${sizes} batch ending at ${i + sz - 1}`);
+            }
+            i += sz;
+          }
+          assert.equal(pool.pos, 23);
+        } finally { await pool.close(); }
+      }
+    }
+  });
+}
+
+test('batched prefill + decode afterwards equals the pure token-by-token run; truncate after a batch works', async () => {
+  const { g } = tinyFile({ arch: 'qwen3', quant: 'q8_0', seed: 7 });
+  const prompt = Array.from({ length: 21 }, (_, i) => (i * 13 + 3) % 250);
+  const collect = async (m, n = 8) => { const o = []; for await (const t of generate(m, prompt, { maxTokens: n })) o.push(t); return o; };
+  const a = await PoolModel.create(g, { ctx: 64, workers: 2, maxBatch: 1 });  // forces token-by-token prefill
+  const b = await PoolModel.create(g, { ctx: 64, workers: 2, maxBatch: 16 });
+  try {
+    assert.deepEqual(await collect(b), await collect(a));
+    b.truncate(10);
+    const l1 = Float32Array.from(await b.forwardBatch(prompt.slice(10, 14)));
+    a.truncate(10);
+    let l2; for (const t of prompt.slice(10, 14)) l2 = await a.forward(t);
+    assert.deepEqual([...l1], [...l2]);
+  } finally { await a.close(); await b.close(); }
+});

@@ -42,6 +42,7 @@ export class RefModel {
     this.cache = new KVCache(cfg, this.ctx);
     /** token ids currently represented in the KV cache */
     this.tokens = [];
+    this.kernels = 'js';
     this.rope = ropeTables(cfg, this.ctx, this.ropeFreqs);
     const qDim = cfg.nHead * cfg.headDim; const kvDim = cfg.nHeadKv * cfg.headDim;
     this.x = new Float32Array(cfg.nEmbd);
@@ -63,6 +64,12 @@ export class RefModel {
 
   /** Number of positions currently in the KV cache. */
   get pos() { return this.cache.length; }
+
+  /** Whole [pos][kvDim] K (isV=0) or V (isV=1) cache of one layer, as a live view (used by the prefix cache). */
+  kvRegion(layer, isV) { return isV ? this.cache.v[layer] : this.cache.k[layer]; }
+
+  /** After the KV regions were filled from a prefix cache: declare that the model now holds exactly `ids`. */
+  restorePrefix(ids) { this.cache.length = ids.length; this.tokens = Array.from(ids); }
 
   /** Forget everything (start a new conversation). */
   reset() { this.cache.reset(); this.tokens.length = 0; }

@@ -88,3 +88,40 @@ for (const [name, type, quantize] of [['Q8_0', GGML_TYPE.Q8_0, quantizeQ8_0], ['
     got.forEach((g, r) => assert.ok(Math.abs(g - want[r]) < 0.02 * rms, `row ${r}: ${g} vs ${want[r]}`));
   });
 }
+
+// ------------------------------------------------------------------------------------------ batched kernels (M7)
+for (const [name, type, quantize, single, batch] of [
+  ['Q8_0', GGML_TYPE.Q8_0, quantizeQ8_0, 'matvec_q8_0', 'mm_q8_0'],
+  ['Q4_0', GGML_TYPE.Q4_0, quantizeQ4_0, 'matvec_q4_0', 'mm_q4_0'],
+]) {
+  test(`${name} batched kernel is BIT-IDENTICAL to the single-vector kernel for every row/token tile shape`, () => {
+    const rand = mulberry32(77);
+    const blk = type === GGML_TYPE.Q8_0 ? Q8_0_BLOCK : Q4_0_BLOCK;
+    for (const rows of [1, 2, 3, 5, 8, 11]) {
+      for (const nb of [1, 3, 8]) {
+        for (const ntok of [1, 2, 3, 4, 5, 7, 8, 13, 16]) {
+          const cols = nb * 32;
+          const wbytes = quantize(Float32Array.from({ length: rows * cols }, () => gaussian(rand) * 0.4));
+          const xs = Array.from({ length: ntok }, () => Float32Array.from({ length: cols }, () => gaussian(rand)));
+          const al = (v) => Math.ceil(v / 64) * 64;
+          const wOff = 64; const xq8 = al(wOff + rows * nb * blk); const xd1 = al(xq8 + cols);
+          const xq16 = al(xd1 + nb * 4); const xdB = al(xq16 + ntok * cols * 2); const yB = al(xdB + ntok * nb * 4);
+          const y1 = al(yB + ntok * rows * 4); const total = y1 + rows * 4 + 64;
+          const mem = new WebAssembly.Memory({ initial: Math.ceil(total / 65536) });
+          const k = instantiateKernels(mem);
+          new Uint8Array(mem.buffer, wOff, wbytes.length).set(wbytes);
+          const q16 = new Int16Array(mem.buffer, xq16, ntok * cols); const dB = new Float32Array(mem.buffer, xdB, ntok * nb);
+          xs.forEach((x, t) => quantizeAct(x, q16.subarray(t * cols, (t + 1) * cols), dB.subarray(t * nb, (t + 1) * nb)));
+          k[batch](wOff, xq16, xdB, yB, rows, nb, ntok);
+          const got = Float32Array.from(new Float32Array(mem.buffer, yB, ntok * rows));
+          for (let t = 0; t < ntok; t++) {
+            quantizeAct(xs[t], new Int8Array(mem.buffer, xq8, cols), new Float32Array(mem.buffer, xd1, nb));
+            k[single](wOff, xq8, xd1, y1, rows, nb);
+            const want = new Float32Array(mem.buffer, y1, rows);
+            for (let r = 0; r < rows; r++) assert.equal(got[t * rows + r], want[r], `rows=${rows} nb=${nb} ntok=${ntok} token ${t} row ${r}`);
+          }
+        }
+      }
+    }
+  });
+}

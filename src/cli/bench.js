@@ -6,7 +6,7 @@ import { parseArgs, num } from '../util/args.js';
 import { formatBytes } from '../util/log.js';
 import { createModel, defaultThreads } from './common.js';
 
-export const help = 'bench <model.gguf> [--threads 1,2,4,6] [--kernels js,wasm] [--prompt-tokens 32] [--n 32] [--ctx 512] [--spin N]';
+export const help = 'bench <model.gguf> [--threads 1,2,4,6] [--kernels js,wasm] [--batch 1,16] [--prompt-tokens 32] [--n 32] [--ctx 512] [--spin N]';
 
 const TEXT = 'The quick brown fox jumps over the lazy dog. In 1969, humans first walked on the Moon, and computers of the era had less memory than a modern greeting card. ';
 
@@ -19,6 +19,7 @@ export async function run(argv) {
   const list = typeof flags.threads === 'string' ? flags.threads.split(',').map(Number) : [1, defaultThreads()];
   const kernelList = typeof flags.kernels === 'string' ? flags.kernels.split(',') : ['auto'];
   for (const k of kernelList) if (!['auto', 'wasm', 'js'].includes(k)) throw new Error(`bad --kernels entry "${k}"`);
+  const batchList = typeof flags.batch === 'string' ? flags.batch.split(',').map(Number) : [undefined];
   const P = num(flags['prompt-tokens'], 32);
   const N = num(flags.n, 32);
   const ctx = num(flags.ctx, Math.max(512, P + N + 8));
@@ -28,11 +29,11 @@ export async function run(argv) {
   const weightBytes = g.tensors.reduce((s, t) => s + (t.nBytes ?? 0), 0);
 
   process.stdout.write(`model ${cfg.arch} ${cfg.nLayer}L, ${formatBytes(weightBytes)} of weights, prompt ${P} tok, generate ${N} tok, ctx ${ctx}\n\n`);
-  process.stdout.write('| kernels | threads | load s | prefill tok/s | decode tok/s | eff. GB/s | speedup | RSS |\n|---|---|---|---|---|---|---|---|\n');
+  process.stdout.write('| kernels | threads | batch | load s | prefill tok/s | decode tok/s | prefill/decode | eff. GB/s | RSS |\n|---|---|---|---|---|---|---|---|---|\n');
   let base = null; let baseOut = null; let allSame = true;
-  for (const kernels of kernelList) for (const threads of list) {
+  for (const kernels of kernelList) for (const threads of list) for (const maxBatch of batchList) {
     const t0 = performance.now();
-    const model = await createModel(g, { threads, ctx, kernels, spin: flags.spin === undefined ? undefined : num(flags.spin, 20000) });
+    const model = await createModel(g, { threads, ctx, kernels, maxBatch, spin: flags.spin === undefined ? undefined : num(flags.spin, 20000) });
     const kname = model.kernels === 'wasm' ? 'wasm-simd' : 'js';
     const loadS = (performance.now() - t0) / 1000;
     const stats = {}; const out = [];
@@ -42,8 +43,9 @@ export async function run(argv) {
     const prefill = (stats.prefilled * 1000) / stats.prefillMs;
     const decode = (stats.generated * 1000) / stats.decodeMs;
     base ??= decode;
+    const bsz = model.maxBatch ?? 1;
     if (baseOut) { if (out.join() !== baseOut.join()) allSame = false; } else baseOut = out;
-    process.stdout.write(`| ${kname} | ${threads} | ${loadS.toFixed(1)} | ${prefill.toFixed(2)} | ${decode.toFixed(2)} | ${((decode * weightBytes) / 1e9).toFixed(2)} | ${(decode / base).toFixed(2)}x | ${formatBytes(rss)} |\n`);
+    process.stdout.write(`| ${kname} | ${threads} | ${bsz} | ${loadS.toFixed(1)} | ${prefill.toFixed(2)} | ${decode.toFixed(2)} | ${(prefill / decode).toFixed(2)}x | ${((decode * weightBytes) / 1e9).toFixed(2)} | ${formatBytes(rss)} |\n`);
   }
   process.stdout.write(`\ngreedy output identical across all configurations: ${allSame ? 'yes' : 'NO (differs: expected only for SIMD vs JS float rounding on near-ties; see docs)'}\n`);
 }
