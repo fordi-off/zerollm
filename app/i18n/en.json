@@ -58,5 +58,13 @@
   "language": "Language",
   "openFromShortcut": "Could not connect. Start the app again with the shortcut.",
   "sidebarToggle": "Show/hide sidebar",
-  "scrollDown": "Scroll to bottom"
+  "scrollDown": "Scroll to bottom",
+  "noChats": "No conversations yet",
+  "rename": "Rename",
+  "deleteChat": "Delete conversation",
+  "confirmDelete": "Delete?",
+  "editResend": "Resend",
+  "cancel": "Cancel",
+  "editWarn": "Replies after this message will be removed.",
+  "chatNotFound": "Conversation not found"
 }

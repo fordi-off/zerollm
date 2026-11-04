@@ -2,12 +2,14 @@ import { call, listen, hasToken } from './api.js';
 import { loadStrings, t, apply } from './i18n.js';
 import { renderMarkdown } from './markdown.js';
 import { initSettings, openSettings } from './settings.js';
+import { initChatList, refreshChatList, setActive } from './chats.js';
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
 
 const S = {
-  models: [], model: null, settings: null, messages: [], // messages: [{role, content, node, note}]
+  models: [], model: null, settings: null, messages: [], // messages: [{role, content, ...extras from the file, node, bubble}]
+  chatId: null, chatName: null, idleWaiters: [],
   busy: false, runId: null, waiting: false, current: null, // current: {msg, bubble, status, bar}
   stickBottom: true,
 };
@@ -82,6 +84,7 @@ function buildMessageNode(msg) {
   msg.node = wrap; msg.bubble = bubble;
   paintMessage(msg);
   $('messages').append(wrap);
+  if (msg.role === 'user') addUserActions(msg);
   return wrap;
 }
 let paintQueued = new Set();
@@ -93,6 +96,41 @@ function schedulePaint(msg) {
   if (paintQueued.has(msg)) return; paintQueued.add(msg);
   requestAnimationFrame(() => { paintQueued.delete(msg); paintMessage(msg); if (msg === S.current?.msg) msg.bubble.classList.add('caret-blink'); scrollToBottom(); });
 }
+function addUserActions(msg) {
+  const bar = el('div', 'actions');
+  const add = (label, fn) => { const b = el('button', 'act', label); b.type = 'button'; b.addEventListener('click', fn); bar.append(b); };
+  add(t('copy'), () => copyText(msg.content));
+  add(t('edit'), () => startEdit(msg));
+  msg.node.append(bar);
+}
+
+function startEdit(msg) {
+  if (S.busy) { toast(t('busy')); return; }
+  const idx = S.messages.indexOf(msg);
+  const later = S.messages.length - idx - 1;
+  const box = el('div', 'editor');
+  const ta = el('textarea'); ta.value = msg.content; ta.rows = Math.min(10, msg.content.split('\n').length + 1);
+  const row = el('div', 'editor-row');
+  const ok = el('button', 'btn primary', t('editResend')); ok.type = 'button';
+  const no = el('button', 'btn', t('cancel')); no.type = 'button';
+  row.append(ok, no);
+  if (later > 0) row.append(el('span', 'hint', t('editWarn')));
+  box.append(ta, row);
+  msg.bubble.hidden = true; msg.node.querySelector('.actions')?.remove();
+  msg.node.append(box); ta.focus();
+  const close = () => { box.remove(); msg.bubble.hidden = false; addUserActions(msg); };
+  no.addEventListener('click', close);
+  ok.addEventListener('click', async () => {
+    const text = ta.value.trim(); if (!text) return;
+    box.remove(); msg.bubble.hidden = false;
+    for (const m of S.messages.slice(idx + 1)) m.node.remove();
+    S.messages.length = idx + 1;
+    msg.content = text; paintMessage(msg); addUserActions(msg);
+    const reply = { role: 'assistant', content: '' }; S.messages.push(reply); buildMessageNode(reply); updateWelcome();
+    await startRun();
+  });
+}
+
 function clearActions(msg) { msg.node.querySelectorAll('.actions, .meta').forEach((n) => n.remove()); }
 function addActions(msg, { last, truncated }) {
   clearActions(msg);
@@ -179,6 +217,41 @@ function finishRun() {
   const c = S.current; S.current = null; S.runId = null; S.waiting = false;
   if (c) { c.msg.bubble.classList.remove('caret-blink'); hideProgress(); paintMessage(c.msg); }
   setBusy(false); updateMeter();
+  const w = S.idleWaiters; S.idleWaiters = []; for (const r of w) r();
+}
+
+// ---------- saving chats ----------
+const UI_KEYS = new Set(['node', 'bubble']);
+const plain = (m) => Object.fromEntries(Object.entries(m).filter(([k]) => !UI_KEYS.has(k)));
+async function persist() {
+  const msgs = S.messages.filter((m) => m.role === 'user' || m.content).map(plain); // snapshot now: the chat may change while saving
+  if (!msgs.some((m) => m.role === 'user')) return;
+  if (!S.chatName) S.chatName = (msgs.find((m) => m.role === 'user')?.content ?? '').replace(/\s+/g, ' ').trim().slice(0, 45) || t('newChat');
+  try {
+    const r = await call('save_chat', { id: S.chatId, name: S.chatName, model: S.model, messages: msgs });
+    if (!S.chatId || S.chatId === r.id) { S.chatId = r.id; setActive(r.id); }
+    await refreshChatList();
+  } catch (e) { toast(`${t('error')}: ${e.message}`); }
+}
+function whenIdle() { return S.busy ? new Promise((r) => S.idleWaiters.push(r)) : Promise.resolve(); }
+async function stopAndWait() { if (S.busy) { call('stop_generation').catch(() => {}); await whenIdle(); } }
+
+function resetView() { S.messages = []; $('messages').textContent = ''; updateWelcome(); }
+
+async function openChat(id) {
+  if (id === S.chatId && !S.busy) return;
+  await stopAndWait();
+  let data = null;
+  try { data = await call('load_chat', { id }); } catch { /* handled below */ }
+  if (!data) { toast(t('chatNotFound')); await refreshChatList(); return; }
+  resetView();
+  S.chatId = data.id; S.chatName = data.name;
+  if (data.model && S.models.some((m) => m.filename === data.model && m.supported)) { S.model = data.model; renderModelPicker(); }
+  S.messages = data.messages;
+  for (const m of S.messages) buildMessageNode(m);
+  for (const m of S.messages) if (m.role === 'assistant') addActions(m, { last: m === S.messages.at(-1), truncated: false });
+  updateWelcome(); setActive(S.chatId); updateMeter(); scrollToBottom(true); S.stickBottom = true;
+  if (window.matchMedia('(max-width: 760px)').matches) $('app').classList.add('side-closed');
 }
 
 // ---------- server events ----------
@@ -218,6 +291,7 @@ const events = {
     if (d.trimmed) setMeta(msg, t('trimmed'), 'warn');
     if (d.contextMax) setMeter(Math.min(d.contextMax, d.contextUsed + (d.generated ?? 0)), d.contextMax);
     S.loaded = d.model;
+    persist();
   },
   error(d) {
     if (!ours(d)) return;
@@ -225,6 +299,7 @@ const events = {
     finishRun();
     setMeta(msg, `${t('error')}: ${d.message}`, 'err');
     addActions(msg, { last: true, truncated: false });
+    persist();
   },
 };
 
@@ -265,9 +340,10 @@ function renderStarters() {
   }
 }
 
-function newChat() {
-  if (S.busy) { call('stop_generation').catch(() => {}); }
-  S.messages = []; $('messages').textContent = ''; updateWelcome(); setMeter(0, S.settings?.contextWindow ?? 0); $('input').focus();
+async function newChat() {
+  await stopAndWait();
+  S.chatId = null; S.chatName = null; resetView(); setActive(null);
+  setMeter(0, S.settings?.contextWindow ?? 0); $('input').value = ''; autoGrow(); updateSendEnabled(); $('input').focus();
 }
 
 export async function refreshState() {
@@ -286,8 +362,9 @@ async function init() {
   window.__lang = initial.language;
   await loadStrings(initial.language);
   window.__copyLabel = t('copy');
-  initSettings({ refreshState, applyLanguage: async (lang) => { await call('set_language', { lang }); await loadStrings(lang); window.__copyLabel = t('copy'); renderStarters(); renderModelPicker(); setMeter(0, S.settings?.contextWindow ?? 0); } });
-  wireUi(); renderStarters();
+  initSettings({ refreshState, applyLanguage: async (lang) => { await call('set_language', { lang }); await loadStrings(lang); refreshChatList(); window.__copyLabel = t('copy'); renderStarters(); renderModelPicker(); setMeter(0, S.settings?.contextWindow ?? 0); } });
+  initChatList({ open: openChat, deleted: (id) => { if (id === S.chatId) newChat(); }, renamed: (id, name) => { if (id === S.chatId) S.chatName = name; } });
+  wireUi(); renderStarters(); refreshChatList();
   S.models = initial.models; S.settings = initial.settings;
   S.model = initial.models.find((m) => m.filename === initial.lastModel && m.supported)?.filename ?? initial.models.find((m) => m.supported && m.active)?.filename ?? null;
   renderModelPicker(); setMeter(0, initial.settings.contextWindow);

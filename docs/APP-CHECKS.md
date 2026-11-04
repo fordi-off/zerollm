@@ -13,3 +13,11 @@ Run `npm run app -- --data <folder containing models/>` (or `node app/main.js`).
 - [ ] Settings: context window change reloads the model on next send; thread count; Norwegian/English; light/dark.
 - [ ] Task Manager: memory stays below the estimate shown in the model list; after "unload" it drops.
 - [ ] Starting the app twice opens the same window instead of a second server.
+
+## A2 - chats
+- [ ] Send a message, wait for the reply: the chat appears in the sidebar (named after your first message) and a file `chats/<id>.json` exists.
+- [ ] Close and restart the app: the chat is still there and opens with all messages.
+- [ ] Rename (pencil) and delete (cross, then confirm) work; the model of the chat is selected when it is opened.
+- [ ] Edit a user message ("Rediger"): the later replies are removed and a new reply is generated.
+- [ ] Clicking another chat or "Ny samtale" while a reply is being written stops it first, and the partial reply is saved.
+- [ ] Shared folder with Skibeti37: copy a few of its `chats/*.json` into this data folder - they show up and open; a chat saved here still opens in Skibeti37.

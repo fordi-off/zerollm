@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { loadTokenizer, EngineMemoryError, defaultThreads } from '../src/index.js';
 import { defaultConfig, CONTEXT_STEPS } from './config.js';
 import { listModels, modelPath } from './models.js';
+import { createChatStore } from './chats.js';
 import { buildMessages, fitToContext, looksLooped, stablePrefixIds, SAMPLING, DEFAULT_MAX_TOKENS, CONTINUATION_PROMPT } from './chat-core.js';
 
 const I18N_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'i18n');
@@ -14,6 +15,7 @@ const I18N_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'i18n')
 export function createApi({ paths, host, getConfig, setConfig, log, emit }) {
   let runSeq = 0;
   let current = null; // {id, abort: {aborted}}
+  const chatStore = createChatStore(paths);
   const tokenizers = new Map(); // filename -> PromptTools (weights not loaded)
 
   const toolsFor = (filename) => {
@@ -116,6 +118,12 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit }) {
     async set_language({ lang }) { const cfg = getConfig(); cfg.language = lang === 'en' ? 'en' : 'nb'; setConfig(cfg); return { ok: true, language: cfg.language }; },
 
     async set_last_model({ filename }) { const cfg = getConfig(); cfg.last_model = filename; setConfig(cfg); return { ok: true }; },
+
+    async list_chats() { return chatStore.list(); },
+    async load_chat({ id }) { return chatStore.load(id); },
+    async save_chat(p) { return { id: chatStore.save(p) }; },
+    async rename_chat({ id, name }) { return { ok: chatStore.rename(id, name) }; },
+    async delete_chat({ id }) { return { ok: chatStore.delete(id) }; },
 
     async send_message({ model, messages }) {
       modelPath(paths, model);
