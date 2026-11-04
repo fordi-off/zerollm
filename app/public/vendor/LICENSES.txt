@@ -5,3 +5,6 @@ marked v18.0.11 - Copyright (c) 2018-2026, MarkedJS; (c) 2011-2018, Christopher 
 
 highlight.js v11.11.1 - (c) 2006-2024 Josh Goebel and other contributors. BSD-3-Clause License.
   https://highlightjs.org/
+
+KaTeX - Copyright (c) 2013-2020 Khan Academy and other contributors. MIT License (see vendor/katex/LICENSE).
+  https://katex.org/  (katex.min.js, katex.min.css and the woff2 fonts, copied unmodified)

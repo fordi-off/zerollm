@@ -124,6 +124,15 @@ try {
   await page.reload(); await page.waitForSelector('.chat-row');
   await page.locator('.chat-row .chat-item', { hasText: 'Hvem har ansvar' }).click();
   await page.waitForSelector('.doc-chip'); await page.waitForSelector('.doc-sources');
+  // math rendering (KaTeX) and its safety
+  const math = await page.evaluate(async () => {
+    const { renderMarkdown } = await import('/js/markdown.js');
+    return { inline: renderMarkdown('Areal \\(A = \\pi r^2\\) ok'), display: renderMarkdown('\\[ \\frac{a}{b} \\]'), money: renderMarkdown('koster $5 og $10'), evil: renderMarkdown('\\(<img src=x onerror=alert(1)>\\)') };
+  });
+  check(/class="katex"/.test(math.inline) && !math.inline.includes('\\('), 'inline math rendered');
+  check(/math-block/.test(math.display), 'display math rendered');
+  check(!/katex/.test(math.money) && math.money.includes('$5'), 'dollar amounts are not math');
+  check(!/<img/.test(math.evil), 'math cannot inject HTML');
   // delete (two clicks)
   const row = page.locator('.chat-row', { hasText: 'Omdøpt' }); await row.hover();
   await row.locator('.chat-act').nth(1).click(); await row.locator('.chat-act.armed').click();
