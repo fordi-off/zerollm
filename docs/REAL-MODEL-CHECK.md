@@ -149,3 +149,13 @@ node bin/zerollm.js chat models/Llama-3.2-1B-Instruct-Q8_0.gguf --system "Be bri
 ```
 
 If the text is garbled, the usual suspects (brief section 21) are RoPE variant, `rope_freqs.weight`, tokenizer or template; send the exact outputs of `info`, `tokenize` and `run --show-prompt`.
+
+## Norwegian models (e.g. an NB / NbAiLab Llama 3.1 8B Instruct Q4_K_M)
+
+A Norwegian fine-tune of Llama 3.1 uses the same architecture and tokenizer as Llama 3.1, so everything in the Llama section applies; run that check first (Llama 3.2 1B is the quick one) and then the Norwegian model. Things specific to Norwegian:
+
+- **Tokens per word.** Llama's vocabulary is mostly English, so Norwegian costs more tokens per word (often ~1.5-2x), which lowers the words/second you perceive and fills the context window faster. Measure it: `node bin/zerollm.js tokenize models/<file>.gguf "Jeg liker brunost og blåbærsyltetøy på søndager."` prints the token count; divide by the number of words.
+- **Template.** The fine-tune may ship its own chat template. `run --show-prompt` prints exactly what the model receives: check that it looks like what the model card says (Llama 3 style `<|start_header_id|>...<|eot_id|>` framing). If the GGUF's own template has no "Cutting Knowledge Date" header, none is added.
+- **Prompts.** Try Norwegian system prompts and questions, e.g. `--system "Du er en hjelpsom assistent som alltid svarer på norsk."` and `-p "Hva er hovedstaden i Norge? Svar med én setning."` (expect "Oslo"); a longer system prompt (>= 32 tokens) is cached on disk after the first run.
+- **Windows console.** Node writes UTF-8 straight to the console window, so æ ø å display correctly when typed or printed interactively. Piping or redirecting in Windows PowerShell 5.1 (`... | Select-String`, `> out.txt`, `"text" | node ...`) re-encodes through the OEM/ASCII code page and can garble them; the engine is not at fault. Use `-p "..."` and the interactive `chat` for tests, or run `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8` and `$OutputEncoding = [System.Text.Encoding]::UTF8` first. PowerShell 7 does not have this problem.
+- **Quality judgement.** The engine only guarantees it computes the model faithfully (up to int8-activation rounding noise); how good the Norwegian is depends on the model and the 4-bit quantization. If a result looks bad, compare with a Q8_0 file of the same model before blaming the engine (`--kv f32`, which is the default, also removes the half-precision cache as a variable).

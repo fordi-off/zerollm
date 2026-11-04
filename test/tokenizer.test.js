@@ -216,3 +216,24 @@ test('Llama 3 style tokenizers use a whole pre-token directly when it is in the 
   // the flag can be forced either way
   assert.equal(new Tokenizer({ tokens, types, merges: [], pre: 'qwen2', ignoreMerges: true }).encode('abc', { special: false, bos: false }).length, 1);
 });
+
+test('Norwegian text: æøå stay inside words for both pre-tokenizers and survive encode/decode and streaming', () => {
+  const words = 'Blåbærsyltetøy og brunost på søndag; Åse sa «Hei, på deg!» – ærlig talt, grønnsaker øst for Ålesund. ÆØÅ æøå';
+  for (const kind of ['qwen2', 'llama3']) {
+    const pieces = preTokenize(words, kind);
+    assert.equal(pieces.join(''), words);
+    assert.ok(pieces.includes('Blåbærsyltetøy'), `${kind}: "Blåbærsyltetøy" is one pre-token`);
+    assert.ok(pieces.includes(' grønnsaker') && pieces.includes(' øst') && pieces.includes(' Ålesund'));
+  }
+  for (const arch of ['qwen3', 'llama']) {
+    const tok = tinyTokenizer(arch);
+    const ids = tok.encode(words, { special: false, bos: false });
+    assert.equal(tok.decode(ids, { skipControl: false }), words);
+    // the tiny vocabulary has no merges for these letters, so every æ/ø/å is split into its 2 UTF-8 bytes across tokens:
+    // the streaming decoder must hold the first byte back and never print a replacement character
+    const sd = tok.streamDecoder();
+    const out = ids.map((i) => sd.push(i)).join('') + sd.flush();
+    assert.equal(out, words);
+    assert.ok(!out.includes('�'));
+  }
+});
