@@ -143,9 +143,8 @@ export function chunkForSummary(chunk, maxChars = 7000) {
 // --- document excerpts. They go into the LAST user message (not the system prompt), so everything before them keeps
 // its cached KV state from turn to turn; only this message and the reply are read anew.
 export const RAG_PREFIX =
-  "The following are the most relevant excerpts from the user's documents, retrieved for this question. Use them to answer " +
-  "precisely, and reply in the language of the user's latest message even when the excerpts are in another language. If the " +
-  'answer is not in the excerpts, say so instead of guessing:\n\n';
+  "Answer the question using the documents below when they are relevant, in the language of the question. " +
+  "If the answer is not in them, say so instead of guessing. Do not repeat or quote the documents at length.";
 
 const words = (text, n) => { const p = String(text).split(/\s+/); return p.slice(0, n).join(' ') + (p.length > n ? '...' : ''); };
 
@@ -154,9 +153,9 @@ export function withExcerpts(messages, excerpts) {
   if (!excerpts?.length) return messages;
   const i = messages.map((m) => m.role).lastIndexOf('user');
   if (i < 0) return messages;
-  const block = excerpts.map((e) => `[From ${e.filename}]\n${e.text}`).join('\n\n---\n\n');
+  const block = excerpts.map((e) => `<document name="${String(e.filename).replace(/"/g, "'")}">\n${e.text}\n</document>`).join('\n');
   const out = messages.slice();
-  out[i] = { ...out[i], content: `${RAG_PREFIX}${block}\n\n=== QUESTION ===\n${out[i].content}` };
+  out[i] = { ...out[i], content: `${RAG_PREFIX}\n\n<documents>\n${block}\n</documents>\n\nQuestion: ${out[i].content}` };
   return out;
 }
 

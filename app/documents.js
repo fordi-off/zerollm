@@ -6,6 +6,9 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { chunkText, selectExcerpts, bm25, vectorRank, fuseRankings } from './retrieval.js';
 
+/** Cosine similarity below which a chunk is not considered related (nomic-embed-text: related pairs score 0.65+, unrelated mostly below 0.55). */
+const VECTOR_MIN = 0.55;
+
 const MAX_CHUNKS = 800;          // a pathologically large file must not stall indexing
 const MAX_CHARS = 20_000_000;
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
@@ -98,7 +101,7 @@ export function createDocuments(paths, chatStore) {
       if (chunks.length === 0) return [];
       let ranked = null;
       if (queryVec) {
-        const vr = vectorRank(chunks, queryVec);
+        const vr = vectorRank(chunks, queryVec).filter((r) => r.score >= VECTOR_MIN);
         if (vr.length) { const cos = new Map(vr.map((r) => [r.index, r.score])); ranked = fuseRankings([bm25(chunks, query), vr], { scoreOf: (i) => cos.get(i) ?? 0 }); }
       }
       return selectExcerpts(chunks, query, { ...rest, ranked }).map((r) => ({ filename: chunks[r.index].filename, text: chunks[r.index].text, score: Math.round(r.score * 1000) / 1000 }));

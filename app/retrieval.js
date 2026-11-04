@@ -1,8 +1,6 @@
 // Keyword search over document chunks (BM25) with a light Norwegian/English suffix stemmer. No embedding model needed.
-const STOP = new Set(('og i jeg det at en et den til er som på de har av med for ikke var meg seg men vi du han hun om så kan vil skal må også fra eller ' +
-  'hva hvem hvor hvordan hvorfor når hvilken hvilke dette disse denne ble blir bli være ha vært ut opp inn over under mot etter før ' +
-  'the a an and or of to in on at is are was were be been it this that these those for with as by from not do does did what who how why when which ' +
-  'can could would should will i you he she we they my your').split(' '));
+// No stop-word list: BM25's inverse document frequency already makes words that occur in most chunks ("og", "er", "the") worthless,
+// and for ANY language - a word that is in every chunk cannot rank one chunk above another.
 
 // Longest suffix first; applied (up to twice, e.g. -ene-s) only when at least 3 letters remain.
 const SUFFIXES = ['hetene', 'heten', 'ingene', 'ingen', 'ingar', 'ende', 'ene', 'ane', 'ere', 'est', 'het', 'ing', 'ers', 'ens', 'ets', 'ede', 'ed', 'er', 'en', 'et', 'ar', 'te', 'de', 'es', 'ly', 'a', 'e', 's'];
@@ -21,7 +19,7 @@ export function tokenize(text) {
   const out = [];
   for (const m of String(text).toLowerCase().matchAll(/[\p{L}\p{N}]+/gu)) {
     const w = m[0];
-    if (w.length < 2 || STOP.has(w)) continue;
+    if (w.length < 2) continue;
     out.push(stem(w));
   }
   return out;
@@ -63,16 +61,12 @@ export function bm25(chunks, query, { k1 = 1.5, b = 0.75 } = {}) {
 
 /**
  * Choose the excerpts for a question: the best matches, in document order within the pick so they read naturally, limited by
- * count and by a token budget. With no keyword match at all (e.g. "summarize this") the opening chunks of each document are used.
+ * count and by a token budget. A question that matches nothing gets NO excerpts (a greeting must not drag document text into the prompt).
  * @param {{text: string, filename: string}[]} chunks
  * @param {{k?: number, budgetTokens?: number, countTokens?: (text: string) => number}} o
  */
 export function selectExcerpts(chunks, query, { k = 4, budgetTokens = 1200, countTokens = (t) => Math.ceil(t.length / 3.5), ranked: given = null } = {}) {
-  let ranked = given ?? bm25(chunks, query);
-  if (ranked.length === 0) {
-    const seen = new Map(); ranked = [];
-    chunks.forEach((c, index) => { const n = seen.get(c.filename) ?? 0; if (n < Math.max(1, Math.ceil(k / 2))) { seen.set(c.filename, n + 1); ranked.push({ index, score: 0 }); } });
-  }
+  const ranked = given ?? bm25(chunks, query);
   const picked = []; let used = 0;
   for (const r of ranked) {
     if (picked.length >= k) break;

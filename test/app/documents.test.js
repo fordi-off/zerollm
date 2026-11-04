@@ -10,11 +10,11 @@ const user = (content) => ({ role: 'user', content });
 const KOMMUNE = 'Kommunen har ansvar for skoler og barnehager. Kommunene finansieres blant annet gjennom skatt og overføringer fra staten. '.repeat(10);
 const FORSVAR = 'Forsvaret består av hæren, marinen og luftforsvaret, og styres av staten gjennom Forsvarsdepartementet. '.repeat(10);
 
-test('stemmer and tokenizer match Norwegian inflections and drop stop words', () => {
+test('stemmer and tokenizer match Norwegian inflections', () => {
   assert.equal(stem('kommunene'), stem('kommune'));
   assert.equal(stem('kommunenes'), stem('kommunen'));
   assert.equal(stem('skolene'), stem('skoler'));
-  assert.deepEqual(tokenize('Hva er kommunenes oppgaver i Norge?'), ['kommun', 'oppgav', 'norg']);
+  assert.deepEqual(tokenize('Hva er kommunenes oppgaver i Norge?'), ['hva', 'er', 'kommun', 'oppgav', 'norg'], 'no stop-word list: IDF handles common words');
 });
 
 test('chunkText overlaps, bm25 ranks the right chunk, selectExcerpts respects count and token budget', () => {
@@ -30,15 +30,15 @@ test('chunkText overlaps, bm25 ranks the right chunk, selectExcerpts respects co
   const many = Array.from({ length: 8 }, (_, i) => ({ text: `skole ${'x '.repeat(50)} ${i}`, filename: 'a' }));
   assert.equal(selectExcerpts(many, 'skole', { k: 3 }).length, 3);
   assert.equal(selectExcerpts(many, 'skole', { k: 6, budgetTokens: 120, countTokens: (t) => t.length }).length, 1 + 0, 'budget stops after the first (always allowed) excerpt');
-  const fallback = selectExcerpts(chunks, 'oppsummer dette', { k: 2 });
-  assert.ok(fallback.length >= 1 && fallback[0].index === 0, 'no keyword match: the opening of the document is used');
+  assert.deepEqual(selectExcerpts(chunks, 'zxqv blorp', { k: 2 }), [], 'a question that matches nothing gets no excerpts');
 });
 
 test('withExcerpts puts excerpts before the question in the last user message only', () => {
   const msgs = [{ role: 'system', content: 'S' }, user('første'), { role: 'assistant', content: 'a' }, user('spørsmål')];
   const out = withExcerpts(msgs, [{ filename: 'f.txt', text: 'utdrag', score: 1 }]);
   assert.equal(out[1].content, 'første');
-  assert.match(out[3].content, /\[From f\.txt\]\nutdrag[\s\S]*=== QUESTION ===\nspørsmål$/);
+  assert.match(out[3].content, /<documents>\n<document name="f\.txt">\nutdrag\n<\/document>\n<\/documents>\n\nQuestion: spørsmål$/);
+  assert.match(out[3].content, /^Answer the question using the documents below/);
   assert.equal(withExcerpts(msgs, []), msgs);
   assert.deepEqual(sourcesOf([{ filename: 'f', text: 'a b c', score: 0.5 }]), [{ filename: 'f', snippet: 'a b c', score: 0.5 }]);
 });
@@ -131,5 +131,22 @@ test('summarize_document stores a summary (tiny model: content is garbage, flow 
     assert.ok(res.summary.length > 0);
     assert.equal((await t.call('list_documents', { chatId: chat }))[0].summary, res.summary);
     await assert.rejects(t.call('summarize_document', { docId: 'nope', model: 'tiny-llama.gguf' }), /not found/);
+  } finally { await t.close(); }
+});
+
+test('API: a message that matches nothing in the documents gets no excerpts and no sources (no word lists involved); a matching one does', async () => {
+  const t = await startTestApp({ ctx: 4096 });
+  try {
+    const chat = (await t.call('save_chat', { name: 'H', model: 'tiny-llama.gguf', messages: [] })).id;
+    await t.call('add_document', { chatId: chat, filename: 'k.txt', content: KOMMUNE });
+    for (const q of ['hei', 'zxqv blorp', 'Good morning']) {
+      const withDoc = await t.call('estimate_context', { model: 'tiny-llama.gguf', messages: [user(q)], chatId: chat });
+      const bare = await t.call('estimate_context', { model: 'tiny-llama.gguf', messages: [user(q)] });
+      assert.equal(withDoc.contextUsed, bare.contextUsed, `prompt for "${q}" is identical to one without documents`);
+      const ev = await t.runChat('tiny-llama.gguf', [user(q)], { extra: { chatId: chat } });
+      assert.deepEqual(ev.at(-1).data.sources, []);
+    }
+    const hit = await t.runChat('tiny-llama.gguf', [user('Hvem har ansvar for barnehager?')], { extra: { chatId: chat } });
+    assert.ok(hit.at(-1).data.sources.length >= 1);
   } finally { await t.close(); }
 });
