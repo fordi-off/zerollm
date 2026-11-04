@@ -109,3 +109,13 @@ Remove-Item Env:ZEROLLM_PROFILE
 ```
 
 Run the plain bench twice if the numbers look odd: laptop power state, background apps and thermal limits move decode speed by 10-20% between runs.
+
+## A/B benchmarks that resolve small differences (`tools/abbench.mjs`)
+
+The laptop's decode speed varies +-15% from run to run, so compare settings by alternating them over several rounds and looking at medians and spreads:
+
+```
+node tools/abbench.mjs models/Qwen3-4B-Q4_K_M.gguf --vary spin=0,20000 --rounds 5 --pause 15
+```
+
+(plugged in, Windows power mode "Best performance", nothing else running; `--vary` takes any `bench` flag, e.g. `threads=4,6,8` or `kernels=js,wasm`).
