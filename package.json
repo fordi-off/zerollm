@@ -9,6 +9,7 @@
   "engines": { "node": ">=22" },
   "scripts": {
     "test": "node --test",
-    "doctor": "node bin/zerollm.js doctor"
+    "doctor": "node bin/zerollm.js doctor",
+    "app": "node app/main.js"
   }
 }
