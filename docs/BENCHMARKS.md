@@ -89,3 +89,16 @@ Batch 8-16 is the sweet spot (default 16). Matmul kernel time per prompt token d
 | Q4_K_M-style | 363 MB | 4 | 16.99 | 13.72 | 5.22 |
 
 Profile, Q4_K_M-style, 1 thread decode: 197 ms/token, 94% in the matmul kernels. The first-version K-quant kernels are compute-bound (per-sub-block scale unpacking and mins handling in scalar code) and process ~2.6 G weights/s/thread vs ~3.8 for Q8_0, so on this small model the smaller file is *slower* per token. They also have no batched variant yet (prefill runs the decode kernel once per token: prefill/decode = 1.27x). Both are M9 work (e.g. hoisting the activation block sums out of the kernel, repacking scales at load time, tiled batch kernels).
+
+### M8 on the target laptop (user-measured): Ryzen 5 7530U, Node 26.5.1, Windows; **Qwen3-4B Q4_K_M (real file, 2.33 GB)**, wasm-simd, 6 threads
+
+`zerollm bench models/Qwen3-4B-Q4_K_M.gguf --threads 6 --batch 1,16 --prompt-tokens 64 --n 16` (ctx 512). 6.6 GB RAM was free. `info`: Q4_K x216 tensors (1.64 GB, 4.50 bits/weight), Q6_K x37 (692 MB, 6.56 bpw), F32 x145; 4.02B parameters; tied embeddings.
+
+| kernels | threads | batch | load s | prefill tok/s | decode tok/s | eff. GB/s | RSS |
+|---|---|---|---|---|---|---|---|
+| wasm-simd | 6 | 1 | 0.6 | 5.50 | 5.77 | 14.37 | 2.57 GB |
+| wasm-simd | 6 | 16 | 0.6 | 5.96 | 5.74 | 14.29 | 2.65 GB |
+
+`run ... "What is the capital of France? Answer in one sentence." --temp 0`: "The capital of France is Paris." (prompt 24 tok, decode 4.30 tok/s over only 7 generated tokens incl. warm-up, RSS 2.61 GB). First real-model confirmation of the Q4_K/Q6_K layouts and SIMD kernels.
+
+Observations: decode 5.8 tok/s clears the brief's ">= ~4 tok/s for 4B Q4" target; ~14.4 GB/s of the ~25-35 GB/s ceiling (so some headroom). Prefill is NOT faster than decode for K-quants (1.04x): they have no batched kernels yet, so a 64-token prompt takes ~11 s. Projection (not a measurement): 8B Q4_K_M (~4.7 GB) at ~14 GB/s effective would decode at roughly 3 tok/s.
