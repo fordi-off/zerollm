@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { loadTokenizer, EngineMemoryError, defaultThreads } from '../src/index.js';
 import { defaultConfig, CONTEXT_STEPS } from './config.js';
 import { listModels, modelPath } from './models.js';
-import { buildMessages, fitToContext, looksLooped, SAMPLING, DEFAULT_MAX_TOKENS, CONTINUATION_PROMPT } from './chat-core.js';
+import { buildMessages, fitToContext, looksLooped, stablePrefixIds, SAMPLING, DEFAULT_MAX_TOKENS, CONTINUATION_PROMPT } from './chat-core.js';
 
 const I18N_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'i18n');
 
@@ -49,6 +49,17 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit }) {
       const contextUsed = engine.countPromptTokens(fitted.messages);
       log.info(`generating: ${model} | ${contextUsed}/${ctxMax} ctx tokens${fitted.trimmed ? ' | prompt trimmed to fit' : ''}`);
 
+      // A freshly loaded model has read nothing yet: restore the system prompt's state from disk (or read it once and save it).
+      let prefixCache = 'off';
+      if (engine.cachedTokens === 0) {
+        const prefix = stablePrefixIds(engine);
+        const full = engine.promptIds(fitted.messages);
+        if (prefix.length <= full.length && prefix.every((t, i) => t === full[i])) {
+          prefixCache = await engine.primePrefix(prefix, { dir: paths.cacheDir, signal: abort, onProgress: (done, total) => send('progress', { done, total }) });
+          if (prefixCache === 'hit' || prefixCache === 'saved') log.info(`system prompt cache: ${prefixCache} (${prefix.length} tokens)`);
+        }
+      }
+
       const stats = {};
       let answer = ''; let checkedAt = 0; let looped = false; let first = true;
       const gen = engine.generate({
@@ -68,7 +79,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit }) {
       log.info(`done: ${stats.generated} tokens, prefill ${(stats.prefillMs / 1000).toFixed(1)}s (${stats.cachedTokens} cached of ${stats.promptTokens}), decode ${tokPerSec.toFixed(1)} tok/s - ${looped ? 'looped' : stats.stopReason}`);
       send('done', {
         stopReason: looped ? 'looped' : stats.stopReason, truncated: stats.stopReason === 'length', stopped: abort.aborted && !looped, looped,
-        trimmed: fitted.trimmed, generated: stats.generated, promptTokens: stats.promptTokens, cachedTokens: stats.cachedTokens,
+        trimmed: fitted.trimmed, prefixCache, generated: stats.generated, promptTokens: stats.promptTokens, cachedTokens: stats.cachedTokens,
         prefillMs: stats.prefillMs, decodeMs: stats.decodeMs, tokPerSec, contextUsed, contextMax: ctxMax, model,
       });
     } catch (e) {

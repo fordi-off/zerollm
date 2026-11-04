@@ -89,3 +89,19 @@ export function looksLooped(text) {
   for (;;) { const i = text.indexOf(tail, from); if (i < 0) break; count++; from = i + 1; if (count >= LOOP_THRESHOLD) return true; }
   return false;
 }
+
+/** Length of the common leading run of two token arrays. */
+function commonLen(a, b) { let i = 0; const n = Math.min(a.length, b.length); while (i < n && a[i] === b[i]) i++; return i; }
+
+/**
+ * Token ids at the start of every prompt this app builds (system prompt + the template header), whatever language the
+ * user writes in: the common prefix of the prompts for a Norwegian, an English and an unrecognised message. These are
+ * the tokens worth caching on disk.
+ * @param {{promptIds: (m: any[]) => number[]}} tools
+ */
+export function stablePrefixIds(tools, { extraSystem = '' } = {}) {
+  const variants = ['Hei, hva skjer i dag?', 'Hello, what is going on today?', 'x'];
+  const all = variants.map((v) => tools.promptIds(buildMessages([{ role: 'user', content: v }], { extraSystem })));
+  const len = all.reduce((m, ids) => Math.min(m, commonLen(all[0], ids)), all[0].length);
+  return all[0].slice(0, len);
+}

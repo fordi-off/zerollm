@@ -5,12 +5,12 @@ import { makeTinyModel } from '../../tools/make-tiny-gguf.js';
 import { startApp } from '../../app/main.js';
 
 /** Start the app in a temp data folder with one synthetic model; returns helpers for calling the API and reading events. */
-export async function startTestApp({ models = [{ name: 'tiny-llama.gguf', arch: 'llama' }], port = 0 } = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zerochat-test-'));
-  fs.mkdirSync(path.join(dir, 'models'));
-  for (const m of models) {
+export async function startTestApp({ models = [{ name: 'tiny-llama.gguf', arch: 'llama' }], port = 0, ctx = 512, dir: existingDir = null } = {}) {
+  const dir = existingDir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'zerochat-test-'));
+  fs.mkdirSync(path.join(dir, 'models'), { recursive: true });
+  if (!existingDir) for (const m of models) {
     if (m.raw) fs.writeFileSync(path.join(dir, 'models', m.name), m.raw);
-    else fs.writeFileSync(path.join(dir, 'models', m.name), makeTinyModel({ arch: m.arch ?? 'llama', quant: 'q8_0', seed: 4, ctx: 512 }).buffer);
+    else fs.writeFileSync(path.join(dir, 'models', m.name), makeTinyModel({ arch: m.arch ?? 'llama', quant: 'q8_0', seed: 4, ctx }).buffer);
   }
   const app = await startApp({ dataDir: dir, port, quiet: true });
   const base = `http://127.0.0.1:${app.port}`;
@@ -49,5 +49,5 @@ export async function startTestApp({ models = [{ name: 'tiny-llama.gguf', arch: 
     ctl.abort();
     return out;
   };
-  return { app, dir, base, call, events, runChat, async close() { await app.close(); fs.rmSync(dir, { recursive: true, force: true }); } };
+  return { app, dir, base, call, events, runChat, async close({ keep = false } = {}) { await app.close(); if (!keep) fs.rmSync(dir, { recursive: true, force: true }); } };
 }
