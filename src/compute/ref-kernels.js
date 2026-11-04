@@ -220,11 +220,12 @@ export function ropeTables(cfg, ctx, freqFactors = null) {
 /**
  * Apply RoPE in place to `nHeads` heads of size headDim stored contiguously in v.
  * 'neox': rotate pairs (i, i + nRot/2); 'norm': rotate adjacent pairs (2i, 2i+1). Dims >= nRot are untouched.
+ * Heads [h0, nHeads) are rotated (h0 lets a worker handle just its own head range).
  */
-export function applyRope(v, nHeads, headDim, nRot, type, tabs, pos) {
+export function applyRope(v, nHeads, headDim, nRot, type, tabs, pos, h0 = 0) {
   const half = tabs.half;
   const to = pos * half;
-  for (let h = 0; h < nHeads; h++) {
+  for (let h = h0; h < nHeads; h++) {
     const o = h * headDim;
     for (let i = 0; i < half; i++) {
       const c = tabs.cos[to + i]; const s = tabs.sin[to + i];

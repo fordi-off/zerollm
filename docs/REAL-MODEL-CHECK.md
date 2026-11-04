@@ -10,3 +10,11 @@ Everything so far is validated against synthetic tiny models and an independent 
 6. If the answer is garbled, the usual suspects (brief section 21) are RoPE variant, QK-norm, head_dim, tokenizer pre-regex, chat template. Send the exact output of steps 3-5 and I will bisect with `tokenize` and per-layer checks.
 
 If you have another machine with HF transformers / llama.cpp: compare the top-5 next-token logits for a fixed prompt (brief section 18, item 7).
+
+## M5: worker pool (after `git pull`)
+
+```
+node bin/zerollm.js bench models/Qwen3-0.6B-Q8_0.gguf --threads 1,2,4,6,8,12 --prompt-tokens 32 --n 32
+```
+
+Close the browser and other heavy apps first, plug in the charger and set the Windows power mode to Best performance. Paste the whole table. Expected: `greedy output identical across thread counts: yes`, decode speed rising with threads (likely flattening around 6 = physical cores), load time under a few seconds.
