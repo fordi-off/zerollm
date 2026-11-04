@@ -2,7 +2,7 @@
 // (no postMessage per token), and exposes the same interface as RefModel so generate() works unchanged.
 import { Worker } from 'node:worker_threads';
 import { modelConfig } from '../model/config.js';
-import { CTRL, CMD_TOKEN, CMD_EXIT, MAX_BATCH, allocShared, kvOffset } from './layout.js';
+import { CTRL, CMD_TOKEN, CMD_EXIT, CMD_KV_EXPORT, CMD_KV_IMPORT, MAX_BATCH, allocShared } from './layout.js';
 import { probeWasmFeatures } from './wasm/features.js';
 
 export class PoolModel {
@@ -34,7 +34,7 @@ export class PoolModel {
     /** largest prompt batch one pass may carry (weights are read once per batch) */
     this.maxBatch = Math.max(1, Math.min(opts.maxBatch ?? 16, MAX_BATCH));
     const sh = this.shared = allocShared(cfg, this.ctx, this.maxBatch);
-    this.kvView = new Float32Array(sh.kv);
+    this.kvStage = new Float32Array(sh.kvStage);
     this.ctrl = new Int32Array(sh.ctrl);
     this.x = new Float32Array(sh.x);
     this.logits = new Float32Array(sh.logits);
@@ -114,19 +114,26 @@ export class PoolModel {
     const pos = this.tokens.length;
     if (pos + B > this.ctx) throw new Error(`context full (${this.ctx} tokens)`);
     for (let i = 0; i < B; i++) if (!(tokens[i] >= 0 && tokens[i] < this.cfg.vocabSize)) throw new Error(`token id ${tokens[i]} out of range`);
-    const { ctrl, n } = this;
     const want = opts.logits === false ? 0 : 1;
+    const { ctrl } = this;
     for (let i = 0; i < B; i++) Atomics.store(ctrl, CTRL.TOKENS + i, tokens[i]);
     Atomics.store(ctrl, CTRL.BATCH, B);
     Atomics.store(ctrl, CTRL.POS, pos);
     Atomics.store(ctrl, CTRL.WANT_LOGITS, want);
-    Atomics.store(ctrl, CTRL.CMD, CMD_TOKEN);
+    await this.#issue(CMD_TOKEN);
+    for (let i = 0; i < B; i++) this.tokens.push(tokens[i]);
+    return want ? this.logits : null;
+  }
+
+  /** Send a command to all workers and wait until every one of them has finished it. */
+  async #issue(cmd) {
+    const { ctrl, n } = this;
+    Atomics.store(ctrl, CTRL.CMD, cmd);
     const target = ++this.issued * n;
     Atomics.add(ctrl, CTRL.CMD_SEQ, 1);
     Atomics.notify(ctrl, CTRL.CMD_SEQ);
-
-    // Wait for all workers. Atomics.waitAsync keeps the event loop free (SIGINT handlers keep working); the
-    // interval timer keeps the process alive while we wait, and the 200 ms timeout lets us notice worker failures.
+    // Atomics.waitAsync keeps the event loop free (SIGINT handlers keep working); the interval timer keeps the process
+    // alive while we wait, and the 200 ms timeout lets us notice worker failures.
     const keepAlive = setInterval(() => {}, 1000);
     try {
       for (;;) {
@@ -137,14 +144,25 @@ export class PoolModel {
         if (r.async) await r.value;
       }
     } finally { clearInterval(keepAlive); }
-    for (let i = 0; i < B; i++) this.tokens.push(tokens[i]);
-    return want ? this.logits : null;
   }
 
-  /** Whole [pos][kvDim] region of one layer's K (isV=0) or V (isV=1) cache, as a live view (for the prefix cache). */
-  kvRegion(layer, isV) {
-    const kvDim = this.cfg.nHeadKv * this.cfg.headDim;
-    return this.kvView.subarray(kvOffset(layer, isV, this.ctx, kvDim), kvOffset(layer, isV, this.ctx, kvDim) + this.ctx * kvDim);
+  /**
+   * Copy the first n positions of one layer's K (isV=0) or V (isV=1) cache out of the workers: returns an
+   * [n][kvDim] f32 view of the staging buffer, valid until the next KV command. (Used by the prefix cache.)
+   */
+  async kvGet(layer, isV, n) {
+    if (this.failed) throw this.failed;
+    Atomics.store(this.ctrl, CTRL.KV_LAYER, layer); Atomics.store(this.ctrl, CTRL.KV_ISV, isV); Atomics.store(this.ctrl, CTRL.KV_N, n);
+    await this.#issue(CMD_KV_EXPORT);
+    return this.kvStage.subarray(0, n * this.cfg.nHeadKv * this.cfg.headDim);
+  }
+
+  /** Write n positions of one layer's K or V cache into the workers (data: [n][kvDim] f32). */
+  async kvSet(layer, isV, n, data) {
+    if (this.failed) throw this.failed;
+    this.kvStage.set(data.subarray(0, n * this.cfg.nHeadKv * this.cfg.headDim));
+    Atomics.store(this.ctrl, CTRL.KV_LAYER, layer); Atomics.store(this.ctrl, CTRL.KV_ISV, isV); Atomics.store(this.ctrl, CTRL.KV_N, n);
+    await this.#issue(CMD_KV_IMPORT);
   }
 
   /** After the KV regions were filled from a prefix cache: declare that the model now holds exactly `ids`. */

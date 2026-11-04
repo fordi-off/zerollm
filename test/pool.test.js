@@ -209,7 +209,13 @@ test('F16/F32 weights fall back to JS kernels inside a SIMD pool (mixed-type mod
   const ref = new RefModel(g, { ctx: 16 });
   const pool = await PoolModel.create(g, { ctx: 16, workers: 2, kernels: 'wasm' });
   try {
-    for (const t of [4, 8, 15]) assert.deepEqual([...await pool.forward(t)], [...ref.forward(t)]); // F32 path has no SIMD kernel: still exact
+    // F32 matrices have no SIMD matmul kernel (JS fallback), but attention is SIMD now: rounding-level differences only
+    for (const t of [4, 8, 15]) {
+      const got = Float32Array.from(await pool.forward(t)); const want = ref.forward(t);
+      const top = Math.max(...want.map(Math.abs));
+      const diff = got.reduce((m, v, i) => Math.max(m, Math.abs(v - want[i])), 0);
+      assert.ok(diff <= 1e-4 * top, `diff ${diff} vs top ${top}`);
+    }
   } finally { await pool.close(); }
 });
 

@@ -119,3 +119,24 @@ Observations: decode 5.8 tok/s clears the brief's ">= ~4 tok/s for 4B Q4" target
 Experiment that shaped the design: replacing widen+dot with `i16x8.extmul` + pairwise adds (no widening) made decode 25-35% faster for Q4_K/Q5_K but batched kernels 20-50% slower (there the weights are widened once per tile and reused for 4 tokens) and Q5_0/Q6_K decode no better, so the final kernels are a hybrid (extmul for Q4_K/Q5_K/Q6_K decode; widened tiles for every batched kernel; Q5_0 decode as before). Wasm op count is not machine instruction count: on x64 V8 an extmul costs several instructions.
 
 Model-level effect on the Q4_K_M-style 0.6B-shaped file (before -> after, decode / prefill tok/s): 1 thread 4.30/5.47 -> 4.85/7.32; 4 threads 13.7/17.0 -> 15.5/22.0. Smaller than the kernel gains because attention (JS, grows with context) and activation quantization (JS, repeated by every worker) are still outside the kernels.
+
+### SIMD attention + private per-worker KV cache, dev container, Q8_0 0.6B-shaped synthetic model, wasm-simd
+
+4-vCPU Xeon VM, NOT the target machine. Attention was plain JS over a shared KV cache before; now each worker owns a set of KV heads (with the query heads that share them), keeps their K/V in its own wasm memory, and runs SIMD q.K / p.V kernels (softmax still JS).
+
+1 thread, batch 16, ms per prompt token (profile of worker 0):
+
+| prompt tokens | attention before | attention after | total/token before | total/token after |
+|---|---|---|---|---|
+| 32 | 10.2 | 1.8 | 55.0 | 48.1 |
+| 128 | 13.9 | 2.4 | 53.8 | 43.3 |
+| 384 | 36.1 | 5.2 | 75.2 | 43.9 |
+
+4 threads, 384-token prompt, 16 generated tokens:
+
+| | prefill tok/s | decode tok/s |
+|---|---|---|
+| before | 33.0 | 10.4 |
+| after | 55.8 | 18.1 |
+
+Before, attention cost grew linearly with context and at a 384-token prompt was larger than all matmuls combined (decode fell ~40% below its short-context speed); now it is ~12% of the token time at that length. One barrier per layer fewer (5 instead of 6: K/V no longer cross workers).

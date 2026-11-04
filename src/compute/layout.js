@@ -10,6 +10,9 @@ export const CTRL = Object.freeze({
   ERROR: 5,     // worker id + 1 of the first failing worker
   CMD: 6,       // 0 = run tokens, 1 = exit
   BATCH: 7,     // number of tokens in this command (1 = decode)
+  KV_LAYER: 8,  // KV export/import: layer
+  KV_ISV: 9,    //                   0 = K, 1 = V
+  KV_N: 10,     //                   number of positions
   BAR_COUNT: 16,
   BAR_GEN: 32,
   TOKENS: 48,   // token ids of the batch (up to MAX_BATCH)
@@ -21,6 +24,8 @@ export const MAX_BATCH = 64;
 
 export const CMD_TOKEN = 0;
 export const CMD_EXIT = 1;
+export const CMD_KV_EXPORT = 2; // workers copy their private K or V cache of one layer into the shared staging buffer
+export const CMD_KV_IMPORT = 3; // ... and the reverse
 
 /** Even split of `count` items among `n` workers; returns [start, end) for worker w. */
 export function splitRange(count, n, w) {
@@ -39,11 +44,6 @@ export function splitRows(rows, n, w, align = 4) {
 /** Round up to a multiple of `a`. */
 export const alignUp = (v, a) => Math.ceil(v / a) * a;
 
-/** Float offset of a KV cache row. Layout: [layer][k=0|v=1][pos][kvDim]. */
-export function kvOffset(layer, isV, ctx, kvDim, pos = 0) {
-  return (((layer * 2 + isV) * ctx) + pos) * kvDim;
-}
-
 /** Allocate the SharedArrayBuffers a pool needs. */
 export function allocShared(cfg, ctx, maxBatch = 1) {
   const qDim = cfg.nHead * cfg.headDim;
@@ -53,6 +53,6 @@ export function allocShared(cfg, ctx, maxBatch = 1) {
     ctrl: new SharedArrayBuffer(CTRL.SIZE * 4),
     x: f32(cfg.nEmbd * maxBatch), q: f32(qDim * maxBatch), k: f32(kvDim * maxBatch), v: f32(kvDim * maxBatch), att: f32(qDim * maxBatch),
     hb: f32(cfg.nFF * maxBatch), logits: f32(cfg.vocabSize),
-    kv: f32(cfg.nLayer * 2 * ctx * kvDim),
+    kvStage: f32(ctx * kvDim), // staging area for KV export/import (the caches themselves are private to each worker)
   };
 }
