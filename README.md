@@ -37,3 +37,8 @@ Plan for a ChatGPT/Claude-style local chat app (pure Node + HTML, zero dependenc
 ## Rules
 
 Node built-ins only. No npm dependencies, no native addons, no external binaries. Works on Node >= 22.
+
+
+## Zerochat (the app)
+
+A ChatGPT/Claude-style local chat app on top of the engine: streaming chat, saved chats, model downloads, slash commands, documents with sources, long-chat summaries, Norwegian/English UI. Zero dependencies, `node app/main.js`. See [docs/APP-GUIDE.md](docs/APP-GUIDE.md) (Norwegian + English), [docs/APP-PLAN.md](docs/APP-PLAN.md) and the manual checklist [docs/APP-CHECKS.md](docs/APP-CHECKS.md).

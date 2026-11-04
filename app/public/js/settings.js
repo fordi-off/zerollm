@@ -32,7 +32,7 @@ export async function openSettings(tab) {
 async function render() {
   const st = await call('state');
   apply($('settings'));
-  renderModels(st); renderPerformance(st); await renderSkills(); await renderDocuments(st);
+  renderModels(st); renderPerformance(st); await renderSkills(); await renderDocuments(st); await renderDiagnostics();
 }
 
 const fmtSpeed = (b) => `${(b / 1e6).toFixed(1)} MB/s`;
@@ -236,4 +236,31 @@ async function renderDocuments(st) {
     if (d.summary) r.append(el('div', 'doc-summary-text', d.summary));
     r.append(pv); box.append(r);
   }
+}
+
+async function renderDiagnostics() {
+  const box = $('tab-diagnostics'); box.textContent = ''; box.classList.add('diag');
+  const d = await call('diagnostics');
+  const yn = (b) => (b ? 'ja' : 'NEI');
+  const lines = [
+    `Node ${d.system.node} (V8 ${d.system.v8}) - ${d.system.platform}`,
+    `CPU: ${d.system.cpu} (${d.system.logicalCpus} logiske)`,
+    `RAM: ${fmtBytes(d.system.ramFree)} ledig av ${fmtBytes(d.system.ramTotal)}`,
+    `SIMD: ${yn(d.features.simd)} · relaxed SIMD: ${yn(d.features.relaxedSimd)} · tråder: ${yn(d.features.threads)} · SharedArrayBuffer: ${yn(d.features.sharedArrayBuffer)} · Atomics.wait: ${yn(d.features.atomicsWait)}`,
+    `Datamappe: ${d.app.dataFolder}`, `Loggfil: ${d.app.logFile}`,
+    `Kontekst: ${d.app.contextWindow} · tråder: ${d.app.threads} · lastet modell: ${d.app.loadedModel ?? '-'}`,
+    '', 'Modeller:', ...d.models.map((m) => `  ${m.filename} · ${fmtBytes(m.sizeBytes)} · ${m.quant || '?'} · ${m.supported ? 'støttet' : `IKKE støttet (${m.reason})`}`),
+    '', ...(d.problems.length ? ['Problemer:', ...d.problems.map((p) => `  - ${p}`)] : [t('diagOk')]),
+    '', 'Logg:', d.logTail,
+  ];
+  const report = lines.join('\n');
+  box.append(el('p', 'hint', t('diagHint')));
+  const copy = el('button', 'btn primary', t('copyReport')); copy.type = 'button';
+  copy.addEventListener('click', async () => { try { await navigator.clipboard.writeText(report); } catch { /* shown below anyway */ } copy.textContent = t('copied'); setTimeout(() => { copy.textContent = t('copyReport'); }, 1500); });
+  box.append(copy);
+  box.append(el('h3', '', t('diagSystem'))); const sys = el('pre'); sys.textContent = lines.slice(0, 9).join('\n'); box.append(sys);
+  box.append(el('h3', '', t('diagModels'))); const mo = el('pre'); mo.textContent = d.models.map((m) => `${m.filename} · ${m.supported ? 'støttet' : `IKKE støttet (${m.reason})`}`).join('\n') || '-'; box.append(mo);
+  box.append(el('p', d.problems.length ? 'bad' : 'ok', d.problems.length ? d.problems.join(' ') : t('diagOk')));
+  box.append(el('h3', '', t('diagLog'))); const lg = el('pre'); lg.textContent = d.logTail || '-'; box.append(lg);
+  box.append(el('p', 'shortcuts', `${t('shortcuts')}: ${t('shortcutsText')}`));
 }

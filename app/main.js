@@ -16,10 +16,11 @@ import { createApi } from './api.js';
 import { createAppServer } from './server.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+const DEFAULT_DATA_DIR = path.resolve(here, '..'); // the zerollm folder itself (models/, chats/ ... live next to app/), wherever the command is run from
 
 /** Start everything. Returns handles (used by the tests and by main()). */
 export async function startApp({ dataDir, port = 0, quiet = false, catalog, retryDelayMs } = {}) {
-  const paths = resolvePaths(dataDir ?? process.cwd());
+  const paths = resolvePaths(dataDir ?? DEFAULT_DATA_DIR);
   ensureDirs(paths);
   const log = createLogger(paths, { quiet });
   let config = loadConfig(paths);
@@ -75,7 +76,7 @@ async function existingInstance(paths) {
 
 async function main() {
   const { flags } = parseArgs(process.argv.slice(2), { boolean: ['no-open', 'keep-alive', 'quiet'] });
-  const dataDir = typeof flags.data === 'string' ? flags.data : process.cwd();
+  const dataDir = typeof flags.data === 'string' ? flags.data : DEFAULT_DATA_DIR;
   const paths = resolvePaths(dataDir);
   const existing = await existingInstance(paths);
   if (existing) {

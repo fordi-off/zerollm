@@ -50,3 +50,10 @@ Run `npm run app -- --data <folder containing models/>` (or `node app/main.js`).
 - [ ] A big file (1-2 MB) indexes within a second or two and the app stays responsive.
 - [ ] Settings > Dokumenter: library lists the file; "Vis tekst" shows it; "Lag sammendrag" produces a summary (note how long it takes with and without a small second model); delete removes it from every chat.
 - [ ] Skibeti37's `documents/*.json` copied into this data folder show up and answer questions.
+
+## A7 - polish
+- [ ] Starting `node app/main.js` from a different working directory still finds `models/` (data folder = the zerollm folder).
+- [ ] The Windows shortcut from docs/APP-GUIDE.md starts the app without a console window problem (a console window stays open while it runs - that is expected) and opens the window.
+- [ ] Settings > Diagnose: report is complete; "Kopier rapport" puts it on the clipboard.
+- [ ] Esc stops a reply; Alt+N / Alt+B work; `/` outside the text box jumps to it.
+- [ ] Tab through the page: every control reachable, focus ring visible; dark mode readable.

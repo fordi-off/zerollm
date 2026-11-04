@@ -121,5 +121,15 @@
   "docParts": "{n} deler",
   "dropHere": "Slipp filen for å legge den ved",
   "docLibrary": "Bibliotek",
-  "docDeleteConfirm": "Slett fra biblioteket?"
+  "docDeleteConfirm": "Slett fra biblioteket?",
+  "diagnosticsTab": "Diagnose",
+  "copyReport": "Kopier rapport",
+  "diagHint": "Nyttig hvis noe ikke virker: kopier rapporten og send den.",
+  "diagSystem": "System",
+  "diagFeatures": "Funksjoner",
+  "diagModels": "Modeller",
+  "diagLog": "Siste logglinjer",
+  "diagOk": "Alt som trengs er på plass.",
+  "shortcuts": "Hurtigtaster",
+  "shortcutsText": "Enter sender · Shift+Enter ny linje · Esc stopper svaret · Alt+N ny samtale · Alt+B sidepanel · / åpner kommandoer"
 }

@@ -121,5 +121,15 @@
   "docParts": "{n} parts",
   "dropHere": "Drop the file to attach it",
   "docLibrary": "Library",
-  "docDeleteConfirm": "Delete from the library?"
+  "docDeleteConfirm": "Delete from the library?",
+  "diagnosticsTab": "Diagnostics",
+  "copyReport": "Copy report",
+  "diagHint": "Useful when something does not work: copy the report and send it.",
+  "diagSystem": "System",
+  "diagFeatures": "Features",
+  "diagModels": "Models",
+  "diagLog": "Last log lines",
+  "diagOk": "Everything required is available.",
+  "shortcuts": "Keyboard shortcuts",
+  "shortcutsText": "Enter sends · Shift+Enter new line · Esc stops the reply · Alt+N new chat · Alt+B sidebar · / opens commands"
 }
