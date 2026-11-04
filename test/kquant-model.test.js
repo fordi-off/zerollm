@@ -101,8 +101,10 @@ test('unsupported quantization formats fail early with a clear message (and info
   try {
     assert.throws(() => assertSupportedTensorTypes(readGGUF(p)), /Q3_K \(1 tensors\).*Supported:.*Q4_K/s);
     const { spawnSync } = await import('node:child_process');
-    const BIN = pathMod.join(pathMod.dirname(new URL(import.meta.url).pathname), '..', 'bin', 'zerollm.js');
+    const { fileURLToPath } = await import('node:url');
+    const BIN = pathMod.join(pathMod.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'zerollm.js');
     const r = spawnSync(process.execPath, [BIN, 'info', p], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /Q3_K.*NOT supported/);
   } finally { fs.unlinkSync(p); }
 });
