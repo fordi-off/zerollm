@@ -8,12 +8,14 @@ import fs from 'node:fs';
 import { parentPort, workerData } from 'node:worker_threads';
 import { readTensorBytes } from '../gguf/reader.js';
 import { GGML_TYPE, GGML_TYPE_INFO } from '../gguf/types.js';
+import { f16Table, f32ToF16 } from '../util/f16.js';
 import { Act, matvec, dequantRow, rmsnorm, softmax, silu, ropeTables, applyRope, rowBytes, quantizeAct } from './ref-kernels.js';
 import { instantiateKernels } from './wasm/kernels.js';
 import { Barrier } from './barrier.js';
 import { CTRL, CMD_EXIT, CMD_KV_EXPORT, CMD_KV_IMPORT, splitRows, splitRange, alignUp } from './layout.js';
 
-const { id, n, cfg, tensors, path, ctx, shared, spin, kernels, maxBatch } = workerData;
+const { id, n, cfg, tensors, path, ctx, shared, spin, kernels, maxBatch, kvType } = workerData;
+const kvF16 = kvType === 'f16';
 // opt-in profile of worker 0 (ZEROLLM_PROFILE=1): where does a token's time go?
 const prof = process.env.ZEROLLM_PROFILE === '1' && id === 0;
 const PT = { kernel: 0, quant: 0, attn: 0, barrier: 0, total: 0, tokens: 0, batches: 0 };
@@ -80,7 +82,8 @@ function main() {
   const SCP = total; total += alignUp(ctx * 4, 64);                       // attention: scores / probabilities
   const OHP = total; total += alignUp(headDim * 4, 64);                   // attention: output head
   const kvPerLayer = 2 * nOwn * ctx * headDim;                            // floats: [k|v][owned head][pos][headDim]
-  const KVB = total; total += alignUp(nLayer * kvPerLayer * 4, 64);
+  const kvShift = kvF16 ? 1 : 2;                                          // log2(bytes per cached value)
+  const KVB = total; total += alignUp((nLayer * kvPerLayer) << kvShift, 64);
   const pages = Math.max(1, Math.ceil(total / 65536));
   if (pages > 65536) throw new Error(`worker ${id}: weight slice is ${(total / 2 ** 30).toFixed(2)} GB, over the 4 GB wasm32 limit; use more workers or a smaller --ctx`);
   let mem;
@@ -154,7 +157,9 @@ function main() {
   const sk = new Float32Array(shared.k); const sv = new Float32Array(shared.v);
   const att = new Float32Array(shared.att); const hb = new Float32Array(shared.hb);
   const logits = new Float32Array(shared.logits); const kvStage = new Float32Array(shared.kvStage);
-  const kvF32 = new Float32Array(mem.buffer, KVB, nLayer * kvPerLayer);
+  const kvF32 = kvF16 ? null : new Float32Array(mem.buffer, KVB, nLayer * kvPerLayer);
+  const kvU16 = kvF16 ? new Uint16Array(mem.buffer, KVB, nLayer * kvPerLayer) : null;
+  const h2f = kvF16 ? f16Table() : null;
   const rawBar = new Barrier(ctrl, CTRL.BAR_COUNT, CTRL.BAR_GEN, n, spin);
   const bar = prof ? { wait() { const t = performance.now(); rawBar.wait(); PT.barrier += performance.now() - t; } } : rawBar;
   const rope = ropeTables(cfg, ctx, ropeFreqs);
@@ -248,22 +253,26 @@ function main() {
           if (L.kNorm) rmsnorm(sk, sk, L.kNorm, rmsEps, headDim, o, o);
           applyRope(sk.subarray(o, o + headDim), 1, headDim, nRot, ropeType, rope, pos);
           const kBase = ((l * 2) * nOwn + hl) * ctx * headDim; const vBase = ((l * 2 + 1) * nOwn + hl) * ctx * headDim;
-          kvF32.set(sk.subarray(o, o + headDim), kBase + pos * headDim);
-          kvF32.set(sv.subarray(o, o + headDim), vBase + pos * headDim);
+          if (kvF16) {
+            for (let i = 0; i < headDim; i++) { kvU16[kBase + pos * headDim + i] = f32ToF16(sk[o + i]); kvU16[vBase + pos * headDim + i] = f32ToF16(sv[o + i]); }
+          } else {
+            kvF32.set(sk.subarray(o, o + headDim), kBase + pos * headDim);
+            kvF32.set(sv.subarray(o, o + headDim), vBase + pos * headDim);
+          }
           for (let g = 0; g < group; g++) {
             const qhd = hd * group + g;
             qh.set(sq.subarray(b * qDim + qhd * headDim, b * qDim + (qhd + 1) * headDim));
             if (L.qNorm) rmsnorm(qh, qh, L.qNorm, rmsEps, headDim);
             applyRope(qh, 1, headDim, nRot, ropeType, rope, pos);
             if (attnSimd) {
-              k.attn_scores(QHP, KVB + kBase * 4, SCP, pos + 1, headDim, scale);
+              (kvF16 ? k.attn_scores_f16 : k.attn_scores)(QHP, KVB + (kBase << kvShift), SCP, pos + 1, headDim, scale);
               softmax(scores, pos + 1);
-              k.attn_av(SCP, KVB + vBase * 4, OHP, pos + 1, headDim);
+              (kvF16 ? k.attn_av_f16 : k.attn_av)(SCP, KVB + (vBase << kvShift), OHP, pos + 1, headDim);
             } else {
               for (let t = 0; t <= pos; t++) {
                 const ko = kBase + t * headDim;
                 let s = 0;
-                for (let i = 0; i < headDim; i++) s += qh[i] * kvF32[ko + i];
+                for (let i = 0; i < headDim; i++) s += qh[i] * (kvF16 ? h2f[kvU16[ko + i]] : kvF32[ko + i]);
                 scores[t] = s * scale;
               }
               softmax(scores, pos + 1);
@@ -271,7 +280,7 @@ function main() {
               for (let t = 0; t <= pos; t++) {
                 const p = scores[t];
                 const vo = vBase + t * headDim;
-                for (let i = 0; i < headDim; i++) oh[i] += p * kvF32[vo + i];
+                for (let i = 0; i < headDim; i++) oh[i] += p * (kvF16 ? h2f[kvU16[vo + i]] : kvF32[vo + i]);
               }
             }
             att.set(oh, b * qDim + qhd * headDim);
@@ -324,9 +333,12 @@ function main() {
       for (let hl = 0; hl < nOwn; hl++) {
         const base = ((layer * 2 + isV) * nOwn + hl) * ctx * headDim;
         for (let t = 0; t < cnt; t++) {
-          const stage = kvStage.subarray(t * kvDim + (kh0 + hl) * headDim, t * kvDim + (kh0 + hl + 1) * headDim);
-          const mine = kvF32.subarray(base + t * headDim, base + (t + 1) * headDim);
-          if (cmd === CMD_KV_EXPORT) stage.set(mine); else mine.set(stage);
+          const so = t * kvDim + (kh0 + hl) * headDim; const mo = base + t * headDim;
+          if (kvF16) {
+            if (cmd === CMD_KV_EXPORT) for (let i = 0; i < headDim; i++) kvStage[so + i] = h2f[kvU16[mo + i]];
+            else for (let i = 0; i < headDim; i++) kvU16[mo + i] = f32ToF16(kvStage[so + i]);
+          } else if (cmd === CMD_KV_EXPORT) kvStage.set(kvF32.subarray(mo, mo + headDim), so);
+          else kvF32.set(kvStage.subarray(so, so + headDim), mo);
         }
       }
       Atomics.add(ctrl, CTRL.DONE, 1);

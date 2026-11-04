@@ -8,7 +8,7 @@ import { probeWasmFeatures } from './wasm/features.js';
 export class PoolModel {
   /**
    * @param {import('../gguf/reader.js').GGUFFile} g
-   * @param {{ctx?: number, workers?: number, spin?: number, kernels?: 'auto'|'wasm'|'js', maxBatch?: number, onProgress?: (done: number, total: number) => void}} [opts]
+   * @param {{ctx?: number, workers?: number, spin?: number, kernels?: 'auto'|'wasm'|'js', maxBatch?: number, kv?: 'f32'|'f16', onProgress?: (done: number, total: number) => void}} [opts]
    * @returns {Promise<PoolModel>}
    */
   static async create(g, opts = {}) {
@@ -24,6 +24,9 @@ export class PoolModel {
     const cfg = this.cfg = modelConfig(g);
     this.ctx = Math.min(opts.ctx ?? 2048, cfg.nCtxTrain);
     this.n = Math.max(1, opts.workers ?? 1);
+    /** precision of the KV cache: f16 halves its memory (values are rounded to half precision) */
+    this.kv = opts.kv ?? 'f32';
+    if (this.kv !== 'f32' && this.kv !== 'f16') throw new Error(`kv must be f32 or f16 (got "${this.kv}")`);
     const want = opts.kernels ?? 'auto';
     if (want === 'wasm' && !probeWasmFeatures().simd) throw new Error('--kernels wasm requested but this Node/V8 has no WebAssembly SIMD; use --kernels js');
     this.kernels = want === 'auto' ? (probeWasmFeatures().simd ? 'wasm' : 'js') : want;
@@ -54,7 +57,7 @@ export class PoolModel {
     this.exits = [];
     const ready = [];
     for (let id = 0; id < this.n; id++) {
-      const w = new Worker(url, { workerData: { id, n: this.n, cfg, tensors, path: g.path, ctx: this.ctx, shared: sh, spin: opts.spin ?? 20000, kernels: this.kernels, maxBatch: this.maxBatch } });
+      const w = new Worker(url, { workerData: { id, n: this.n, cfg, tensors, path: g.path, ctx: this.ctx, shared: sh, spin: opts.spin ?? 20000, kernels: this.kernels, maxBatch: this.maxBatch, kvType: this.kv } });
       this.workers.push(w);
       this.exits.push(new Promise((r) => w.once('exit', r)));
       ready.push(new Promise((resolve, reject) => {

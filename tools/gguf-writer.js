@@ -1,4 +1,5 @@
 // Minimal GGUF writer for tests and tiny synthetic models.
+import fs from 'node:fs';
 import { GGUF_TYPE, GGML_TYPE_INFO, tensorBytes } from '../src/gguf/types.js';
 
 class W {
@@ -48,7 +49,37 @@ function writeValue(w, type, value, elemType) {
  * @param {{version?: number, alignment?: number, metadata?: MetaKV[], tensors?: TensorSpec[]}} spec
  * @returns {Buffer}
  */
-export function buildGGUF({ version = 3, alignment = 32, metadata = [], tensors = [] }) {
+export function buildGGUF(spec) {
+  const { head, dataStart, offsets, tensors } = layoutGGUF(spec);
+  const parts = [head];
+  let len = head.length;
+  tensors.forEach((t, i) => {
+    const want = dataStart + offsets[i];
+    if (len < want) { parts.push(Buffer.alloc(want - len)); len = want; }
+    parts.push(Buffer.from(t.data.buffer, t.data.byteOffset, t.data.byteLength));
+    len += t.data.byteLength;
+  });
+  return Buffer.concat(parts);
+}
+
+/** Like buildGGUF but streams to a file (no second copy of the tensor data in memory). */
+export function writeGGUF(path, spec) {
+  const { head, dataStart, offsets, tensors } = layoutGGUF(spec);
+  const fd = fs.openSync(path, 'w');
+  try {
+    let pos = 0;
+    const write = (buf) => { for (let o = 0; o < buf.length;) o += fs.writeSync(fd, buf, o, Math.min(buf.length - o, 1 << 28)); pos += buf.length; };
+    write(head);
+    tensors.forEach((t, i) => {
+      const want = dataStart + offsets[i];
+      if (pos < want) write(Buffer.alloc(want - pos));
+      write(Buffer.from(t.data.buffer, t.data.byteOffset, t.data.byteLength));
+    });
+  } finally { fs.closeSync(fd); }
+}
+
+/** header + metadata + tensor infos + alignment padding, and the aligned data offsets */
+function layoutGGUF({ version = 3, alignment = 32, metadata = [], tensors = [] }) {
   const meta = metadata.slice();
   if (alignment !== 32 && !meta.some((m) => m.key === 'general.alignment')) {
     meta.push({ key: 'general.alignment', type: GGUF_TYPE.UINT32, value: alignment });
@@ -80,11 +111,5 @@ export function buildGGUF({ version = 3, alignment = 32, metadata = [], tensors 
     w.u64(offsets[offsets.length - 1]);
   }
   w.pad(alignment);
-  const dataStart = w.len;
-  tensors.forEach((t, i) => {
-    const want = dataStart + offsets[i];
-    if (w.len < want) w.push(Buffer.alloc(want - w.len));
-    w.push(Buffer.from(t.data.buffer, t.data.byteOffset, t.data.byteLength));
-  });
-  return w.concat();
+  return { head: w.concat(), dataStart: w.len, offsets, tensors };
 }

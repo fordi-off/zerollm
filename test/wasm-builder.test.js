@@ -138,6 +138,12 @@ test('SIMD extended multiplies and pairwise adds (the int8 dot used by the K-qua
   check('i16x8.extadd_pairwise_i8x16_s', (a) => out16((o) => { for (let i = 0; i < 8; i++) o.setInt16(2 * i, s8(a[2 * i]) + s8(a[2 * i + 1]), true); }), { unary: true });
 });
 
+test('SIMD zero-extend 16->32 and i32x4 shift (used to convert f16 KV values)', () => {
+  check('i32x4.extend_low_i16x8_u', (a) => out16((o) => { const x = dv(a); for (let i = 0; i < 4; i++) o.setUint32(4 * i, x.getUint16(2 * i, true), true); }), { unary: true });
+  check('i32x4.extend_high_i16x8_u', (a) => out16((o) => { const x = dv(a); for (let i = 0; i < 4; i++) o.setUint32(4 * i, x.getUint16(8 + 2 * i, true), true); }), { unary: true });
+  check('i32x4.shl', (a) => out16((o) => { const x = dv(a); for (let i = 0; i < 4; i++) o.setInt32(4 * i, x.getInt32(4 * i, true) << 4, true); }), { shift: true });
+});
+
 test('SIMD float: convert, add, mul', () => {
   const small = (a) => { const u = new Uint8Array(16); const d = dv(u); for (let i = 0; i < 4; i++) d.setInt32(4 * i, dv(a).getInt32(4 * i, true) >> 8, true); return u; };
   const { inst, mem } = (() => {

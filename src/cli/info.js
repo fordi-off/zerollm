@@ -3,9 +3,10 @@ import { readGGUF } from '../gguf/reader.js';
 import { typeName } from '../gguf/types.js';
 import { modelConfig, estimateRam, UnsupportedArchError, SUPPORTED_TENSOR_TYPES } from '../model/config.js';
 import { parseArgs, num } from '../util/args.js';
+import { defaultThreads } from './common.js';
 import { formatBytes, formatCount, printTable, section } from '../util/log.js';
 
-export const help = 'info <model.gguf> [--ctx N] [--tensors] [--kv] [--full-template]';
+export const help = 'info <model.gguf> [--ctx N] [--threads N] [--tensors] [--metadata] [--full-template]';
 
 function summarize(v) {
   if (Array.isArray(v)) {
@@ -17,8 +18,8 @@ function summarize(v) {
 }
 
 export async function run(argv) {
-  const { _, flags } = parseArgs(argv, { boolean: ['tensors', 'kv', 'full-template'] });
-  if (!_[0]) throw new Error('usage: zerollm info <model.gguf> [--ctx N] [--tensors] [--kv] [--full-template]');
+  const { _, flags } = parseArgs(argv, { boolean: ['tensors', 'kv', 'metadata', 'full-template'] });
+  if (!_[0]) throw new Error('usage: zerollm info <model.gguf> [--ctx N] [--threads N] [--tensors] [--metadata] [--full-template]');
   const g = readGGUF(_[0]);
 
   section('File');
@@ -102,18 +103,27 @@ export async function run(argv) {
   else process.stdout.write(`${tpl.length} chars: ${JSON.stringify(tpl.slice(0, 160))}${tpl.length > 160 ? '...  (use --full-template)' : ''}\n`);
 
   const ctx = num(flags.ctx, Math.min(2048, cfg?.nCtxTrain ?? 2048));
-  const est = estimateRam(g, cfg, { ctx });
-  section(`RAM estimate (ctx ${ctx}, f32 KV cache)`);
+  const threads = num(flags.threads, defaultThreads());
+  const e32 = estimateRam(g, cfg, { ctx, kvBytes: 4, threads });
+  const e16 = estimateRam(g, cfg, { ctx, kvBytes: 2, threads });
+  section(`RAM estimate (ctx ${ctx}, ${threads} threads)`);
   printTable([
-    ['Weights', formatBytes(est.weights)],
-    ['KV cache', formatBytes(est.kv)],
-    ['Scratch + runtime', formatBytes(est.scratch + est.runtime)],
-    ['Total', formatBytes(est.total)],
+    ['Weights', formatBytes(e32.weights)],
+    ['KV cache, f32 (default)', formatBytes(e32.kv)],
+    ['KV cache, f16 (--kv f16)', formatBytes(e16.kv)],
+    ['Scratch + runtime', formatBytes(e32.scratch + e32.runtime)],
+    ['Total with f32 KV', formatBytes(e32.total)],
+    ['Total with f16 KV', formatBytes(e16.total)],
+    ['Busiest worker memory (f32 KV)', `${formatBytes(e32.perWorker)}  (wasm32 limit 4 GB)`],
     ['Free RAM now', formatBytes(os.freemem())],
   ]);
-  if (est.total > os.freemem() * 0.9) process.stdout.write('WARNING: estimated need is close to / above free RAM. Close heavy apps or use a smaller model/context.\n');
+  if (e32.total > os.freemem() * 0.9) {
+    process.stdout.write(e16.total <= os.freemem() * 0.9
+      ? 'WARNING: tight on RAM with an f32 KV cache. --kv f16 should fit. Close heavy apps to be safe.\n'
+      : 'WARNING: estimated need is close to / above free RAM even with --kv f16. Close heavy apps, lower --ctx, or use a smaller model/quant.\n');
+  }
 
-  if (flags.kv) {
+  if (flags.kv || flags.metadata) {
     section('Metadata');
     for (const [k, v] of g.metadata) process.stdout.write(`${k} = ${summarize(v)}\n`);
   }
