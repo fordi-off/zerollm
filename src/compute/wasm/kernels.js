@@ -230,23 +230,27 @@ function genMatmul(m, name, kind) {
   rowGroups(1);
 }
 
-/** @returns {Uint8Array} the kernel module bytes */
-export function buildKernelModule() {
+/**
+ * @param {{kdot?: 'extmul'|'wide'}} [opts] kdot: dot form of the K-quant decode kernels (default: env ZEROLLM_KDOT or 'extmul')
+ * @returns {Uint8Array} the kernel module bytes
+ */
+export function buildKernelModule(opts = {}) {
   const m = new ModuleBuilder().withImportedMemory(1);
   genMatvec(m, 'matvec_q8_0', 'q8');
   genMatvec(m, 'matvec_q4_0', 'q4');
   genMatmul(m, 'mm_q8_0', 'q8');
   genMatmul(m, 'mm_q4_0', 'q4');
-  genKQuantKernels(m);
+  genKQuantKernels(m, opts);
   genAttnKernels(m);
   return m.build();
 }
 
-/** @type {WebAssembly.Module|null} */
-let compiled = null;
+/** compiled modules by variant (compiled once per thread) */
+const compiled = new Map();
 
-/** Compile once per thread, instantiate against a worker's private memory. */
-export function instantiateKernels(memory) {
-  compiled ??= new WebAssembly.Module(buildKernelModule());
-  return new WebAssembly.Instance(compiled, { env: { mem: memory } }).exports;
+/** Compile once per thread and variant, instantiate against a worker's private memory. */
+export function instantiateKernels(memory, opts = {}) {
+  const kdot = opts.kdot ?? (process.env.ZEROLLM_KDOT === 'wide' ? 'wide' : 'extmul');
+  if (!compiled.has(kdot)) compiled.set(kdot, new WebAssembly.Module(buildKernelModule({ kdot })));
+  return new WebAssembly.Instance(compiled.get(kdot), { env: { mem: memory } }).exports;
 }

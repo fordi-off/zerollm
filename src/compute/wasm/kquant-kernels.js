@@ -327,7 +327,8 @@ function q45kNibbles(st, p, off, s, five, hq, dst) {
   f.set(dst);
 }
 
-function genQ45K(m, decodeName, batchName, five) {
+function genQ45K(m, decodeName, batchName, five, opts) {
+  const wide = opts.kdot === 'wide';
   const qsOff = five ? 48 : 16;
   const blockBytes = five ? 176 : 144;
 
@@ -336,7 +337,7 @@ function genQ45K(m, decodeName, batchName, five) {
     init(st) {
       q45kInit(st);
       const f = st.f; const v = () => f.local(T.v128);
-      Object.assign(st, { xr0: v(), xr1: v(), raw1: v() });
+      Object.assign(st, { xr0: v(), xr1: v(), raw1: v(), xl0: v(), xh0: v(), xl1: v(), xh1: v() });
     },
     block(st, R) {
       const f = st.f;
@@ -344,6 +345,10 @@ function genQ45K(m, decodeName, batchName, five) {
       for (let s = 0; s < 8; s++) {
         f.get(st.xp).op('v128.load', { offset: 32 * s }).set(st.xr0);
         f.get(st.xp).op('v128.load', { offset: 32 * s + 16 }).set(st.xr1);
+        if (wide) {
+          f.get(st.xr0).op('i16x8.extend_low_i8x16_s').set(st.xl0); f.get(st.xr0).op('i16x8.extend_high_i8x16_s').set(st.xh0);
+          f.get(st.xr1).op('i16x8.extend_low_i8x16_s').set(st.xl1); f.get(st.xr1).op('i16x8.extend_high_i8x16_s').set(st.xh1);
+        }
         f.get(st.dp).op('f32.load', { offset: 4 * s }).set(st.dxs);
         f.get(st.sp).op('f32.load', { offset: 4 * s }).set(st.bs);
         for (let j = 0; j < R; j++) {
@@ -351,7 +356,7 @@ function genQ45K(m, decodeName, batchName, five) {
           q45kNibbles(st, p, base, s, five, st.hq[j][0], st.raw);
           q45kNibbles(st, p, base + 16, s, five, st.hq[j][1], st.raw1);
           byteOf(f, s < 4 ? st.scLo[j] : st.scHi[j], s & 3); f.op('f32.convert_i32_s').get(st.dj[j]).op('f32.mul').get(st.dxs).op('f32.mul').set(st.coef);
-          dot32(f, st.raw, st.xr0, st.raw1, st.xr1);
+          if (wide) { dot16wide(f, st.raw, st.xl0, st.xh0, st.t); dot16wide(f, st.raw1, st.xl1, st.xh1, st.t); f.op('i32x4.add'); } else dot32(f, st.raw, st.xr0, st.raw1, st.xr1);
           accumulate(f, st.acc[j], st.coef);
           byteOf(f, s < 4 ? st.mnLo[j] : st.mnHi[j], s & 3); f.op('f32.convert_i32_s').get(st.dmj[j]).op('f32.mul').get(st.dxs).op('f32.mul').get(st.bs).op('f32.mul').set(st.coef);
           f.get(st.mins[j]).get(st.coef).op('f32.add').set(st.mins[j]);
@@ -419,13 +424,14 @@ function q6kGroup(st, p, half, k, g) {
   f.i32(4).op('i8x16.shl').op('v128.or').get(st.c20).op('i8x16.sub').set(st.q);
 }
 
-function genQ6K(m) {
+function genQ6K(m, opts) {
+  const wide = opts.kdot === 'wide';
   scaffold(m, 'matvec_q6_k', {
     blockBytes: 210, xStride: 256, dStride: 32,
     init(st) {
       q6kInit(st);
       const v = () => st.f.local(T.v128);
-      Object.assign(st, { xg: v() });
+      Object.assign(st, { xg: v(), xl: v(), xh: v() });
     },
     block(st, R) {
       const f = st.f;
@@ -435,10 +441,13 @@ function genQ6K(m) {
           const xblock = half * 4 + k;
           f.get(st.dp).op('f32.load', { offset: 4 * xblock }).set(st.dxs);
           for (let g = 0; g < 2; g++) {
-            f.get(st.xp).op('v128.load', { offset: xblock * 32 + 16 * g }).set(st.xg);
+            if (wide) {
+              f.get(st.xp).op('v128.load', { offset: xblock * 32 + 16 * g }).tee(st.t).op('i16x8.extend_low_i8x16_s').set(st.xl);
+              f.get(st.t).op('i16x8.extend_high_i8x16_s').set(st.xh);
+            } else f.get(st.xp).op('v128.load', { offset: xblock * 32 + 16 * g }).set(st.xg);
             for (let j = 0; j < R; j++) {
               q6kGroup(st, st.p[j], half, k, g);
-              dot16(f, st.q, st.xg);
+              if (wide) dot16wide(f, st.q, st.xl, st.xh, st.t); else dot16(f, st.q, st.xg);
               f.get(st.p[j]).op('i32.load8_s', { offset: 192 + half * 8 + k * 2 + g }).op('f32.convert_i32_s').get(st.dj[j]).op('f32.mul').get(st.dxs).op('f32.mul').set(st.coef);
               accumulate(f, st.acc[j], st.coef);
             }
@@ -487,10 +496,14 @@ function genQ6K(m) {
   });
 }
 
-/** Adds the Q5_0 / Q4_K / Q5_K / Q6_K decode and batched kernels to a module builder. */
-export function genKQuantKernels(m) {
+/**
+ * Adds the Q5_0 / Q4_K / Q5_K / Q6_K decode and batched kernels to a module builder.
+ * @param {{kdot?: 'extmul'|'wide'}} [opts] kdot selects the integer dot form of the Q4_K/Q5_K/Q6_K DECODE kernels
+ *   (see the header comment); which one is faster depends on the CPU, tools/kbench.mjs measures both.
+ */
+export function genKQuantKernels(m, opts = {}) {
   genQ5_0(m);
-  genQ45K(m, 'matvec_q4_k', 'mm_q4_k', false);
-  genQ45K(m, 'matvec_q5_k', 'mm_q5_k', true);
-  genQ6K(m);
+  genQ45K(m, 'matvec_q4_k', 'mm_q4_k', false, opts);
+  genQ45K(m, 'matvec_q5_k', 'mm_q5_k', true, opts);
+  genQ6K(m, opts);
 }

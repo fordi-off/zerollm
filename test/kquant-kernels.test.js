@@ -13,14 +13,14 @@ const CASES = [
   ['Q6_K', GGML_TYPE.Q6_K, 256, 'matvec_q6_k'],
 ];
 
-function runKernel(name, type, blockElems, rows, nb, wbytes, x) {
+function runKernel(name, type, blockElems, rows, nb, wbytes, x, kdot = 'extmul') {
   const cols = nb * blockElems; const abl = cols / 32;
   const al = (v) => Math.ceil(v / 64) * 64;
   const wOff = 64; const xqOff = al(wOff + wbytes.length); const xdOff = al(xqOff + cols); const xsOff = al(xdOff + abl * 4); const yOff = al(xsOff + abl * 4);
   const mem = new WebAssembly.Memory({ initial: Math.ceil((yOff + rows * 4 + 64) / 65536) });
   new Uint8Array(mem.buffer, wOff, wbytes.length).set(wbytes);
   quantizeAct(x, new Int8Array(mem.buffer, xqOff, cols), new Float32Array(mem.buffer, xdOff, abl), new Float32Array(mem.buffer, xsOff, abl));
-  instantiateKernels(mem)[name](wOff, xqOff, xdOff, xsOff, yOff, rows, nb);
+  instantiateKernels(mem, { kdot })[name](wOff, xqOff, xdOff, xsOff, yOff, rows, nb);
   return Float32Array.from(new Float32Array(mem.buffer, yOff, rows));
 }
 
@@ -91,6 +91,27 @@ for (const [label, type, blockElems, single, batch] of [
         k[single](wOff, xq8, xd1, xs1, y1, rows, nb);
         const want = new Float32Array(mem.buffer, y1, rows);
         for (let r = 0; r < rows; r++) assert.equal(got[t * rows + r], want[r], `${label} rows=${rows} nb=${nb} ntok=${ntok} token ${t} row ${r}`);
+      }
+    }
+  });
+}
+
+
+// --------------------------------------------------------------------- the alternative ("wide") decode dot form
+for (const [label, type, blockElems, kname] of CASES.filter((c) => c[1] === GGML_TYPE.Q4_K || c[1] === GGML_TYPE.Q5_K || c[1] === GGML_TYPE.Q6_K)) {
+  test(`${label} decode kernel, kdot=wide variant, matches the JS reference and the extmul variant`, () => {
+    const rand = mulberry32(55);
+    for (const [rows, nb] of [[1, 1], [2, 2], [3, 3], [5, 2], [8, 1]]) {
+      const cols = nb * blockElems;
+      const wbytes = randomQuantBlocks(type, rows * nb, rand);
+      const x = Float32Array.from({ length: cols }, () => gaussian(rand));
+      const wide = runKernel(kname, type, blockElems, rows, nb, wbytes, x, 'wide');
+      const ext = runKernel(kname, type, blockElems, rows, nb, wbytes, x, 'extmul');
+      const want = matvec({ type, rows, cols, data: wbytes }, new Act(x), new Float32Array(rows));
+      const rms = Math.sqrt(want.reduce((a, v) => a + v * v, 0) / rows) || 1;
+      for (let r = 0; r < rows; r++) {
+        assert.ok(Math.abs(wide[r] - want[r]) <= 1e-4 * rms, `wide row ${r}: ${wide[r]} vs ${want[r]}`);
+        assert.ok(Math.abs(wide[r] - ext[r]) <= 1e-5 * rms, `wide vs extmul row ${r}`); // same integers; only float lane order may differ
       }
     }
   });

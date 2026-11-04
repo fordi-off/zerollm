@@ -1,4 +1,5 @@
 // Per-kernel micro-benchmark (cache-resident weights => compute-bound): node tools/kbench.mjs
+// Also compares the two integer-dot forms of the K-quant decode kernels (ZEROLLM_KDOT=extmul|wide selects one at run time).
 import { instantiateKernels } from '../src/compute/wasm/kernels.js';
 import { quantizeAct } from '../src/compute/ref-kernels.js';
 import { randomQuantBlocks } from './random-blocks.js';
@@ -23,18 +24,22 @@ for (const [name, type, useXs, mk] of cases) {
   const wOff = 64, xq8 = al(wOff + wbytes.length), xd1 = al(xq8 + cols), xs1 = al(xd1 + abl * 4), y1 = al(xs1 + abl * 4);
   const xq16 = al(y1 + rows * 4), xdB = al(xq16 + B * cols * 2), xsB = al(xdB + B * abl * 4), yB = al(xsB + B * abl * 4);
   const mem = new WebAssembly.Memory({ initial: Math.ceil((yB + B * rows * 4 + 64) / 65536) });
-  const k = instantiateKernels(mem);
+  const k = instantiateKernels(mem, { kdot: 'extmul' });
+  const kw = instantiateKernels(mem, { kdot: 'wide' });
   new Uint8Array(mem.buffer, wOff, wbytes.length).set(wbytes);
   const x = Float32Array.from({ length: cols }, () => gaussian(rand));
   quantizeAct(x, new Int8Array(mem.buffer, xq8, cols), new Float32Array(mem.buffer, xd1, abl), new Float32Array(mem.buffer, xs1, abl));
   for (let t = 0; t < B; t++) quantizeAct(x, new Int16Array(mem.buffer, xq16 + t * cols * 2, cols), new Float32Array(mem.buffer, xdB + t * abl * 4, abl), new Float32Array(mem.buffer, xsB + t * abl * 4, abl));
-  const dec = k[`matvec_${name}`], mmk = k[`mm_${name}`];
+  const dec = k[`matvec_${name}`], decW = kw[`matvec_${name}`], mmk = k[`mm_${name}`];
   const run1 = () => (useXs ? dec(wOff, xq8, xd1, xs1, y1, rows, nb) : dec(wOff, xq8, xd1, y1, rows, nb));
+  const run1W = () => (useXs ? decW(wOff, xq8, xd1, xs1, y1, rows, nb) : decW(wOff, xq8, xd1, y1, rows, nb));
   const runB = () => (useXs ? mmk(wOff, xq16, xdB, xsB, yB, rows, nb, B) : mmk(wOff, xq16, xdB, yB, rows, nb, B));
-  for (let i = 0; i < 3; i++) { run1(); runB(); }
+  for (let i = 0; i < 3; i++) { run1(); run1W(); runB(); }
   const time = (fn, n) => { const t = performance.now(); for (let i = 0; i < n; i++) fn(); return (performance.now() - t) / n; };
   const tDec = Math.min(...Array.from({ length: REPS }, () => time(run1, 5)));
+  const tDecW = Math.min(...Array.from({ length: REPS }, () => time(run1W, 5)));
   const tB = Math.min(...Array.from({ length: REPS }, () => time(runB, 2)));
   const gw = rows * cols / 1e9;
-  console.log(`${name.padEnd(5)} decode ${(gw / (tDec / 1000)).toFixed(2).padStart(6)} Gw/s | batch16 ${(gw * B / (tB / 1000)).toFixed(2).padStart(6)} Gw/s-token | batch speedup ${(gw * B / tB / (gw / tDec)).toFixed(2)}x`);
+  const isK = name.endsWith('_k');
+  console.log(`${name.padEnd(5)} decode ${(gw / (tDec / 1000)).toFixed(2).padStart(6)} Gw/s${isK ? ` (extmul) vs ${(gw / (tDecW / 1000)).toFixed(2).padStart(6)} (wide)` : '                       '} | batch16 ${(gw * B / (tB / 1000)).toFixed(2).padStart(6)} Gw/s-token | batch speedup ${(gw * B / tB / (gw / tDec)).toFixed(2)}x`);
 }
