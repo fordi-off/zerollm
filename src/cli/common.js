@@ -114,6 +114,14 @@ export async function loadEngine(modelPath, flags) {
   };
 }
 
+/** Print the exact prompt the model will see: token count, ids, and the text with control tokens visible (--show-prompt). */
+export function describePrompt(eng, ids, err = process.stderr) {
+  const shown = ids.length > 120 ? [...ids.slice(0, 60), null, ...ids.slice(-60)] : ids;
+  err.write(`[prompt: ${ids.length} tokens, template ${eng.kind}]\n`);
+  err.write(`[ids: ${shown.map((i) => (i === null ? '...' : i)).join(' ')}]\n`);
+  err.write(`[text: ${JSON.stringify(eng.tok.decode(ids, { skipControl: false }))}]\n`);
+}
+
 /** Template options derived from flags + model. */
 export function templateOptions(eng, flags) {
   return { arch: eng.cfg.arch, jinja: eng.jinja, think: flags.think === true };

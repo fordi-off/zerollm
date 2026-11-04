@@ -119,3 +119,33 @@ node tools/abbench.mjs models/Qwen3-4B-Q4_K_M.gguf --vary spin=0,20000 --rounds 
 ```
 
 (plugged in, Windows power mode "Best performance", nothing else running; `--vary` takes any `bench` flag, e.g. `threads=4,6,8` or `kernels=js,wasm`).
+
+## Llama 3.x check (first real Llama file)
+
+Llama has only been tested on synthetic models so far; the Llama-specific code paths are: `llama` architecture (adjacent-pair RoPE, no QK-norm), the `rope_freqs.weight` tensor (Llama 3.1/3.2 long-context scaling, applied as `theta = pos * freq / factor` like ggml), tied embeddings (3.2 1B/3B), the byte-level BPE with the Llama 3 pre-tokenizer (digits in groups of 1-3, `ignore_merges`), and the Llama 3 chat template with its `<|start_header_id|>` framing.
+
+Start with the small model, it exercises everything but downloads fast: **Llama 3.2 1B Instruct**, Q8_0 or Q4_K_M (community GGUF repos such as bartowski/Llama-3.2-1B-Instruct-GGUF; the official meta-llama repos are gated; exact file names may differ). Then **Llama 3.1 8B Instruct Q4_K_M** (~4.9 GB). Put the file in `models\`, then:
+
+```
+node bin/zerollm.js info models/Llama-3.2-1B-Instruct-Q8_0.gguf
+```
+
+Expect: architecture `llama`, head dim 64 (1B) or 128 (8B), RoPE "normal (adjacent pairs)" with base 500000 and `+ rope_freqs.weight`, tied embeddings for 3.2 1B/3B (not for 3.1 8B), vocab 128256, BOS `<|begin_of_text|>` id 128000, EOS `<|eot_id|>` (128009) or `<|end_of_text|>` (128001), chat template with `<|start_header_id|>`.
+
+```
+node bin/zerollm.js tokenize models/Llama-3.2-1B-Instruct-Q8_0.gguf "Hello, world! 12345"
+```
+
+Llama 3 shares its first 100k token ids with tiktoken's cl100k_base; from memory the pieces should be `Hello`, `,`, ` world`, `!`, ` `, `123`, `45` with ids around 9906, 11, 1917, 0, 220, 4513, 1774 (digits in groups of three, unlike Qwen). If the ids differ, send me the output rather than assuming a bug.
+
+```
+node bin/zerollm.js run models/Llama-3.2-1B-Instruct-Q8_0.gguf -p "What is the capital of France? Answer in one sentence." --temp 0 --n 60 --show-prompt
+```
+
+`--show-prompt` prints the exact token ids and text the model receives. It must start with `<|begin_of_text|><|start_header_id|>system<|end_header_id|>` followed by "Cutting Knowledge Date: December 2023 / Today Date: 26 Jul 2024", then `<|eot_id|><|start_header_id|>user<|end_header_id|>`, the question, `<|eot_id|>`, and end with `<|start_header_id|>assistant<|end_header_id|>` and a blank line. The reply should say Paris and stop by itself (`stop: stop`). Then a short chat:
+
+```
+node bin/zerollm.js chat models/Llama-3.2-1B-Instruct-Q8_0.gguf --system "Be brief."
+```
+
+If the text is garbled, the usual suspects (brief section 21) are RoPE variant, `rope_freqs.weight`, tokenizer or template; send the exact outputs of `info`, `tokenize` and `run --show-prompt`.
