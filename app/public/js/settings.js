@@ -194,14 +194,26 @@ async function renderSkills() {
 
 // ---- documents tab: the shared library
 const progressLabels = new Map(); // docId -> element
+const indexLabels = new Map(); // docId -> element
+export function onDocIndex(d) {
+  if (d.state === 'idle' || d.state === 'error') { if ($('settings')?.open) renderDocuments(lastState); return; }
+  const e = indexLabels.get(d.docId); if (e) e.textContent = t('indexing', { done: d.done, total: d.total });
+}
+let lastState = null;
 export function onDocProgress(d) { const e = progressLabels.get(d.docId); if (e) e.textContent = t('summarizingDoc', { done: d.done, total: d.total }); }
 
 async function renderDocuments(st) {
+  lastState = st; indexLabels.clear();
   const box = $('tab-documents'); box.textContent = '';
   box.append(el('p', 'hint', t('docsHint')));
   const n = el('input'); n.type = 'number'; n.min = 1; n.max = 10; n.value = st.settings.docChunks; n.style.width = '70px'; n.setAttribute('aria-label', t('docChunksSetting'));
   n.addEventListener('change', async () => { try { await call('set_doc_chunks', { value: Number(n.value) }); } catch { /* invalid number: ignored */ } });
   box.append(row(t('docChunksSetting'), t('docChunksHint'), n));
+  const es = await call('embedding_status');
+  const sm = el('div', 'row'); const sl = el('div'); sl.append(el('div', 'lbl', t('searchModel')), el('div', 'hint', es.file ? t('searchModelOn', { file: es.file }) : t('searchModelOff')));
+  sm.append(sl);
+  if (es.file && es.missing > 0) { const b = el('button', 'btn primary', t('indexNow')); b.type = 'button'; b.disabled = es.indexing; b.addEventListener('click', async () => { await call('index_documents'); await renderDocuments(st); }); sm.append(b); }
+  box.append(sm);
   const docs = await call('document_library');
   progressLabels.clear();
   if (docs.length === 0) { box.append(el('p', 'notice', t('noDocs'))); return; }
@@ -232,7 +244,8 @@ async function renderDocuments(st) {
       clearTimeout(armed); await call('delete_document', { docId: d.id }); await hooks.refreshDocs(); await renderDocuments(st);
     });
     tools.append(sum, show, del, status);
-    r.append(top, el('div', 'sub', `${t('docParts', { n: d.chunks })}`), tools);
+    const idx = el('span', '', ''); idx.textContent = d.embedded >= d.chunks && d.chunks > 0 ? t('indexed', { done: d.embedded, total: d.chunks }) : (es.file ? t('indexed', { done: d.embedded, total: d.chunks }) : t('noIndex')); indexLabels.set(d.id, idx);
+    r.append(top, el('div', 'sub', `${t('docParts', { n: d.chunks })} · `), tools); r.querySelector('.sub').append(idx);
     if (d.summary) r.append(el('div', 'doc-summary-text', d.summary));
     r.append(pv); box.append(r);
   }

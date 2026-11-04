@@ -131,5 +131,12 @@
   "diagLog": "Last log lines",
   "diagOk": "Everything required is available.",
   "shortcuts": "Keyboard shortcuts",
-  "shortcutsText": "Enter sends · Shift+Enter new line · Esc stops the reply · Alt+N new chat · Alt+B sidebar · / opens commands"
+  "shortcutsText": "Enter sends · Shift+Enter new line · Esc stops the reply · Alt+N new chat · Alt+B sidebar · / opens commands",
+  "searchModel": "Search model",
+  "searchModelOn": "Installed: {file}. Documents are searched by meaning, not just words.",
+  "searchModelOff": "Not installed. Without it only keywords are searched. Download \"nomic-embed-text\" under Models → Download models.",
+  "indexNow": "Index documents",
+  "indexed": "search index {done}/{total}",
+  "indexing": "Building search index… {done}/{total}",
+  "noIndex": "keywords only"
 }

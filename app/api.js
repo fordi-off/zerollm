@@ -12,6 +12,7 @@ import { listModels, modelPath } from './models.js';
 import { createChatStore } from './chats.js';
 import { createSkills } from './skills.js';
 import { createDocuments } from './documents.js';
+import { createEmbeddings } from './embeddings.js';
 import { createDownloader, freeDiskBytes } from './downloader.js';
 import { CATALOG } from './catalog.js';
 import { createSummarizer } from './summarizer.js';
@@ -24,6 +25,8 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
   let current = null; // {id, abort: {aborted}}
   const chatStore = createChatStore(paths);
   const docs = createDocuments(paths, chatStore);
+  const embeddings = createEmbeddings({ paths, getConfig, log });
+  let indexing = null; // {abort} while document chunks are being embedded
   const skills = createSkills(paths);
   const summarizer = createSummarizer({ paths, host, getConfig, log });
   skills.seed();
@@ -50,13 +53,37 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
     if (!c.summary || c.summarized_count < 1 || c.summarized_count > historyLength - 1) return { summary: '', summarized: 0 };
     return { summary: c.summary, summarized: c.summarized_count };
   }
-  /** Excerpts of the chat's active documents for the last question (short follow-ups also use the question before). */
-  function excerptsFor(chatId, history, countTokens, ctxMax) {
+  /** Excerpts of the chat's active documents for the last question (short follow-ups also use the question before).
+   *  With `vector` and an installed embedding model the question is embedded and the ranking fuses keywords and meaning. */
+  async function excerptsFor(chatId, history, countTokens, ctxMax, { vector = false } = {}) {
     if (!chatId) return [];
     const users = history.filter((m) => m.role === 'user').map((m) => String(m.content));
     const last = users.at(-1) ?? ''; let query = last;
     if (last.split(/\s+/).length < 5 && users.length > 1) query = `${users.at(-2)} ${last}`;
-    try { return docs.retrieve(chatId, query, { k: getConfig().doc_chunks ?? 4, budgetTokens: Math.min(1500, Math.round(ctxMax * 0.25)), countTokens }); } catch { return []; }
+    try {
+      const queryVec = vector && embeddings.available() && docs.hasEmbeddings(chatId) ? await embeddings.embedQuery(query) : null;
+      return docs.retrieve(chatId, query, { queryVec, k: getConfig().doc_chunks ?? 4, budgetTokens: Math.min(1500, Math.round(ctxMax * 0.25)), countTokens });
+    } catch { return []; }
+  }
+
+  /** Embed the chunks of documents that have no vectors yet, in the background; progress goes out as `docindex` events. */
+  function startIndexing(docIds) {
+    if (indexing || !embeddings.available() || docIds.length === 0) return false;
+    const abort = { aborted: false }; indexing = { abort };
+    (async () => {
+      try {
+        for (const docId of docIds) {
+          if (abort.aborted) break;
+          const texts = docs.chunkTexts(docId); if (!texts?.length) continue;
+          const t0 = performance.now();
+          emit('docindex', { docId, done: 0, total: texts.length, state: 'running' });
+          const vecs = await embeddings.embedTexts(texts, { signal: abort, onProgress: (done, total) => emit('docindex', { docId, done, total, state: 'running' }) });
+          if (vecs && docs.setEmbeddings(docId, vecs)) log.info(`document indexed for search: ${texts.length} chunks in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
+        }
+      } catch (e) { log.error(`indexing failed: ${e.stack ?? e}`); emit('docindex', { state: 'error', message: String(e.message ?? e) }); }
+      finally { indexing = null; emit('docindex', { state: 'idle' }); }
+    })();
+    return true;
   }
 
   /** System-prompt additions after the base prompt: command instructions, then the rolling summary (the language reminder stays last). */
@@ -82,7 +109,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
       const count = (m) => engine.countPromptTokens(m);
       const withCont = (h) => (continuation ? [...h, { role: 'user', content: CONTINUATION_PROMPT }] : h);
       let { summary, summarized } = summaryState(chatId, history.length);
-      const excerpts = continuation ? [] : excerptsFor(chatId, history, (t) => engine.countTokens(t), ctxMax);
+      const excerpts = continuation ? [] : await excerptsFor(chatId, history, (t) => engine.countTokens(t), ctxMax, { vector: true });
       const build = () => withExcerpts(buildMessages(withCont(history.slice(summarized)), { extraSystem: extraText(history, summary) }), excerpts);
 
       // Long conversation: fold the older messages into the rolling summary (cached on disk), keep the newest ones verbatim.
@@ -159,7 +186,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
         language: cfg.language, models, lastModel: cfg.last_model, loaded: host.loadedName,
         settings: { docChunks: cfg.doc_chunks ?? 4, utilityModel: cfg.utility_model, contextWindow: cfg.context_window, threads: cfg.n_threads, contextSteps: CONTEXT_STEPS, maxThreads: os.availableParallelism?.() ?? os.cpus().length, defaultThreads: defaultThreads() },
         system: { freeRam: os.freemem(), totalRam: os.totalmem() },
-        busy: current !== null,
+        busy: current !== null, embedding: embeddings.modelFile(),
       };
     },
 
@@ -187,6 +214,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
     async delete_model({ filename }) {
       const full = modelPath(paths, filename);
       if (host.loadedName === filename) await host.unload();
+      await embeddings.closeResident();
       fs.unlinkSync(full);
       const cfg = getConfig();
       if (cfg.models?.[filename]) { delete cfg.models[filename]; }
@@ -207,6 +235,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
         features: { simd: wasm.simd, relaxedSimd: wasm.relaxedSimd, threads: wasm.threads, sharedArrayBuffer: js.sharedArrayBuffer, atomicsWait: js.atomicsWait },
         app: { dataFolder: paths.root, logFile: paths.logPath, contextWindow: cfg.context_window, threads: cfg.n_threads, loadedModel: host.loadedName },
         models: listModels(paths, cfg).map((m) => ({ filename: m.filename, sizeBytes: m.sizeBytes, supported: m.supported, reason: m.reason, quant: m.quant, arch: m.arch, ramNeed: m.ramNeed })),
+        embedding: embeddings.modelFile(),
         problems, logTail,
       };
     },
@@ -229,12 +258,16 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
     async add_document({ chatId, filename, content }) {
       const r = docs.add(chatId, filename, content);
       log.info(`document added: ${filename} (${r.chunks} chunks)`);
-      return { ...r, documents: docs.forChat(chatId) };
+      startIndexing([r.id]);
+      return { ...r, indexing: embeddings.available(), documents: docs.forChat(chatId) };
     },
     async attach_document({ chatId, docId }) { docs.attach(chatId, docId); return docs.forChat(chatId); },
     async detach_document({ chatId, docId }) { docs.detach(chatId, docId); return docs.forChat(chatId); },
     async toggle_document({ chatId, docId }) { return { active: docs.toggle(chatId, docId) }; },
     async delete_document({ docId }) { docs.remove(docId); return { ok: true }; },
+    async embedding_status() { return { file: embeddings.modelFile(), indexing: indexing !== null, missing: docs.needingEmbeddings().length }; },
+    /** Embed every document that has no vectors yet (after the search model was installed). */
+    async index_documents() { return { started: startIndexing(docs.needingEmbeddings()) }; },
     async preview_document({ docId }) { return docs.preview(docId); },
     async set_doc_chunks({ value }) {
       const v = Number(value); if (!Number.isInteger(v) || v < 1 || v > 10) throw new Error('invalid number of excerpts');
@@ -284,7 +317,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
     async estimate_context({ model, messages, chatId }) {
       const tools = toolsFor(model);
       const { summary, summarized } = summaryState(chatId ?? null, messages.length);
-      const excerpts = excerptsFor(chatId ?? null, messages, (t) => tools.countTokens(t), Math.min(contextMax(), tools.cfg.nCtxTrain));
+      const excerpts = await excerptsFor(chatId ?? null, messages, (t) => tools.countTokens(t), Math.min(contextMax(), tools.cfg.nCtxTrain));
       const fitted = withExcerpts(buildMessages(messages.slice(summarized), { extraSystem: extraText(messages, summary) }), excerpts);
       return { contextUsed: tools.countPromptTokens(fitted), contextMax: Math.min(contextMax(), tools.cfg.nCtxTrain), compressed: summarized > 0 };
     },
@@ -337,5 +370,5 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
     },
   };
 
-  return { methods, async shutdown() { downloader.cancel(); if (current) current.abort.aborted = true; await host.unload(); } };
+  return { methods, async shutdown() { downloader.cancel(); if (indexing) indexing.abort.aborted = true; await embeddings.closeResident(); if (current) current.abort.aborted = true; await host.unload(); } };
 }
