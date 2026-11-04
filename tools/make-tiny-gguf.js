@@ -5,6 +5,8 @@ import fs from 'node:fs';
 import { buildGGUF } from './gguf-writer.js';
 import { GGUF_TYPE, GGML_TYPE } from '../src/gguf/types.js';
 import { quantizeQ8_0, quantizeQ4_0 } from '../src/compute/quant.js';
+import { randomQuantBlocks } from './random-blocks.js';
+import { GGML_TYPE_INFO } from '../src/gguf/types.js';
 import { BYTE_TO_CHAR } from '../src/tokenizer/bytes.js';
 import { mulberry32, gaussian } from '../src/util/rng.js';
 import { parseArgs, num } from '../src/util/args.js';
@@ -15,7 +17,7 @@ export const TINY_MERGES = [
 ];
 
 /**
- * @param {{arch?: string, quant?: 'f32'|'q8_0'|'q4_0', seed?: number, tied?: boolean, nEmbd?: number, nLayer?: number,
+ * @param {{arch?: string, quant?: 'f32'|'q8_0'|'q4_0'|'q5_0'|'q4_k'|'q5_k'|'q6_k'|'q4_k_m', seed?: number, tied?: boolean, nEmbd?: number, nLayer?: number,
  *          nHead?: number, nHeadKv?: number, headDim?: number, nFF?: number, ctx?: number, alignment?: number, ropeFreqs?: boolean, padVocabTo?: number}} [o]
  * @returns {{ buffer: Buffer, tokens: string[], cfg: object }}
  */
@@ -54,8 +56,18 @@ export function makeTinyModel(o = {}) {
 
   // --- tensors
   const tensors = [];
+  const RAW_TYPES = { q5_0: GGML_TYPE.Q5_0, q4_k: GGML_TYPE.Q4_K, q5_k: GGML_TYPE.Q5_K, q6_k: GGML_TYPE.Q6_K };
   const mat = (name, ne0, ne1, std = 0.05) => {
     const n = ne0 * ne1;
+    // K-quant style per-tensor type choice. 'q4_k_m' mimics llama.cpp's Q4_K_M mix: Q6_K for attn_v / ffn_down / output,
+    // Q4_K for the rest. Rows whose length is not a whole number of blocks fall back to F32 (ggml falls back too).
+    let rawType = RAW_TYPES[quant];
+    if (quant === 'q4_k_m') rawType = /attn_v|ffn_down|output\.weight/.test(name) ? GGML_TYPE.Q6_K : GGML_TYPE.Q4_K;
+    if (rawType !== undefined && ne0 % GGML_TYPE_INFO[rawType].blockSize === 0) {
+      // random raw blocks with sane scales; (the draw order differs from the float path, models are not comparable across quants)
+      tensors.push({ name, dims: [ne0, ne1], type: rawType, data: randomQuantBlocks(rawType, n / GGML_TYPE_INFO[rawType].blockSize, rand) });
+      return;
+    }
     const f = new Float32Array(n);
     for (let i = 0; i < n; i++) f[i] = gaussian(rand) * std;
     if (quant === 'q8_0' && ne0 % 32 === 0) tensors.push({ name, dims: [ne0, ne1], type: GGML_TYPE.Q8_0, data: quantizeQ8_0(f) });

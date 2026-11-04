@@ -76,3 +76,16 @@ Takeaways: the kernel is ~90% of single-thread time at ~4.5 GB/s of weights per 
 | 4 | 32 | 39.36 | 14.91 | 2.64x |
 
 Batch 8-16 is the sweet spot (default 16). Matmul kernel time per prompt token drops from 135 ms (decode kernel) to 35 ms (1 thread). Profile of the batched path (ms/token): 1 thread: total 54.1 = kernels 34.9 + act-quantization 4.0 + attention 12.7 + other 2.4; 4 threads: total 23.4 = kernels 9.1 + quantization 4.1 + attention 3.9 + barriers 5.2 + other 1.1. Follow-ups: attention is still plain JS and grows with position (23% of 1-thread prefill at <100 tokens), and activation quantization (JS) is redone by every worker.
+
+### M8 (K-quants), dev container, synthetic Qwen3-0.6B-shaped models with random raw blocks (wasm-simd, batch 16)
+
+4-vCPU Xeon VM, NOT the target machine. "Q4_K_M-style" = Q4_K everywhere except Q6_K for attn_v / ffn_down (like llama.cpp's Q4_K_M mix). The numbers show kernel speed only; the weights are random.
+
+| model file | size | threads | prefill tok/s | decode tok/s | eff. GB/s |
+|---|---|---|---|---|---|
+| Q8_0 | 604 MB | 1 | 20.43 | 6.32 | 4.00 |
+| Q8_0 | 604 MB | 4 | 39.53 | 16.31 | 10.33 |
+| Q4_K_M-style | 363 MB | 1 | 5.47 | 4.30 | 1.64 |
+| Q4_K_M-style | 363 MB | 4 | 16.99 | 13.72 | 5.22 |
+
+Profile, Q4_K_M-style, 1 thread decode: 197 ms/token, 94% in the matmul kernels. The first-version K-quant kernels are compute-bound (per-sub-block scale unpacking and mins handling in scalar code) and process ~2.6 G weights/s/thread vs ~3.8 for Q8_0, so on this small model the smaller file is *slower* per token. They also have no batched variant yet (prefill runs the decode kernel once per token: prefill/decode = 1.27x). Both are M9 work (e.g. hoisting the activation block sums out of the kernel, repacking scales at load time, tiled batch kernels).

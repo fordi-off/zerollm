@@ -53,3 +53,17 @@ node bin/zerollm.js run models/Qwen3-0.6B-Q8_0.gguf --system "You are a careful 
 ```
 
 First run ends with `system-prompt cache: saved`, the second with `system-prompt cache: hit` and the same answer; a `models\.zerollm-cache` folder appears (safe to delete).
+
+## M8: K-quants (after `git pull`) -- the first real-model test of these formats
+
+The K-quant layouts are verified against the official gguf-py implementation on synthetic blocks, but no real Q4_K_M file has been run yet, so this is the important check. Download a Q4_K_M file into `models\` (for example Qwen3-4B-Q4_K_M.gguf, about 2.5 GB, or a smaller Qwen3 Q4_K_M if you prefer to test quickly) and run:
+
+```
+node bin/zerollm.js info models/Qwen3-4B-Q4_K_M.gguf
+node bin/zerollm.js run models/Qwen3-4B-Q4_K_M.gguf -p "What is the capital of France? Answer in one sentence." --temp 0 --n 60
+node bin/zerollm.js bench models/Qwen3-4B-Q4_K_M.gguf --threads 6 --batch 1,16 --prompt-tokens 64 --n 16
+```
+
+`info` should list Q4_K and Q6_K (and show 4.5 / 6.56 bits per weight) with every type marked supported. The answer must be coherent and mention Paris; if the text is garbled, send the exact output (a wrong bit layout gives gibberish immediately). Compare with `--kernels js --threads 1` for a few tokens if you want to cross-check the SIMD path against the reference (slow on a 4B model: use `--n 8`).
+
+Note: these first-version K-quant kernels are slower per weight than Q8_0 and have no batched prefill yet (see docs/BENCHMARKS.md); speed work is M9.

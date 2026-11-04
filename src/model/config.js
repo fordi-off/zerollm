@@ -1,6 +1,28 @@
 // Architecture detection + hyperparameters from GGUF metadata. Nothing here is hard-coded per model size.
 
+import { GGML_TYPE, typeName } from '../gguf/types.js';
+
 export const SUPPORTED_ARCHS = ['llama', 'qwen2', 'qwen3'];
+
+/** Tensor types the engine can compute with (reference + SIMD kernels). */
+export const SUPPORTED_TENSOR_TYPES = new Set([
+  GGML_TYPE.F32, GGML_TYPE.F16, GGML_TYPE.BF16, GGML_TYPE.Q4_0, GGML_TYPE.Q5_0, GGML_TYPE.Q8_0,
+  GGML_TYPE.Q4_K, GGML_TYPE.Q5_K, GGML_TYPE.Q6_K,
+]);
+
+/**
+ * Throw a clear error if the model uses a quantization format we cannot compute.
+ * @param {import('../gguf/reader.js').GGUFFile} g
+ */
+export function assertSupportedTensorTypes(g) {
+  const bad = new Map();
+  for (const t of g.tensors) if (!SUPPORTED_TENSOR_TYPES.has(t.type)) bad.set(typeName(t.type), (bad.get(typeName(t.type)) ?? 0) + 1);
+  if (bad.size) {
+    const list = [...bad].map(([n, c]) => `${n} (${c} tensors)`).join(', ');
+    const ok = [...SUPPORTED_TENSOR_TYPES].map(typeName).join(', ');
+    throw new Error(`this model uses quantization formats the engine cannot run yet: ${list}. Supported: ${ok}. Try another file of the same model (e.g. Q4_K_M, Q5_K_M, Q6_K, Q8_0 or Q4_0).`);
+  }
+}
 
 /**
  * @typedef {Object} ModelConfig

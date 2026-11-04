@@ -2,11 +2,11 @@
 
 A zero-dependency, pure-code local LLM inference engine in Node.js (plus, later, hand-emitted WebAssembly SIMD kernels) that runs GGUF models on a plain laptop CPU: no admin rights, no native addons, no cloud, no Ollama/llama.cpp.
 
-**Status:** M0–M7 done (doctor, GGUF reader/`info`, tokenizer + chat templates, reference forward pass verified on real Qwen3-0.6B, sampler, streaming `run`/`chat`, multi-threaded worker pool, hand-emitted WebAssembly SIMD kernels for Q8_0/Q4_0, batched prefill, on-disk system-prompt cache). Next: K-quants (M8), 8B tuning (M9). See `docs/BRIEF.md` for the plan and `docs/DECISIONS.md` / `docs/BENCHMARKS.md` for the running log.
+**Status:** M0–M8 done (doctor, GGUF reader/`info`, tokenizer + chat templates, reference forward pass verified on real Qwen3-0.6B, sampler, streaming `run`/`chat`, multi-threaded worker pool, hand-emitted WebAssembly SIMD kernels for Q8_0/Q4_0, batched prefill, on-disk system-prompt cache, Q5_0 + K-quants Q4_K/Q5_K/Q6_K so standard Q4_K_M / Q5_K_M files load). Next: 8B tuning (M9). See `docs/BRIEF.md` for the plan and `docs/DECISIONS.md` / `docs/BENCHMARKS.md` for the running log.
 
 ## Usage
 
-Download a `.gguf` (e.g. `Qwen3-0.6B-Q8_0.gguf`) from Hugging Face into `models/` (gitignored). Supported now: architectures `qwen3`, `qwen2`, `llama`; tensor types F32, F16, BF16, Q8_0, Q4_0 (K-quants come in M8).
+Download a `.gguf` (e.g. `Qwen3-0.6B-Q8_0.gguf`) from Hugging Face into `models/` (gitignored). Supported: architectures `qwen3`, `qwen2`, `llama`; tensor types F32, F16, BF16, Q4_0, Q5_0, Q8_0, Q4_K, Q5_K, Q6_K (so Q4_K_M, Q5_K_M, Q6_K, Q8_0 files work; Q2_K/Q3_K/IQ*/Q4_1/Q5_1 do not).
 
 ```
 node bin/zerollm.js doctor                              # environment + feature probe

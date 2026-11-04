@@ -1,5 +1,5 @@
 import { readGGUF } from '../gguf/reader.js';
-import { modelConfig } from '../model/config.js';
+import { modelConfig, assertSupportedTensorTypes } from '../model/config.js';
 import { Tokenizer } from '../tokenizer/bpe.js';
 import { generate } from '../model/generate.js';
 import { parseArgs, num } from '../util/args.js';
@@ -15,6 +15,7 @@ export async function run(argv) {
   if (!_[0]) throw new Error(`usage: zerollm ${help}`);
   const g = readGGUF(_[0]);
   const cfg = modelConfig(g);
+  assertSupportedTensorTypes(g);
   const tok = Tokenizer.fromGGUF(g);
   const list = typeof flags.threads === 'string' ? flags.threads.split(',').map(Number) : [1, defaultThreads()];
   const kernelList = typeof flags.kernels === 'string' ? flags.kernels.split(',') : ['auto'];
