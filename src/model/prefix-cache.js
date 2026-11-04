@@ -27,9 +27,9 @@ export class PrefixCache {
   /**
    * Restore the KV state for exactly `ids` into a fresh model (model.pos must be 0). Returns false on any mismatch
    * or damage; never throws for a bad cache file.
-   * @param {{kvRegion: Function, restorePrefix: Function, pos: number, cfg: any}} model
+   * @param {{kvSet: Function, restorePrefix: Function, pos: number, cfg: any}} model
    */
-  load(model, ids) {
+  async load(model, ids) {
     let fd = null;
     try {
       if (model.pos !== 0 || ids.length === 0) return false;
@@ -54,7 +54,7 @@ export class PrefixCache {
         for (const isV of [0, 1]) {
           if (fs.readSync(fd, tmp, 0, bytes, pos) !== bytes) return false;
           pos += bytes;
-          model.kvRegion(l, isV).set(new Float32Array(tmp.buffer, tmp.byteOffset, n * kvDim));
+          await model.kvSet(l, isV, n, new Float32Array(tmp.buffer, tmp.byteOffset, n * kvDim));
         }
       }
       model.restorePrefix(ids);
@@ -65,7 +65,7 @@ export class PrefixCache {
   }
 
   /** Write the KV state of the first ids.length positions (the model must hold exactly that prefix). */
-  save(model, ids) {
+  async save(model, ids) {
     const kvDim = model.cfg.nHeadKv * model.cfg.headDim;
     const n = ids.length;
     if (model.pos < n) throw new Error('model does not hold the prefix');
@@ -81,7 +81,7 @@ export class PrefixCache {
       fs.writeSync(fd, head); fs.writeSync(fd, header);
       for (let l = 0; l < model.cfg.nLayer; l++) {
         for (const isV of [0, 1]) {
-          const r = model.kvRegion(l, isV).subarray(0, n * kvDim);
+          const r = await model.kvGet(l, isV, n);
           fs.writeSync(fd, Buffer.from(r.buffer, r.byteOffset, r.byteLength));
         }
       }

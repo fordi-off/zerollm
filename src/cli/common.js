@@ -115,10 +115,10 @@ export async function usePrefixCache(eng, flags, systemMessages, promptIds, tmpl
   if (prefix.length < MIN_CACHED_PREFIX || prefix.length >= promptIds.length || prefix.some((t, i) => t !== promptIds[i])) return 'skip';
   const dir = typeof flags['cache-dir'] === 'string' ? flags['cache-dir'] : path.join(path.dirname(eng.g.path), '.zerollm-cache');
   const cache = new PrefixCache(dir, modelFingerprint(eng.g.path, eng.model.kernels === 'wasm' ? 'wasm' : 'js'));
-  if (cache.load(eng.model, prefix)) return 'hit';
+  if (await cache.load(eng.model, prefix)) return 'hit';
   const r = await prefillTokens(eng.model, prefix, { wantLogits: false, signal });
   if (r.aborted) return 'skip';
-  try { cache.save(eng.model, prefix); return 'saved'; } catch (e) { warn(`could not write the system-prompt cache (${e.message}); continuing without it`); return 'unsaved'; }
+  try { await cache.save(eng.model, prefix); return 'saved'; } catch (e) { warn(`could not write the system-prompt cache (${e.message}); continuing without it`); return 'unsaved'; }
 }
 
 /** Install a SIGINT handler that sets `signal.aborted`; a second Ctrl+C exits immediately. Returns a disposer. */

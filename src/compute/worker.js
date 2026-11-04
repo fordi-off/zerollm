@@ -11,7 +11,7 @@ import { GGML_TYPE, GGML_TYPE_INFO } from '../gguf/types.js';
 import { Act, matvec, dequantRow, rmsnorm, softmax, silu, ropeTables, applyRope, rowBytes, quantizeAct } from './ref-kernels.js';
 import { instantiateKernels } from './wasm/kernels.js';
 import { Barrier } from './barrier.js';
-import { CTRL, CMD_EXIT, splitRows, splitRange, alignUp, kvOffset } from './layout.js';
+import { CTRL, CMD_EXIT, CMD_KV_EXPORT, CMD_KV_IMPORT, splitRows, splitRange, alignUp } from './layout.js';
 
 const { id, n, cfg, tensors, path, ctx, shared, spin, kernels, maxBatch } = workerData;
 // opt-in profile of worker 0 (ZEROLLM_PROFILE=1): where does a token's time go?
@@ -58,8 +58,14 @@ function main() {
     addMat(`${l}.wo`, `${p}attn_output.weight`);
     addMat(`${l}.gate`, `${p}ffn_gate.weight`); addMat(`${l}.up`, `${p}ffn_up.weight`); addMat(`${l}.down`, `${p}ffn_down.weight`);
   }
+  // This worker owns a set of KV heads (and every query head that shares them): their K/V cache is PRIVATE and lives
+  // in this worker's wasm memory, so the attention kernels can read it directly and no barrier is needed for it.
+  const [kh0, kh1] = splitRange(nHeadKv, n, id);
+  const nOwn = kh1 - kh0;
+  const group = nHead / nHeadKv;
   // scratch for the SIMD kernels, in the same memory as the weights
   const useWasm = kernels === 'wasm';
+  const attnSimd = useWasm && headDim % 16 === 0;
   const maxCols = Math.max(nEmbd, qDim, nFF);
   const maxRows = Math.max(1, ...plan.map((p) => p.r1 - p.r0));
   const maxRowsBatch = Math.max(1, ...plan.filter((p) => p.key !== 'embd' && p.key !== 'output').map((p) => p.r1 - p.r0));
@@ -70,8 +76,13 @@ function main() {
   const XS = total; total += alignUp((maxCols / 32) * 4, 64);            // per-block quant sums (decode; used by Q4_K/Q5_K)
   const XSB = total; total += alignUp(BM * (maxCols / 32) * 4, 64);      // same for batches
   const YO = total; total += alignUp(Math.max(maxRows, BM * maxRowsBatch) * 4, 64); // f32 results
+  const QHP = total; total += alignUp(headDim * 4, 64);                  // attention: query head
+  const SCP = total; total += alignUp(ctx * 4, 64);                       // attention: scores / probabilities
+  const OHP = total; total += alignUp(headDim * 4, 64);                   // attention: output head
+  const kvPerLayer = 2 * nOwn * ctx * headDim;                            // floats: [k|v][owned head][pos][headDim]
+  const KVB = total; total += alignUp(nLayer * kvPerLayer * 4, 64);
   const pages = Math.max(1, Math.ceil(total / 65536));
-  if (pages > 65536) throw new Error(`worker ${id}: weight slice is ${(total / 2 ** 30).toFixed(2)} GB, over the 4 GB wasm32 limit; use more workers`);
+  if (pages > 65536) throw new Error(`worker ${id}: weight slice is ${(total / 2 ** 30).toFixed(2)} GB, over the 4 GB wasm32 limit; use more workers or a smaller --ctx`);
   let mem;
   try {
     mem = new WebAssembly.Memory({ initial: pages });
@@ -121,8 +132,9 @@ function main() {
   const xsv = new Float32Array(mem.buffer, XS, maxCols / 32);
   const xsBv = new Float32Array(mem.buffer, XSB, (BM * maxCols) / 32);
   const yv = new Float32Array(mem.buffer, YO, Math.max(maxRows, BM * maxRowsBatch));
+  let k = null;
   if (useWasm) {
-    const k = instantiateKernels(mem);
+    k = instantiateKernels(mem);
     for (const w of Object.values(W)) {
       // Q8_0 / Q4_0 kernels take (w, xq, xd, y, rows, nb[, ntok]); Q5_0 and the K-quants additionally take the per-block
       // quant sums (w, xq, xd, xs, y, rows, nb[, ntok]).
@@ -141,14 +153,15 @@ function main() {
   const x = new Float32Array(shared.x); const sq = new Float32Array(shared.q);
   const sk = new Float32Array(shared.k); const sv = new Float32Array(shared.v);
   const att = new Float32Array(shared.att); const hb = new Float32Array(shared.hb);
-  const logits = new Float32Array(shared.logits); const kv = new Float32Array(shared.kv);
+  const logits = new Float32Array(shared.logits); const kvStage = new Float32Array(shared.kvStage);
+  const kvF32 = new Float32Array(mem.buffer, KVB, nLayer * kvPerLayer);
   const rawBar = new Barrier(ctrl, CTRL.BAR_COUNT, CTRL.BAR_GEN, n, spin);
   const bar = prof ? { wait() { const t = performance.now(); rawBar.wait(); PT.barrier += performance.now() - t; } } : rawBar;
   const rope = ropeTables(cfg, ctx, ropeFreqs);
   const xbP = new Float32Array(BM * nEmbd); // private normed copies, one per token
-  const scores = new Float32Array(ctx);
-  const qh = new Float32Array(headDim);
-  const oh = new Float32Array(headDim);
+  const scores = attnSimd ? new Float32Array(mem.buffer, SCP, ctx) : new Float32Array(ctx);
+  const qh = attnSimd ? new Float32Array(mem.buffer, QHP, headDim) : new Float32Array(headDim);
+  const oh = attnSimd ? new Float32Array(mem.buffer, OHP, headDim) : new Float32Array(headDim);
   const tmpA = new Float32Array(BM * Math.max(nEmbd, nFF));
   const tmpB = new Float32Array(BM * Math.max(nEmbd, nFF));
   const tmpF = new Float32Array(maxRows); // fallback matvec output
@@ -157,11 +170,8 @@ function main() {
   const [kr0, kr1] = splitRows(kvDim, n, id);
   const [er0, er1] = splitRows(nEmbd, n, id);
   const [fr0, fr1] = splitRows(nFF, n, id);
-  const [kh0, kh1] = splitRange(nHeadKv, n, id);
-  const [qh0, qh1] = splitRange(nHead, n, id);
   const [vr0, vr1] = splitRows(vocabSize, n, id);
   const erN = er1 - er0; const frN = fr1 - fr0;
-  const group = nHead / nHeadKv;
   const scale = 1 / Math.sqrt(headDim);
   const embd = W.embd; const outW = cfg.tiedEmbeddings ? W.embd : W.output;
 
@@ -227,48 +237,48 @@ function main() {
       }
       bar.wait();
 
-      // P2a: my KV heads: k-norm, RoPE, write K and V into the shared cache (all B positions)
+      // P2: my KV heads. For every token: k-norm + RoPE, append K and V to my PRIVATE cache, then causal attention for
+      // each query head of the group that shares this KV head (q-norm, RoPE, scores, softmax, weighted sum of V).
       const ta = prof ? performance.now() : 0;
       for (let b = 0; b < B; b++) {
         const pos = pos0 + b;
         for (let hd = kh0; hd < kh1; hd++) {
+          const hl = hd - kh0;
           const o = b * kvDim + hd * headDim;
           if (L.kNorm) rmsnorm(sk, sk, L.kNorm, rmsEps, headDim, o, o);
           applyRope(sk.subarray(o, o + headDim), 1, headDim, nRot, ropeType, rope, pos);
-          kv.set(sk.subarray(o, o + headDim), kvOffset(l, 0, ctx, kvDim, pos) + hd * headDim);
-          kv.set(sv.subarray(o, o + headDim), kvOffset(l, 1, ctx, kvDim, pos) + hd * headDim);
+          const kBase = ((l * 2) * nOwn + hl) * ctx * headDim; const vBase = ((l * 2 + 1) * nOwn + hl) * ctx * headDim;
+          kvF32.set(sk.subarray(o, o + headDim), kBase + pos * headDim);
+          kvF32.set(sv.subarray(o, o + headDim), vBase + pos * headDim);
+          for (let g = 0; g < group; g++) {
+            const qhd = hd * group + g;
+            qh.set(sq.subarray(b * qDim + qhd * headDim, b * qDim + (qhd + 1) * headDim));
+            if (L.qNorm) rmsnorm(qh, qh, L.qNorm, rmsEps, headDim);
+            applyRope(qh, 1, headDim, nRot, ropeType, rope, pos);
+            if (attnSimd) {
+              k.attn_scores(QHP, KVB + kBase * 4, SCP, pos + 1, headDim, scale);
+              softmax(scores, pos + 1);
+              k.attn_av(SCP, KVB + vBase * 4, OHP, pos + 1, headDim);
+            } else {
+              for (let t = 0; t <= pos; t++) {
+                const ko = kBase + t * headDim;
+                let s = 0;
+                for (let i = 0; i < headDim; i++) s += qh[i] * kvF32[ko + i];
+                scores[t] = s * scale;
+              }
+              softmax(scores, pos + 1);
+              oh.fill(0);
+              for (let t = 0; t <= pos; t++) {
+                const p = scores[t];
+                const vo = vBase + t * headDim;
+                for (let i = 0; i < headDim; i++) oh[i] += p * kvF32[vo + i];
+              }
+            }
+            att.set(oh, b * qDim + qhd * headDim);
+          }
         }
       }
       if (prof) PT.attn += performance.now() - ta;
-      bar.wait();
-
-      // P2b: my query heads: q-norm, RoPE, causal attention over the cache
-      const tb = prof ? performance.now() : 0;
-      const kBase = kvOffset(l, 0, ctx, kvDim); const vBase = kvOffset(l, 1, ctx, kvDim);
-      for (let b = 0; b < B; b++) {
-        const pos = pos0 + b;
-        for (let hd = qh0; hd < qh1; hd++) {
-          qh.set(sq.subarray(b * qDim + hd * headDim, b * qDim + (hd + 1) * headDim));
-          if (L.qNorm) rmsnorm(qh, qh, L.qNorm, rmsEps, headDim);
-          applyRope(qh, 1, headDim, nRot, ropeType, rope, pos);
-          const kvh = Math.floor(hd / group);
-          for (let t = 0; t <= pos; t++) {
-            const ko = kBase + t * kvDim + kvh * headDim;
-            let s = 0;
-            for (let i = 0; i < headDim; i++) s += qh[i] * kv[ko + i];
-            scores[t] = s * scale;
-          }
-          softmax(scores, pos + 1);
-          oh.fill(0);
-          for (let t = 0; t <= pos; t++) {
-            const p = scores[t];
-            const vo = vBase + t * kvDim + kvh * headDim;
-            for (let i = 0; i < headDim; i++) oh[i] += p * kv[vo + i];
-          }
-          att.set(oh, b * qDim + hd * headDim);
-        }
-      }
-      if (prof) PT.attn += performance.now() - tb;
       bar.wait();
 
       // P3: output projection, residual add into my rows of x
@@ -307,7 +317,22 @@ function main() {
       if (spins > 0) spins--; else Atomics.wait(ctrl, CTRL.CMD_SEQ, seen, 1000);
     }
     seen = Atomics.load(ctrl, CTRL.CMD_SEQ);
-    if (Atomics.load(ctrl, CTRL.CMD) === CMD_EXIT) break;
+    const cmd = Atomics.load(ctrl, CTRL.CMD);
+    if (cmd === CMD_EXIT) break;
+    if (cmd === CMD_KV_EXPORT || cmd === CMD_KV_IMPORT) {
+      const layer = Atomics.load(ctrl, CTRL.KV_LAYER); const isV = Atomics.load(ctrl, CTRL.KV_ISV); const cnt = Atomics.load(ctrl, CTRL.KV_N);
+      for (let hl = 0; hl < nOwn; hl++) {
+        const base = ((layer * 2 + isV) * nOwn + hl) * ctx * headDim;
+        for (let t = 0; t < cnt; t++) {
+          const stage = kvStage.subarray(t * kvDim + (kh0 + hl) * headDim, t * kvDim + (kh0 + hl + 1) * headDim);
+          const mine = kvF32.subarray(base + t * headDim, base + (t + 1) * headDim);
+          if (cmd === CMD_KV_EXPORT) stage.set(mine); else mine.set(stage);
+        }
+      }
+      Atomics.add(ctrl, CTRL.DONE, 1);
+      Atomics.notify(ctrl, CTRL.DONE);
+      continue;
+    }
     const B = Atomics.load(ctrl, CTRL.BATCH);
     const tt = prof ? performance.now() : 0;
     runBatch(B, Atomics.load(ctrl, CTRL.POS), Atomics.load(ctrl, CTRL.WANT_LOGITS) === 1);

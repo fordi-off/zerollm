@@ -19,6 +19,7 @@
 // widened activation vectors are reused 4x and four independent accumulators hide latency.
 import { ModuleBuilder, T } from './builder.js';
 import { genKQuantKernels } from './kquant-kernels.js';
+import { genAttnKernels } from './attn-kernels.js';
 
 export const Q8_0_BLOCK = 34;
 export const Q4_0_BLOCK = 18;
@@ -237,6 +238,7 @@ export function buildKernelModule() {
   genMatmul(m, 'mm_q8_0', 'q8');
   genMatmul(m, 'mm_q4_0', 'q4');
   genKQuantKernels(m);
+  genAttnKernels(m);
   return m.build();
 }
 

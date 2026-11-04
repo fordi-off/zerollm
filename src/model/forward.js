@@ -65,8 +65,11 @@ export class RefModel {
   /** Number of positions currently in the KV cache. */
   get pos() { return this.cache.length; }
 
-  /** Whole [pos][kvDim] K (isV=0) or V (isV=1) cache of one layer, as a live view (used by the prefix cache). */
-  kvRegion(layer, isV) { return isV ? this.cache.v[layer] : this.cache.k[layer]; }
+  /** First n positions of one layer's K (isV=0) or V (isV=1) cache, as an [n][kvDim] view (used by the prefix cache). */
+  async kvGet(layer, isV, n) { return (isV ? this.cache.v[layer] : this.cache.k[layer]).subarray(0, n * this.cache.kvDim); }
+
+  /** Write n positions of one layer's K or V cache. */
+  async kvSet(layer, isV, n, data) { (isV ? this.cache.v[layer] : this.cache.k[layer]).set(data.subarray(0, n * this.cache.kvDim)); }
 
   /** After the KV regions were filled from a prefix cache: declare that the model now holds exactly `ids`. */
   restorePrefix(ids) { this.cache.length = ids.length; this.tokens = Array.from(ids); }

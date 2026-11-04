@@ -35,10 +35,10 @@ for (const kind of ['ref', 'pool-js', 'pool-wasm']) {
     try {
       // a: prefill the prefix, save, keep going
       await prefillTokens(a, prefix, { wantLogits: false });
-      cache.save(a, prefix);
+      await cache.save(a, prefix);
       let want; for (const t of rest) want = Float32Array.from(await a.forward(t));
       // b: load instead of computing
-      assert.equal(cache.load(b, prefix), true);
+      assert.equal(await cache.load(b, prefix), true);
       assert.equal(b.pos, prefix.length);
       assert.deepEqual(b.tokens.slice(), prefix);
       let got; for (const t of rest) got = Float32Array.from(await b.forward(t));
@@ -54,29 +54,29 @@ test('prefix cache refuses mismatches and damage without throwing', async () => 
   const cache = new PrefixCache(dir, fp);
   const src = new RefModel(g, { ctx: 64 });
   await prefillTokens(src, prefix, { wantLogits: false });
-  const file = cache.save(src, prefix);
+  const file = await cache.save(src, prefix);
   const fresh = () => new RefModel(g, { ctx: 64 });
   try {
-    assert.equal(cache.load(fresh(), prefix), true);
-    assert.equal(cache.load(fresh(), [...prefix.slice(0, -1), 99]), false, 'different tokens -> different key, no file');
-    assert.equal(new PrefixCache(dir, fp + 'x').load(fresh(), prefix), false, 'different model identity');
+    assert.equal(await cache.load(fresh(), prefix), true);
+    assert.equal(await cache.load(fresh(), [...prefix.slice(0, -1), 99]), false, 'different tokens -> different key, no file');
+    assert.equal(await new PrefixCache(dir, fp + 'x').load(fresh(), prefix), false, 'different model identity');
     const used = fresh(); await prefillTokens(used, [1, 2], { wantLogits: false });
-    assert.equal(cache.load(used, prefix), false, 'only into a fresh model');
-    assert.equal(cache.load(fresh(), []), false);
+    assert.equal(await cache.load(used, prefix), false, 'only into a fresh model');
+    assert.equal(await cache.load(fresh(), []), false);
     const good = fs.readFileSync(file);
     fs.writeFileSync(file, good.subarray(0, good.length - 7)); // truncated
-    assert.equal(cache.load(fresh(), prefix), false);
+    assert.equal(await cache.load(fresh(), prefix), false);
     fs.writeFileSync(file, Buffer.concat([good, Buffer.from([1, 2, 3])])); // extended
-    assert.equal(cache.load(fresh(), prefix), false);
+    assert.equal(await cache.load(fresh(), prefix), false);
     const bad = Buffer.from(good); bad.write('NOTACACH', 0, 'latin1'); fs.writeFileSync(file, bad);
-    assert.equal(cache.load(fresh(), prefix), false);
+    assert.equal(await cache.load(fresh(), prefix), false);
     fs.writeFileSync(file, 'garbage');
-    assert.equal(cache.load(fresh(), prefix), false);
+    assert.equal(await cache.load(fresh(), prefix), false);
     // header says a different token list (hash collision / tampering)
     const h = Buffer.from(good); const hlen = h.readUInt32LE(8); const head = JSON.parse(h.toString('utf8', 12, 12 + hlen));
     head.tokens[3] = 249; const nh = Buffer.from(JSON.stringify(head));
     fs.writeFileSync(file, Buffer.concat([h.subarray(0, 8), Buffer.from(new Uint32Array([nh.length]).buffer), nh, h.subarray(12 + hlen)]));
-    assert.equal(cache.load(fresh(), prefix), false);
+    assert.equal(await cache.load(fresh(), prefix), false);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -86,11 +86,11 @@ test('a model whose cache load failed halfway is still usable (state not corrupt
   const cache = new PrefixCache(dir, modelFingerprint(mp, 'js'));
   const src = new RefModel(g, { ctx: 64 });
   await prefillTokens(src, prefix, { wantLogits: false });
-  const file = cache.save(src, prefix);
+  const file = await cache.save(src, prefix);
   const good = fs.readFileSync(file);
   fs.writeFileSync(file, good.subarray(0, good.length - 1));
   const m = new RefModel(g, { ctx: 64 });
-  assert.equal(cache.load(m, prefix), false);
+  assert.equal(await cache.load(m, prefix), false);
   assert.equal(m.pos, 0);
   const ref = new RefModel(g, { ctx: 64 });
   assert.deepEqual([...await m.forward(5)], [...await ref.forward(5)]);
@@ -118,8 +118,8 @@ test('generate() after a cache hit equals generate() after a fresh prefill', asy
     const want = await collect(fresh);
     await prefillTokens(fresh, prefix, { wantLogits: false }); // (fresh now holds extra state; use a third model to save)
     const saver = await PoolModel.create(g, { ctx: 64, workers: 2 });
-    await prefillTokens(saver, prefix, { wantLogits: false }); cache.save(saver, prefix); await saver.close();
-    assert.equal(cache.load(warm, prefix), true);
+    await prefillTokens(saver, prefix, { wantLogits: false }); await cache.save(saver, prefix); await saver.close();
+    assert.equal(await cache.load(warm, prefix), true);
     const st = {};
     assert.deepEqual(await collect(warm, st), want);
     assert.equal(st.cachedTokens, prefix.length);
