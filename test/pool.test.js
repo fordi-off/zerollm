@@ -71,7 +71,7 @@ for (const [name, opts] of CASES) {
       const toks = [3, 70, 5, 200, 12, 9, 255, 1, 8];
       const want = toks.map((t) => Float32Array.from(ref.forward(t)));
       for (const workers of [1, 2, 3, 5]) {
-        const pool = await PoolModel.create(g, { ctx: 48, workers });
+        const pool = await PoolModel.create(g, { ctx: 48, workers, kernels: 'js' });
         try {
           for (let i = 0; i < toks.length; i++) {
             const got = await pool.forward(toks[i]);
@@ -86,7 +86,7 @@ for (const [name, opts] of CASES) {
 test('pool: weight slices partition the matrices; truncate/reset replay; prefill without logits', async () => {
   const { g } = tinyFile({ arch: 'qwen3', quant: 'q8_0', seed: 2 });
   const matBytes = g.tensors.filter((t) => t.dims.length === 2).reduce((s, t) => s + t.nBytes, 0);
-  const pool = await PoolModel.create(g, { ctx: 32, workers: 4 });
+  const pool = await PoolModel.create(g, { ctx: 32, workers: 4, kernels: 'js' });
   try {
     assert.equal(pool.sliceBytes.reduce((a, b) => a + b, 0), matBytes, 'slices cover every matrix byte exactly once');
     assert.ok(Math.max(...pool.sliceBytes) < matBytes / 4 * 1.3, `slices are balanced: ${pool.sliceBytes}`);
@@ -110,7 +110,7 @@ test('generate() over the pool equals generate() over the reference (with prefix
   const { g } = tinyFile({ arch: 'llama', quant: 'q8_0', seed: 23 });
   const collect = async (m, ids, stats = {}) => { const o = []; for await (const t of generate(m, ids, { maxTokens: 10, stats })) o.push(t); return o; };
   const ref = new RefModel(g, { ctx: 96 });
-  const pool = await PoolModel.create(g, { ctx: 96, workers: 3 });
+  const pool = await PoolModel.create(g, { ctx: 96, workers: 3, kernels: 'js' });
   try {
     const p1 = [5, 6, 7, 8, 9];
     const r1 = await collect(ref, p1); const q1 = await collect(pool, p1);
@@ -158,4 +158,57 @@ test('forgetting close() does not keep the process alive', () => {
   assert.equal(r.error, undefined, String(r.error));
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /main finished without close/);
+});
+
+// ------------------------------------------------------------------------------------------------ SIMD kernels in the pool
+for (const [arch, quant] of [['qwen3', 'q8_0'], ['qwen2', 'q8_0'], ['llama', 'q4_0'], ['qwen3', 'q4_0']]) {
+  test(`pool with WASM SIMD kernels tracks the reference (rounding-level differences only): ${arch} ${quant}, 1-4 workers`, async () => {
+    const { g } = tinyFile({ arch, quant, seed: 29 });
+    const ref = new RefModel(g, { ctx: 48 });
+    const toks = [3, 70, 5, 200, 12, 9, 255, 1];
+    const want = toks.map((t) => Float32Array.from(ref.forward(t)));
+    let first = null;
+    for (const workers of [1, 2, 3, 4]) {
+      const pool = await PoolModel.create(g, { ctx: 48, workers, kernels: 'wasm' });
+      assert.equal(pool.kernels, 'wasm');
+      try {
+        const got = [];
+        for (let i = 0; i < toks.length; i++) {
+          const l = Float32Array.from(await pool.forward(toks[i]));
+          got.push(l);
+          const top = Math.max(...want[i].map(Math.abs));
+          const diff = l.reduce((m, v, j) => Math.max(m, Math.abs(v - want[i][j])), 0);
+          assert.ok(diff <= 1e-4 * top, `workers=${workers} pos=${i}: max diff ${diff} vs top logit ${top}`);
+          assert.equal(l.indexOf(Math.max(...l)), want[i].indexOf(Math.max(...want[i])), `argmax at pos ${i}`);
+        }
+        // the SIMD result itself must not depend on how rows are split among workers
+        if (first) got.forEach((l, i) => assert.deepEqual([...l], [...first[i]], `workers=${workers} pos=${i} differs from workers=1`));
+        else first = got;
+      } finally { await pool.close(); }
+    }
+  });
+}
+
+test('kernels option: auto resolves to wasm when SIMD exists, js is honoured, bad values are rejected by the CLI layer', async () => {
+  const { g } = tinyFile({ arch: 'qwen3', quant: 'q8_0' });
+  const a = await PoolModel.create(g, { ctx: 16, workers: 1 });
+  const b = await PoolModel.create(g, { ctx: 16, workers: 1, kernels: 'js' });
+  try {
+    assert.equal(a.kernels, 'wasm');
+    assert.equal(b.kernels, 'js');
+    assert.equal(b.workerInfo[0].kernels, 'js');
+    assert.equal(a.workerInfo[0].kernels, 'wasm-simd');
+  } finally { await a.close(); await b.close(); }
+  const { kernelsFromFlags } = await import('../src/cli/common.js');
+  assert.equal(kernelsFromFlags({}), 'auto');
+  assert.throws(() => kernelsFromFlags({ kernels: 'avx512' }), /--kernels must be/);
+});
+
+test('F16/F32 weights fall back to JS kernels inside a SIMD pool (mixed-type model)', async () => {
+  const { g } = tinyFile({ arch: 'llama', quant: 'f32', seed: 3 });
+  const ref = new RefModel(g, { ctx: 16 });
+  const pool = await PoolModel.create(g, { ctx: 16, workers: 2, kernels: 'wasm' });
+  try {
+    for (const t of [4, 8, 15]) assert.deepEqual([...await pool.forward(t)], [...ref.forward(t)]); // F32 path has no SIMD kernel: still exact
+  } finally { await pool.close(); }
 });

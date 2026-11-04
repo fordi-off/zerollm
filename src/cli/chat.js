@@ -3,7 +3,7 @@ import { parseArgs, num } from '../util/args.js';
 import { encodeChat } from '../tokenizer/chat-templates.js';
 import { loadEngine, samplerFromFlags, templateOptions, streamReply, formatStats, SAMPLER_HELP } from './common.js';
 
-export const help = `chat <model.gguf> [--system "..."] [--n 512] [--ctx 2048] [--threads N] [--think|--no-think] ${SAMPLER_HELP}`;
+export const help = `chat <model.gguf> [--system "..."] [--n 512] [--ctx 2048] [--threads N] [--kernels auto|wasm|js] [--think|--no-think] ${SAMPLER_HELP}`;
 
 const COMMANDS = '/reset  clear conversation   /system <text>  set system prompt (resets)   /think  /nothink  toggle Qwen3 thinking   /exit';
 
@@ -17,7 +17,7 @@ export async function run(argv) {
   /** @type {Array<{role: string, content: string}>} */
   let messages = [];
 
-  process.stderr.write(`[loaded ${eng.cfg.arch} ${eng.cfg.nLayer}L in ${(eng.loadMs / 1000).toFixed(1)}s, ${eng.threads} thread${eng.threads > 1 ? 's' : ''}, template: ${eng.kind}, ctx ${eng.ctx}]\n`);
+  process.stderr.write(`[loaded ${eng.cfg.arch} ${eng.cfg.nLayer}L in ${(eng.loadMs / 1000).toFixed(1)}s, ${eng.threads} thread${eng.threads > 1 ? 's' : ''}, ${eng.kernels} kernels, template: ${eng.kind}, ctx ${eng.ctx}]\n`);
   if (eng.kind === 'raw') { await eng.close(); throw new Error('chat needs a chat template (this model has none we recognise); use `run --raw` for completion, or pass --template qwen|llama3'); }
   process.stderr.write(`${COMMANDS}\nCtrl+C stops a reply; Ctrl+C at the prompt exits.\n\n`);
 

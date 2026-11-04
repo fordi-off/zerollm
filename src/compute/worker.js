@@ -4,11 +4,16 @@
 import fs from 'node:fs';
 import { parentPort, workerData } from 'node:worker_threads';
 import { readTensorBytes } from '../gguf/reader.js';
-import { Act, matvec, dequantRow, rmsnorm, softmax, silu, ropeTables, applyRope, rowBytes } from './ref-kernels.js';
+import { Act, matvec, dequantRow, rmsnorm, softmax, silu, ropeTables, applyRope, rowBytes, quantizeAct } from './ref-kernels.js';
+import { instantiateKernels } from './wasm/kernels.js';
+import { GGML_TYPE } from '../gguf/types.js';
 import { Barrier } from './barrier.js';
 import { CTRL, CMD_EXIT, splitRows, splitRange, alignUp, kvOffset } from './layout.js';
 
-const { id, n, cfg, tensors, path, ctx, shared, spin } = workerData;
+const { id, n, cfg, tensors, path, ctx, shared, spin, kernels } = workerData;
+// opt-in profile of worker 0 (ZEROLLM_PROFILE=1): where does a token's time go?
+const prof = process.env.ZEROLLM_PROFILE === '1' && id === 0;
+const PT = { kernel: 0, quant: 0, attn: 0, barrier: 0, total: 0, tokens: 0 };
 
 /** Fatal errors: tell the pool, then stop. */
 function fail(e) {
@@ -49,6 +54,13 @@ function main() {
     addMat(`${l}.wo`, `${p}attn_output.weight`);
     addMat(`${l}.gate`, `${p}ffn_gate.weight`); addMat(`${l}.up`, `${p}ffn_up.weight`); addMat(`${l}.down`, `${p}ffn_down.weight`);
   }
+  // scratch for the SIMD kernels, in the same memory as the weights: quantized activation, its scales, f32 results
+  const useWasm = kernels === 'wasm';
+  const maxCols = Math.max(nEmbd, qDim, nFF);
+  const maxRows = Math.max(1, ...plan.map((p) => p.r1 - p.r0));
+  const XQ = total; total += alignUp(maxCols, 64);
+  const XD = total; total += alignUp((maxCols / 32) * 4, 64);
+  const YO = total; total += alignUp(maxRows * 4, 64);
   const pages = Math.max(1, Math.ceil(total / 65536));
   if (pages > 65536) throw new Error(`worker ${id}: weight slice is ${(total / 2 ** 30).toFixed(2)} GB, over the 4 GB wasm32 limit; use more workers`);
   let mem;
@@ -65,7 +77,7 @@ function main() {
     for (const p of plan) {
       const view = new Uint8Array(mem.buffer, p.off, p.bytes);
       if (p.bytes) readTensorBytes(fd, p.t, p.r0 * rowBytes(p.t.type, p.t.dims[0]), view);
-      W[p.key] = { type: p.t.type, rows: p.r1 - p.r0, cols: p.t.dims[0], data: view };
+      W[p.key] = { type: p.t.type, rows: p.r1 - p.r0, cols: p.t.dims[0], data: view, off: p.off, kernel: null, nb: p.t.dims[0] / 32 };
       loaded += p.bytes;
       const now = performance.now();
       if (now - lastPost > 100) { lastPost = now; parentPort.postMessage({ type: 'progress', id, bytes: loaded }); }
@@ -91,6 +103,34 @@ function main() {
       });
     }
   } finally { fs.closeSync(fd); }
+  const xqv = new Int8Array(mem.buffer, XQ, maxCols);
+  const xdv = new Float32Array(mem.buffer, XD, maxCols / 32);
+  const yv = new Float32Array(mem.buffer, YO, maxRows);
+  if (useWasm) {
+    const k = instantiateKernels(mem);
+    for (const w of Object.values(W)) {
+      if (w.type === GGML_TYPE.Q8_0) w.kernel = k.matvec_q8_0;
+      else if (w.type === GGML_TYPE.Q4_0) w.kernel = k.matvec_q4_0;
+    }
+  }
+  /** Make `x` the current matmul input: quantize it into the kernels' scratch (and keep a JS Act for fallback types). */
+  let curAct = null;
+  const setAct = (x) => {
+    const t = prof ? performance.now() : 0;
+    curAct = new Act(x); if (useWasm) quantizeAct(x, xqv, xdv);
+    if (prof) PT.quant += performance.now() - t;
+  };
+  /** y[0..w.rows) = W_slice * current activation */
+  const mv = (w, y) => {
+    const t = prof ? performance.now() : 0;
+    mvInner(w, y);
+    if (prof) PT.kernel += performance.now() - t;
+  };
+  const mvInner = (w, y) => {
+    if (w.kernel) {
+      if (w.rows > 0) { w.kernel(w.off, XQ, XD, YO, w.rows, w.nb); y.set(yv.subarray(0, w.rows)); }
+    } else matvec(w, curAct, y);
+  };
 
   // ---------------------------------------------------------------- shared views + private scratch
   const ctrl = new Int32Array(shared.ctrl);
@@ -98,7 +138,8 @@ function main() {
   const sk = new Float32Array(shared.k); const sv = new Float32Array(shared.v);
   const att = new Float32Array(shared.att); const hb = new Float32Array(shared.hb);
   const logits = new Float32Array(shared.logits); const kv = new Float32Array(shared.kv);
-  const bar = new Barrier(ctrl, CTRL.BAR_COUNT, CTRL.BAR_GEN, n, spin);
+  const rawBar = new Barrier(ctrl, CTRL.BAR_COUNT, CTRL.BAR_GEN, n, spin);
+  const bar = prof ? { wait() { const t = performance.now(); rawBar.wait(); PT.barrier += performance.now() - t; } } : rawBar;
   const rope = ropeTables(cfg, ctx, ropeFreqs);
   const xb = new Float32Array(nEmbd);
   const scores = new Float32Array(ctx);
@@ -118,7 +159,7 @@ function main() {
   const scale = 1 / Math.sqrt(headDim);
   const embd = W.embd; const outW = cfg.tiedEmbeddings ? W.embd : W.output;
 
-  parentPort.postMessage({ type: 'ready', id, ms: performance.now() - t0, bytes: total, sliceBytes: loaded });
+  parentPort.postMessage({ type: 'ready', id, ms: performance.now() - t0, bytes: total, sliceBytes: loaded, kernels: useWasm ? 'wasm-simd' : 'js' });
 
   // ---------------------------------------------------------------- the per-token SPMD program
   function runToken(token, pos, wantLogits) {
@@ -129,25 +170,28 @@ function main() {
       const L = layers[l];
       // P1: norm (redundant per worker) + my rows of q, k, v
       rmsnorm(xb, x, L.attnNorm, rmsEps);
-      const h = new Act(xb);
-      matvec(W[`${l}.wq`], h, sq.subarray(qr0, qr1));
-      matvec(W[`${l}.wk`], h, sk.subarray(kr0, kr1));
-      matvec(W[`${l}.wv`], h, sv.subarray(kr0, kr1));
+      setAct(xb);
+      mv(W[`${l}.wq`], sq.subarray(qr0, qr1));
+      mv(W[`${l}.wk`], sk.subarray(kr0, kr1));
+      mv(W[`${l}.wv`], sv.subarray(kr0, kr1));
       if (L.bq) for (let i = qr0; i < qr1; i++) sq[i] += L.bq[i];
       if (L.bk) for (let i = kr0; i < kr1; i++) sk[i] += L.bk[i];
       if (L.bv) for (let i = kr0; i < kr1; i++) sv[i] += L.bv[i];
       bar.wait();
 
       // P2a: my KV heads: k-norm, RoPE, write K and V into the shared cache
+      const ta = prof ? performance.now() : 0;
       for (let hd = kh0; hd < kh1; hd++) {
         if (L.kNorm) rmsnorm(sk, sk, L.kNorm, rmsEps, headDim, hd * headDim, hd * headDim);
         applyRope(sk.subarray(hd * headDim, (hd + 1) * headDim), 1, headDim, nRot, ropeType, rope, pos);
         kv.set(sk.subarray(hd * headDim, (hd + 1) * headDim), kvOffset(l, 0, ctx, kvDim, pos) + hd * headDim);
         kv.set(sv.subarray(hd * headDim, (hd + 1) * headDim), kvOffset(l, 1, ctx, kvDim, pos) + hd * headDim);
       }
+      if (prof) PT.attn += performance.now() - ta;
       bar.wait();
 
       // P2b: my query heads: q-norm, RoPE, attention over the cache
+      const tb = prof ? performance.now() : 0;
       const kBase = kvOffset(l, 0, ctx, kvDim); const vBase = kvOffset(l, 1, ctx, kvDim);
       for (let hd = qh0; hd < qh1; hd++) {
         qh.set(sq.subarray(hd * headDim, (hd + 1) * headDim));
@@ -169,30 +213,34 @@ function main() {
         }
         att.set(oh, hd * headDim);
       }
+      if (prof) PT.attn += performance.now() - tb;
       bar.wait();
 
       // P3: output projection, residual add into my rows of x
-      matvec(W[`${l}.wo`], new Act(att), tmpA);
+      setAct(att);
+      mv(W[`${l}.wo`], tmpA);
       for (let i = 0; i < er1 - er0; i++) x[er0 + i] += tmpA[i];
       bar.wait();
 
       // P4: FFN norm + my rows of gate/up -> SwiGLU
       rmsnorm(xb, x, L.ffnNorm, rmsEps);
-      const h2 = new Act(xb);
-      matvec(W[`${l}.gate`], h2, tmpA);
-      matvec(W[`${l}.up`], h2, tmpB);
+      setAct(xb);
+      mv(W[`${l}.gate`], tmpA);
+      mv(W[`${l}.up`], tmpB);
       for (let i = 0; i < fr1 - fr0; i++) hb[fr0 + i] = silu(tmpA[i]) * tmpB[i];
       bar.wait();
 
       // P5: down projection, residual add
-      matvec(W[`${l}.down`], new Act(hb), tmpA);
+      setAct(hb);
+      mv(W[`${l}.down`], tmpA);
       for (let i = 0; i < er1 - er0; i++) x[er0 + i] += tmpA[i];
       bar.wait();
     }
 
     if (wantLogits) {
       rmsnorm(xb, x, outputNorm, rmsEps);
-      matvec(outW, new Act(xb), logits.subarray(vr0, vr1));
+      setAct(xb);
+      mv(outW, logits.subarray(vr0, vr1));
     }
   }
 
@@ -205,8 +253,15 @@ function main() {
     }
     seen = Atomics.load(ctrl, CTRL.CMD_SEQ);
     if (Atomics.load(ctrl, CTRL.CMD) === CMD_EXIT) break;
+    const tt = prof ? performance.now() : 0;
     runToken(Atomics.load(ctrl, CTRL.TOKEN), Atomics.load(ctrl, CTRL.POS), Atomics.load(ctrl, CTRL.WANT_LOGITS) === 1);
+    if (prof) { PT.total += performance.now() - tt; PT.tokens++; }
     Atomics.add(ctrl, CTRL.DONE, 1);
     Atomics.notify(ctrl, CTRL.DONE);
+  }
+  if (prof && PT.tokens) {
+    const per = (v) => (v / PT.tokens).toFixed(2);
+    const other = PT.total - PT.kernel - PT.quant - PT.attn - PT.barrier;
+    process.stderr.write(`[profile worker 0, ms/token over ${PT.tokens} tokens] total ${per(PT.total)} | matmul kernels ${per(PT.kernel)} | act quantization ${per(PT.quant)} | attention+rope ${per(PT.attn)} | barrier waits ${per(PT.barrier)} | other (norms, residuals, swiglu, copies) ${per(other)}\n`);
   }
 }

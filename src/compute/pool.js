@@ -3,11 +3,12 @@
 import { Worker } from 'node:worker_threads';
 import { modelConfig } from '../model/config.js';
 import { CTRL, CMD_TOKEN, CMD_EXIT, allocShared } from './layout.js';
+import { probeWasmFeatures } from './wasm/features.js';
 
 export class PoolModel {
   /**
    * @param {import('../gguf/reader.js').GGUFFile} g
-   * @param {{ctx?: number, workers?: number, spin?: number, onProgress?: (done: number, total: number) => void}} [opts]
+   * @param {{ctx?: number, workers?: number, spin?: number, kernels?: 'auto'|'wasm'|'js', onProgress?: (done: number, total: number) => void}} [opts]
    * @returns {Promise<PoolModel>}
    */
   static async create(g, opts = {}) {
@@ -23,6 +24,9 @@ export class PoolModel {
     const cfg = this.cfg = modelConfig(g);
     this.ctx = Math.min(opts.ctx ?? 2048, cfg.nCtxTrain);
     this.n = Math.max(1, opts.workers ?? 1);
+    const want = opts.kernels ?? 'auto';
+    if (want === 'wasm' && !probeWasmFeatures().simd) throw new Error('--kernels wasm requested but this Node/V8 has no WebAssembly SIMD; use --kernels js');
+    this.kernels = want === 'auto' ? (probeWasmFeatures().simd ? 'wasm' : 'js') : want;
     this.tokens = [];
     this.failed = null;
     this.closed = false;
@@ -44,10 +48,12 @@ export class PoolModel {
     const progress = new Array(this.n).fill(0);
     const t0 = performance.now();
     this.workers = [];
+    this.exits = [];
     const ready = [];
     for (let id = 0; id < this.n; id++) {
-      const w = new Worker(url, { workerData: { id, n: this.n, cfg, tensors, path: g.path, ctx: this.ctx, shared: sh, spin: opts.spin ?? 20000 } });
+      const w = new Worker(url, { workerData: { id, n: this.n, cfg, tensors, path: g.path, ctx: this.ctx, shared: sh, spin: opts.spin ?? 20000, kernels: this.kernels } });
       this.workers.push(w);
+      this.exits.push(new Promise((r) => w.once('exit', r)));
       ready.push(new Promise((resolve, reject) => {
         w.on('message', (msg) => {
           if (msg.type === 'ready') resolve(msg);
@@ -131,6 +137,13 @@ export class PoolModel {
     Atomics.store(this.ctrl, CTRL.CMD, CMD_EXIT);
     Atomics.add(this.ctrl, CTRL.CMD_SEQ, 1);
     Atomics.notify(this.ctrl, CTRL.CMD_SEQ);
+    // Graceful first: healthy workers see CMD_EXIT and return on their own. After a failure some workers are stuck
+    // at a barrier and will never look at the command, so skip the grace period then.
+    if (!this.failed) {
+      let timer;
+      await Promise.race([Promise.all(this.exits), new Promise((r) => { timer = setTimeout(r, 2000); })]);
+      clearTimeout(timer);
+    }
     await Promise.all(this.workers.map((w) => w.terminate()));
   }
 }
