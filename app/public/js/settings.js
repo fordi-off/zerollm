@@ -139,6 +139,10 @@ function renderPerformance(st) {
   ctx.addEventListener('change', async () => { await call('set_context_window', { value: Number(ctx.value) }); await hooks.refreshState(); });
   const th = el('input'); th.type = 'number'; th.min = 1; th.max = st.settings.maxThreads; th.value = st.settings.threads; th.style.width = '80px'; th.setAttribute('aria-label', t('threads'));
   th.addEventListener('change', async () => { await call('set_thread_count', { value: Number(th.value) }); await hooks.refreshState(); });
+  const util = el('select'); util.setAttribute('aria-label', t('utilityModel'));
+  { const o = el('option', '', t('utilityAuto')); o.value = ''; util.append(o); }
+  for (const m of st.models.filter((x) => x.supported)) { const o = el('option', '', m.displayName); o.value = m.filename; o.selected = m.filename === st.settings.utilityModel; util.append(o); }
+  util.addEventListener('change', async () => { await call('set_utility_model', { filename: util.value || null }); });
   const lang = el('select'); lang.setAttribute('aria-label', t('language'));
   for (const [v, n] of [['nb', 'Norsk (bokmål)'], ['en', 'English']]) { const o = el('option', '', n); o.value = v; o.selected = v === st.language; lang.append(o); }
   lang.addEventListener('change', async () => { await hooks.applyLanguage(lang.value); await render(); });
@@ -151,6 +155,7 @@ function renderPerformance(st) {
   box.append(
     row(t('contextWindow'), t('contextHint'), ctx),
     row(t('threads'), `${t('threadsHint')} (max ${st.settings.maxThreads})`, th),
+    row(t('utilityModel'), t('utilityHint'), util),
     row(t('language'), '', lang),
     row(t('theme'), '', theme),
     row(t('reset'), '', reset),

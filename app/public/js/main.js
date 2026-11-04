@@ -71,7 +71,7 @@ function updateMeter() {
     const draft = extractCommands($('input').value.trim());
     if (draft.text || draft.commands.length) msgs.push({ role: 'user', content: draft.text, ...(draft.commands.length ? { commands: draft.commands } : {}) });
     if (msgs.length === 0) { setMeter(0, S.settings?.contextWindow ?? 0); return; }
-    try { const r = await call('estimate_context', { model: S.model, messages: msgs }); setMeter(r.contextUsed, r.contextMax); } catch { /* model not readable */ }
+    try { const r = await call('estimate_context', { model: S.model, messages: msgs, chatId: S.chatId }); setMeter(r.contextUsed, r.contextMax); } catch { /* model not readable */ }
   }, 350);
 }
 function setMeter(used, max) {
@@ -191,7 +191,7 @@ async function startRun() {
   reply.bubble.classList.add('caret-blink');
   scrollToBottom(true); S.stickBottom = true;
   const history = S.messages.slice(0, -1).map(apiMsg);
-  try { await call('send_message', { model: S.model, messages: history }); }
+  try { await call('send_message', { model: S.model, messages: history, chatId: S.chatId }); }
   catch (e) { finishRun(); setMeta(reply, e.message === 'busy' ? t('busy') : `${t('error')}: ${e.message}`, 'err'); }
 }
 
@@ -226,7 +226,7 @@ async function continueReply() {
   S.current = { msg: reply }; S.waiting = true; S.runId = null; setBusy(true);
   showProgress(t('loadingModel'), null); reply.bubble.classList.add('caret-blink');
   const history = S.messages.map(apiMsg);
-  try { await call('continue_message', { model: S.model, messages: history }); } catch (e) { finishRun(); setMeta(reply, `${t('error')}: ${e.message}`, 'err'); }
+  try { await call('continue_message', { model: S.model, messages: history, chatId: S.chatId }); } catch (e) { finishRun(); setMeta(reply, `${t('error')}: ${e.message}`, 'err'); }
 }
 
 function finishRun() {
@@ -281,7 +281,7 @@ const events = {
   download(d) { if (onDownloadEvent(d)) refreshState().catch(() => {}); },
   phase(d) {
     if (!ours(d)) return;
-    showProgress(d.phase === 'loading' ? t('loadingModel') : d.phase === 'preparing' ? t('readingPrompt') : t('generating'), null);
+    showProgress(d.phase === 'loading' ? t('loadingModel') : d.phase === 'summarizing' ? t('summarizing') : d.phase === 'preparing' ? t('readingPrompt') : t('generating'), null);
     if (d.phase === 'generating') hideProgress();
   },
   progress(d) {
@@ -306,6 +306,7 @@ const events = {
     if (d.looped) setMeta(msg, t('looped'), 'warn');
     else if (d.stopped) setMeta(msg, t('stopped'), 'warn');
     else if (truncated) setMeta(msg, t('cut'), 'warn');
+    if (d.compressed) setMeta(msg, t('compressedNote'));
     if (d.trimmed) setMeta(msg, t('trimmed'), 'warn');
     if (d.contextMax) setMeter(Math.min(d.contextMax, d.contextUsed + (d.generated ?? 0)), d.contextMax);
     S.loaded = d.model;

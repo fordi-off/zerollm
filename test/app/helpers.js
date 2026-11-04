@@ -37,14 +37,14 @@ export async function startTestApp({ models = [{ name: 'tiny-llama.gguf', arch: 
     }
   };
   /** Run a send_message and return all events of that run. */
-  const runChat = async (model, messages, { method = 'send_message', after } = {}) => {
+  const runChat = async (model, messages, { method = 'send_message', after, extra = {} } = {}) => {
     const ctl = new AbortController(); const out = []; let started;
     const ready = new Promise((r) => { started = r; });
     const reader = (async () => {
       try { for await (const ev of events(ctl.signal)) { if (ev.type === 'hello') started(); else { out.push(ev); if (after) await after(ev, out); if (ev.type === 'done' || ev.type === 'error') break; } } } catch (e) { if (e.name !== 'AbortError') throw e; }
     })();
     await ready;
-    await call(method, { model, messages });
+    await call(method, { model, messages, ...extra });
     await Promise.race([reader, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout waiting for events')), 30000))]);
     ctl.abort();
     return out;

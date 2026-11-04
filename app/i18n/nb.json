@@ -96,5 +96,10 @@
   "noCommands": "Ingen kommandoer. Legg til en under Innstillinger.",
   "writeAfterCommand": "Skriv en melding etter kommandoen.",
   "commandsMenu": "Kommandoer",
-  "skillAdded": "Kommando lagt til"
+  "skillAdded": "Kommando lagt til",
+  "summarizing": "Oppsummerer eldre meldinger…",
+  "compressedNote": "Eldre meldinger er oppsummert for å spare kontekst",
+  "utilityModel": "Modell for oppsummering",
+  "utilityAuto": "Automatisk (minste modell, ellers samme modell)",
+  "utilityHint": "Brukes når en lang samtale må komprimeres. En liten modell gjør det raskere."
 }

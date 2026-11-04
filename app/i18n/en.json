@@ -96,5 +96,10 @@
   "noCommands": "No commands. Add one in Settings.",
   "writeAfterCommand": "Write a message after the command.",
   "commandsMenu": "Commands",
-  "skillAdded": "Command added"
+  "skillAdded": "Command added",
+  "summarizing": "Summarizing older messages…",
+  "compressedNote": "Older messages were summarized to save context",
+  "utilityModel": "Summary model",
+  "utilityAuto": "Automatic (smallest model, else the same model)",
+  "utilityHint": "Used when a long conversation has to be compressed. A small model is faster."
 }

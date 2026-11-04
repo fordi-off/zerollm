@@ -11,7 +11,8 @@ import { createChatStore } from './chats.js';
 import { createSkills } from './skills.js';
 import { createDownloader, freeDiskBytes } from './downloader.js';
 import { CATALOG } from './catalog.js';
-import { buildMessages, fitToContext, looksLooped, stablePrefixIds, SAMPLING, DEFAULT_MAX_TOKENS, CONTINUATION_PROMPT } from './chat-core.js';
+import { createSummarizer } from './summarizer.js';
+import { buildMessages, fitToContext, looksLooped, stablePrefixIds, RECENT_KEEP, SUMMARIZE_AT, SUMMARY_PREFIX, SAMPLING, DEFAULT_MAX_TOKENS, CONTINUATION_PROMPT } from './chat-core.js';
 
 const I18N_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'i18n');
 
@@ -20,6 +21,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
   let current = null; // {id, abort: {aborted}}
   const chatStore = createChatStore(paths);
   const skills = createSkills(paths);
+  const summarizer = createSummarizer({ paths, host, getConfig, log });
   skills.seed();
   /** Instruction text for the slash commands on the last user message (they apply to that one reply). */
   const extraFor = (history) => skills.bodies([...history].reverse().find((m) => m.role === 'user')?.commands) ?? '';
@@ -37,11 +39,21 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
 
   const contextMax = () => getConfig().context_window;
 
+  /** The saved rolling summary of a chat, dropped when the history was edited back past what it covers. */
+  function summaryState(chatId, historyLength) {
+    if (!chatId) return { summary: '', summarized: 0 };
+    let c; try { c = chatStore.loadSummary(chatId); } catch { return { summary: '', summarized: 0 }; }
+    if (!c.summary || c.summarized_count < 1 || c.summarized_count > historyLength - 1) return { summary: '', summarized: 0 };
+    return { summary: c.summary, summarized: c.summarized_count };
+  }
+  /** System-prompt additions after the base prompt: command instructions, then the rolling summary (the language reminder stays last). */
+  const extraText = (history, summary) => [extraFor(history), summary ? SUMMARY_PREFIX + summary : ''].filter(Boolean).join('\n\n');
+
   function memoryMessage(e) {
     return `Ikke nok ledig minne til å laste denne modellen. Den trenger omtrent ${(e.needed / 1e9).toFixed(1)} GB (modell + kontekst), men bare ${(e.free / 1e9).toFixed(1)} GB er ledig. Lukk andre programmer, velg en mindre modell, eller senk kontekstvinduet i Innstillinger.`;
   }
 
-  async function run(model, history, { continuation }) {
+  async function run(model, history, { continuation, chatId }) {
     const id = ++runSeq;
     const abort = { aborted: false };
     current = { id, abort };
@@ -53,9 +65,25 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
       if (abort.aborted) { send('done', { stopReason: 'aborted', stopped: true, generated: 0 }); return; }
       send('phase', { phase: 'preparing', model });
 
-      const msgs = continuation ? [...history, { role: 'user', content: CONTINUATION_PROMPT }] : history;
       const ctxMax = engine.ctx;
-      const fitted = fitToContext(buildMessages(msgs, { extraSystem: extraFor(history) }), (m) => engine.countPromptTokens(m), ctxMax, DEFAULT_MAX_TOKENS);
+      const count = (m) => engine.countPromptTokens(m);
+      const withCont = (h) => (continuation ? [...h, { role: 'user', content: CONTINUATION_PROMPT }] : h);
+      let { summary, summarized } = summaryState(chatId, history.length);
+      const build = () => buildMessages(withCont(history.slice(summarized)), { extraSystem: extraText(history, summary) });
+
+      // Long conversation: fold the older messages into the rolling summary (cached on disk), keep the newest ones verbatim.
+      const budget = ctxMax - DEFAULT_MAX_TOKENS - 64;
+      const keepFrom = history.length - RECENT_KEEP;
+      if (chatId && keepFrom > summarized && count(build()) > SUMMARIZE_AT * budget) {
+        send('phase', { phase: 'summarizing', model });
+        try {
+          const folded = await summarizer.fold(summary, history.slice(summarized, keepFrom), { chatFilename: model, signal: abort });
+          if (folded && !abort.aborted) { summary = folded; summarized = keepFrom; chatStore.saveSummary(chatId, summary, summarized); log.info(`summary updated: ${keepFrom} older messages folded in`); }
+        } catch (e) { log.error(`summarizing failed, continuing without: ${e.stack ?? e}`); }
+        if (abort.aborted) { send('done', { stopReason: 'aborted', stopped: true, generated: 0, model }); return; }
+        send('phase', { phase: 'preparing', model });
+      }
+      const fitted = fitToContext(build(), count, ctxMax, DEFAULT_MAX_TOKENS);
       const contextUsed = engine.countPromptTokens(fitted.messages);
       log.info(`generating: ${model} | ${contextUsed}/${ctxMax} ctx tokens${fitted.trimmed ? ' | prompt trimmed to fit' : ''}`);
 
@@ -89,7 +117,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
       log.info(`done: ${stats.generated} tokens, prefill ${(stats.prefillMs / 1000).toFixed(1)}s (${stats.cachedTokens} cached of ${stats.promptTokens}), decode ${tokPerSec.toFixed(1)} tok/s - ${looped ? 'looped' : stats.stopReason}`);
       send('done', {
         stopReason: looped ? 'looped' : stats.stopReason, truncated: stats.stopReason === 'length', stopped: abort.aborted && !looped, looped,
-        trimmed: fitted.trimmed, prefixCache, generated: stats.generated, promptTokens: stats.promptTokens, cachedTokens: stats.cachedTokens,
+        trimmed: fitted.trimmed, compressed: summarized > 0, prefixCache, generated: stats.generated, promptTokens: stats.promptTokens, cachedTokens: stats.cachedTokens,
         prefillMs: stats.prefillMs, decodeMs: stats.decodeMs, tokPerSec, contextUsed, contextMax: ctxMax, model,
       });
     } catch (e) {
@@ -110,7 +138,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
       const models = listModels(paths, cfg);
       return {
         language: cfg.language, models, lastModel: cfg.last_model, loaded: host.loadedName,
-        settings: { contextWindow: cfg.context_window, threads: cfg.n_threads, contextSteps: CONTEXT_STEPS, maxThreads: os.availableParallelism?.() ?? os.cpus().length, defaultThreads: defaultThreads() },
+        settings: { utilityModel: cfg.utility_model, contextWindow: cfg.context_window, threads: cfg.n_threads, contextSteps: CONTEXT_STEPS, maxThreads: os.availableParallelism?.() ?? os.cpus().length, defaultThreads: defaultThreads() },
         system: { freeRam: os.freemem(), totalRam: os.totalmem() },
         busy: current !== null,
       };
@@ -165,20 +193,20 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
     async rename_chat({ id, name }) { return { ok: chatStore.rename(id, name) }; },
     async delete_chat({ id }) { return { ok: chatStore.delete(id) }; },
 
-    async send_message({ model, messages }) {
+    async send_message({ model, messages, chatId }) {
       modelPath(paths, model);
       if (current) throw new Error('busy');
       const started = new Promise((resolve) => setImmediate(resolve));
-      run(model, messages, { continuation: false });
+      run(model, messages, { continuation: false, chatId: chatId ?? null });
       await started;
       return { started: true, runId: runSeq };
     },
 
-    async continue_message({ model, messages }) {
+    async continue_message({ model, messages, chatId }) {
       modelPath(paths, model);
       if (current) throw new Error('busy');
       const started = new Promise((resolve) => setImmediate(resolve));
-      run(model, messages, { continuation: true });
+      run(model, messages, { continuation: true, chatId: chatId ?? null });
       await started;
       return { started: true, runId: runSeq };
     },
@@ -186,10 +214,11 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
     async stop_generation() { if (current) current.abort.aborted = true; return { stopping: current !== null }; },
 
     /** Exact prompt size for the context meter (works without loading the model's weights). */
-    async estimate_context({ model, messages }) {
+    async estimate_context({ model, messages, chatId }) {
       const tools = toolsFor(model);
-      const fitted = buildMessages(messages, { extraSystem: extraFor(messages) });
-      return { contextUsed: tools.countPromptTokens(fitted), contextMax: Math.min(contextMax(), tools.cfg.nCtxTrain) };
+      const { summary, summarized } = summaryState(chatId ?? null, messages.length);
+      const fitted = buildMessages(messages.slice(summarized), { extraSystem: extraText(messages, summary) });
+      return { contextUsed: tools.countPromptTokens(fitted), contextMax: Math.min(contextMax(), tools.cfg.nCtxTrain), compressed: summarized > 0 };
     },
 
     async set_context_window({ value }) {
@@ -198,6 +227,13 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
       const cfg = getConfig(); cfg.context_window = v; setConfig(cfg);
       await host.unload();
       return { ok: true, contextWindow: v };
+    },
+
+    async set_utility_model({ filename }) {
+      const cfg = getConfig();
+      if (filename) modelPath(paths, filename);
+      cfg.utility_model = filename || null; setConfig(cfg);
+      return { ok: true };
     },
 
     async set_thread_count({ value }) {
