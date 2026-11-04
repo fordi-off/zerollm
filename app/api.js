@@ -8,14 +8,17 @@ import { loadTokenizer, EngineMemoryError, defaultThreads } from '../src/index.j
 import { defaultConfig, CONTEXT_STEPS } from './config.js';
 import { listModels, modelPath } from './models.js';
 import { createChatStore } from './chats.js';
+import { createDownloader, freeDiskBytes } from './downloader.js';
+import { CATALOG } from './catalog.js';
 import { buildMessages, fitToContext, looksLooped, stablePrefixIds, SAMPLING, DEFAULT_MAX_TOKENS, CONTINUATION_PROMPT } from './chat-core.js';
 
 const I18N_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'i18n');
 
-export function createApi({ paths, host, getConfig, setConfig, log, emit }) {
+export function createApi({ paths, host, getConfig, setConfig, log, emit, catalog = CATALOG, retryDelayMs }) {
   let runSeq = 0;
   let current = null; // {id, abort: {aborted}}
   const chatStore = createChatStore(paths);
+  const downloader = createDownloader({ paths, log, emit, catalog, retryDelayMs });
   const tokenizers = new Map(); // filename -> PromptTools (weights not loaded)
 
   const toolsFor = (filename) => {
@@ -113,6 +116,33 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit }) {
       return JSON.parse(fs.readFileSync(path.join(I18N_DIR, `${name}.json`), 'utf8'));
     },
 
+    /** Downloadable models, with what is already installed / partly downloaded and whether they fit in this PC's RAM. */
+    async catalog() {
+      const total = os.totalmem();
+      const have = new Set(listModels(paths, getConfig()).map((m) => m.filename));
+      return {
+        entries: downloader.entries().map((e) => ({
+          id: e.id, filename: e.filename, displayName: e.displayName, sizeBytes: e.sizeBytes, ramGB: e.ramGB, recommended: !!e.recommended, languages: e.languages,
+          installed: have.has(e.filename), partialBytes: downloader.partial(e), fits: e.ramGB * 1e9 <= total * 0.8,
+        })),
+        status: downloader.status(), freeDisk: freeDiskBytes(paths.modelsDir), totalRam: total,
+      };
+    },
+    async download_start({ ids }) { if (!Array.isArray(ids)) throw new Error('ids must be a list'); return downloader.start(ids); },
+    async download_cancel() { return downloader.cancel(); },
+    async download_status() { return downloader.status(); },
+
+    async delete_model({ filename }) {
+      const full = modelPath(paths, filename);
+      if (host.loadedName === filename) await host.unload();
+      fs.unlinkSync(full);
+      const cfg = getConfig();
+      if (cfg.models?.[filename]) { delete cfg.models[filename]; }
+      if (cfg.last_model === filename) cfg.last_model = null;
+      setConfig(cfg);
+      return { ok: true };
+    },
+
     async list_models() { return listModels(paths, getConfig()); },
 
     async set_language({ lang }) { const cfg = getConfig(); cfg.language = lang === 'en' ? 'en' : 'nb'; setConfig(cfg); return { ok: true, language: cfg.language }; },
@@ -168,10 +198,15 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit }) {
       return { ok: true, threads: v };
     },
 
-    async update_model_settings({ filename, display_name, active }) {
+    async update_model_settings({ filename, display_name, active, kv }) {
       modelPath(paths, filename);
       const cfg = getConfig();
       const m = { ...(cfg.models[filename] ?? {}) };
+      if (kv !== undefined) {
+        if (kv !== 'f16' && kv !== 'f32') throw new Error('invalid kv precision');
+        if (m.kv !== kv && host.loadedName === filename) await host.unload();
+        m.kv = kv;
+      }
       if (typeof display_name === 'string') m.display_name = display_name.trim().slice(0, 80);
       if (typeof active === 'boolean') m.active = active;
       cfg.models[filename] = m; setConfig(cfg);
@@ -188,5 +223,5 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit }) {
     },
   };
 
-  return { methods, async shutdown() { if (current) current.abort.aborted = true; await host.unload(); } };
+  return { methods, async shutdown() { downloader.cancel(); if (current) current.abort.aborted = true; await host.unload(); } };
 }

@@ -1,7 +1,7 @@
 import { call, listen, hasToken } from './api.js';
 import { loadStrings, t, apply } from './i18n.js';
 import { renderMarkdown } from './markdown.js';
-import { initSettings, openSettings } from './settings.js';
+import { initSettings, openSettings, onDownloadEvent } from './settings.js';
 import { initChatList, refreshChatList, setActive } from './chats.js';
 
 const $ = (id) => document.getElementById(id);
@@ -48,7 +48,11 @@ function renderModelPicker() {
   $('model-name').textContent = m ? m.displayName : t('chooseModel');
   const none = S.models.filter((x) => x.supported).length === 0;
   $('no-model').hidden = !none;
-  if (none) { $('no-model').textContent = ''; $('no-model').append(el('strong', '', t('noModelTitle')), el('br'), document.createTextNode(t('noModelText'))); }
+  if (none) {
+    const n = $('no-model'); n.textContent = '';
+    const go = el('button', 'btn primary', t('noModelAction')); go.type = 'button'; go.addEventListener('click', () => openSettings('models'));
+    n.append(el('strong', '', t('noModelTitle')), el('br'), document.createTextNode(`${t('noModelText')} `), el('br'), go);
+  }
   updateSendEnabled();
 }
 function closeMenu() { $('model-menu').hidden = true; $('model-btn').setAttribute('aria-expanded', 'false'); }
@@ -261,6 +265,7 @@ function ours(d) {
   return d.runId === S.runId;
 }
 const events = {
+  download(d) { if (onDownloadEvent(d)) refreshState().catch(() => {}); },
   phase(d) {
     if (!ours(d)) return;
     showProgress(d.phase === 'loading' ? t('loadingModel') : d.phase === 'preparing' ? t('readingPrompt') : t('generating'), null);

@@ -22,8 +22,9 @@ export function initSettings(h) {
   }
 }
 
-export async function openSettings() {
+export async function openSettings(tab) {
   await render();
+  if (tab) document.querySelector(`.tabs [data-tab="${tab}"]`)?.click();
   const dlg = $('settings');
   if (!dlg.open) dlg.showModal();
 }
@@ -34,11 +35,16 @@ async function render() {
   renderModels(st); renderPerformance(st);
 }
 
+const fmtSpeed = (b) => `${(b / 1e6).toFixed(1)} MB/s`;
+const fmtEta = (s) => (s == null || !isFinite(s) ? '' : s > 3600 ? `${Math.round(s / 3600)} t` : s > 60 ? `${Math.round(s / 60)} min` : `${Math.round(s)} s`);
+let lastCatalog = null;
+
 function renderModels(st) {
   const box = $('tab-models'); box.textContent = '';
-  if (st.models.length === 0) { box.append(el('p', 'notice', `${t('noModelTitle')}. ${t('noModelText')}`)); return; }
+  const installed = el('div'); box.append(installed);
+  if (st.models.length === 0) installed.append(el('p', 'notice', `${t('noModelTitle')}. ${t('noModelText')}`));
   for (const m of st.models) {
-    const row = el('div', 'model-row');
+    const r = el('div', 'model-row');
     const top = el('div', 'top');
     const name = el('input'); name.type = 'text'; name.value = m.displayName; name.setAttribute('aria-label', t('displayName')); name.maxLength = 80;
     name.addEventListener('change', async () => { await call('update_model_settings', { filename: m.filename, display_name: name.value }); await hooks.refreshState(); });
@@ -49,11 +55,77 @@ function renderModels(st) {
     const sub = el('div', 'sub', m.supported
       ? `${m.filename} · ${fmtBytes(m.sizeBytes)} · ${m.quant} · ${t('ramNeeded')} ${m.ramNeed ? fmtBytes(m.ramNeed) : '?'}`
       : `${m.filename} · ${fmtBytes(m.sizeBytes)}`);
-    row.append(top, sub);
-    if (!m.supported) row.append(el('div', 'sub badge-bad', `${t('unsupportedModel')}: ${m.reason ?? ''}`));
-    box.append(row);
+    r.append(top, sub);
+    if (!m.supported) r.append(el('div', 'sub badge-bad', `${t('unsupportedModel')}: ${m.reason ?? ''}`));
+    const tools = el('div', 'model-tools');
+    if (m.supported) {
+      const kv = el('select'); kv.title = t('kvHint'); kv.setAttribute('aria-label', t('kvPrecision'));
+      for (const v of ['f16', 'f32']) { const o = el('option', '', `${t('kvPrecision')} ${v}`); o.value = v; o.selected = v === m.kv; kv.append(o); }
+      kv.addEventListener('change', async () => { await call('update_model_settings', { filename: m.filename, kv: kv.value }); await hooks.refreshState(); await render(); });
+      tools.append(kv);
+    }
+    const del = el('button', 'btn', t('deleteModel')); del.type = 'button';
+    let armed = null;
+    del.addEventListener('click', async () => {
+      if (!armed) { del.textContent = t('confirmDeleteModel'); del.classList.add('danger'); armed = setTimeout(() => { armed = null; del.textContent = t('deleteModel'); del.classList.remove('danger'); }, 3000); return; }
+      clearTimeout(armed); await call('delete_model', { filename: m.filename }); await hooks.refreshState(); await render();
+    });
+    tools.append(del);
+    r.append(tools);
+    installed.append(r);
   }
   box.append(el('p', 'hint', `${t('freeRam')}: ${fmtBytes(st.system.freeRam)} / ${fmtBytes(st.system.totalRam)}`));
+  const dl = el('div', 'downloads'); dl.id = 'dl-box'; box.append(dl);
+  call('catalog').then((c) => { lastCatalog = c; renderDownloads(c); });
+}
+
+/** (Re)draw the download list from a catalog answer; `status` events only change the progress parts. */
+function renderDownloads(cat) {
+  const box = $('dl-box'); if (!box) return;
+  box.textContent = '';
+  box.append(el('h3', '', t('downloads')), el('p', 'hint', `${t('downloadsHint')} ${cat.freeDisk != null ? `${t('freeDisk')}: ${fmtBytes(cat.freeDisk)}.` : ''}`));
+  const stat = cat.status;
+  for (const e of cat.entries) {
+    const r = el('div', 'model-row');
+    const top = el('div', 'top');
+    const nm = el('div', 'dl-name'); nm.append(el('strong', '', e.displayName));
+    if (e.recommended) nm.append(el('span', 'tag', t('recommended')));
+    top.append(nm);
+    const isCur = stat.current?.id === e.id; const queued = stat.queue.includes(e.id);
+    const act = el('button', 'btn', ''); act.type = 'button';
+    if (e.installed) { act.textContent = t('installed'); act.disabled = true; }
+    else if (isCur || queued) { act.textContent = t('cancelDownload'); act.addEventListener('click', () => call('download_cancel')); }
+    else { act.textContent = e.partialBytes > 0 ? t('resume') : t('download'); act.classList.add('primary'); act.disabled = !e.fits; act.addEventListener('click', () => call('download_start', { ids: [e.id] })); }
+    top.append(act);
+    r.append(top);
+    r.append(el('div', 'sub', `${fmtBytes(e.sizeBytes)} · ${t('ramNeeded')} ~${e.ramGB} GB${e.fits ? '' : ` · ${t('tooBig')}`}`));
+    if (stat.failed[e.id]) r.append(el('div', 'sub badge-bad', `${t('downloadFailed')}: ${stat.failed[e.id]}`));
+    if (isCur) {
+      const c = stat.current; const bar = el('div', 'progress-bar wide'); const fill = el('div'); fill.id = 'dl-fill'; fill.style.width = `${c.total ? Math.round((c.received / c.total) * 100) : 0}%`; bar.append(fill);
+      const info = el('div', 'sub'); info.id = 'dl-info'; info.textContent = progressText(c);
+      r.append(bar, info);
+    } else if (queued) r.append(el('div', 'sub', t('queued')));
+    else if (!e.installed && e.partialBytes > 0) r.append(el('div', 'sub', `${fmtBytes(e.partialBytes)} / ${fmtBytes(e.sizeBytes)}`));
+    box.append(r);
+  }
+}
+const progressText = (c) => `${c.state === 'retrying' ? t('retrying') : fmtBytes(c.received)} / ${fmtBytes(c.total)}${c.speed ? ` · ${fmtSpeed(c.speed)}` : ''}${c.eta ? ` · ${t('remaining', { n: fmtEta(c.eta) })}` : ''}`;
+
+/** Called for every `download` server event. Returns true when a download just finished (the model list changed). */
+export function onDownloadEvent(status) {
+  if (!lastCatalog) return false;
+  const before = lastCatalog.status;
+  const finished = status.completed.length > before.completed.length;
+  lastCatalog.status = status;
+  if (finished && $('settings').open) render();
+  const structural = finished || status.current?.id !== before.current?.id || status.queue.length !== before.queue.length || JSON.stringify(status.failed) !== JSON.stringify(before.failed);
+  if (structural) call('catalog').then((c) => { lastCatalog = c; renderDownloads(c); });
+  else if (status.current) {
+    const fill = document.getElementById('dl-fill'); const info = document.getElementById('dl-info');
+    if (fill && status.current.total) fill.style.width = `${Math.round((status.current.received / status.current.total) * 100)}%`;
+    if (info) info.textContent = progressText(status.current);
+  }
+  return finished;
 }
 
 function row(label, hint, control) {

@@ -22,7 +22,7 @@ export class EngineHost {
       const full = modelPath(this.paths, filename);
       this.log.info(`loading model ${filename} (ctx ${cfg.context_window}, threads ${cfg.n_threads})`);
       const t0 = performance.now();
-      const engine = await loadModel(full, { ctx: cfg.context_window, threads: cfg.n_threads, kv: 'f16', onProgress });
+      const engine = await loadModel(full, { ctx: cfg.context_window, threads: cfg.n_threads, kv: cfg.models?.[filename]?.kv === 'f32' ? 'f32' : 'f16', onProgress });
       this.engine = engine; this.filename = filename;
       this.log.info(`model ready: ${filename} in ${((performance.now() - t0) / 1000).toFixed(1)}s (${engine.info.kernels}, ctx ${engine.ctx}, RAM free ${(os.freemem() / 1e9).toFixed(1)} GB)`);
       return engine;
