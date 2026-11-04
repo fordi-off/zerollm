@@ -40,6 +40,8 @@ export class RefModel {
     } finally { fs.closeSync(fd); }
 
     this.cache = new KVCache(cfg, this.ctx);
+    /** token ids currently represented in the KV cache */
+    this.tokens = [];
     this.rope = ropeTables(cfg, this.ctx, this.ropeFreqs);
     const qDim = cfg.nHead * cfg.headDim; const kvDim = cfg.nHeadKv * cfg.headDim;
     this.x = new Float32Array(cfg.nEmbd);
@@ -63,10 +65,10 @@ export class RefModel {
   get pos() { return this.cache.length; }
 
   /** Forget everything (start a new conversation). */
-  reset() { this.cache.reset(); }
+  reset() { this.cache.reset(); this.tokens.length = 0; }
 
   /** Roll the cache back to `n` positions (e.g. to reuse a shared prefix). */
-  truncate(n) { if (n < this.cache.length) this.cache.length = n; }
+  truncate(n) { if (n < this.cache.length) { this.cache.length = n; this.tokens.length = n; } }
 
   /**
    * Run one token at position `pos` (must equal the current cache length for append-style use).
@@ -133,6 +135,7 @@ export class RefModel {
       for (let i = 0; i < nEmbd; i++) x[i] += proj[i];
     }
     cache.length = pos + 1;
+    this.tokens.push(token);
     if (opts.logits === false) return null;
     rmsnorm(xb, x, this.outputNorm, rmsEps);
     matvec(this.output, new Act(xb), this.logits);
