@@ -141,7 +141,7 @@ Suggested order of attention: A0 -> A1 (earliest real value, validates the whole
 
 ## 9. Risks and open decisions
 
-1. **NB Llama 8B quality in zerollm** (test pending): if the Norwegian is not good enough, the whole premise changes; first real check.
+1. **NB Llama 8B quality in zerollm**: first real check passed (correct, fluent one-sentence Norwegian answer, instruction followed; see BENCHMARKS.md); keep testing longer and harder Norwegian prompts as the app takes shape.
 2. **Prefill speed for document questions** (see section 6): may force "small model for documents" as a product decision.
 3. **Qwen3.5 / embeddings**: unknown engine effort; the plan deliberately does not depend on them.
 4. **Edge `--app` window on the managed machine**: if blocked, the app falls back to the default browser tab (same server), only the chrome differs.
