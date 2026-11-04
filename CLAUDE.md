@@ -9,4 +9,4 @@ Hard rules (details in the brief):
 - Work milestone by milestone (brief section 20); commit after each; log choices in `docs/DECISIONS.md`, numbers in `docs/BENCHMARKS.md`.
 - Never claim speeds without measuring.
 
-Commands: `npm test` (= `node --test test/`), `node bin/zerollm.js doctor|info|...`.
+Commands: `npm test` (= `node --test`), `node bin/zerollm.js doctor|info|...`.
