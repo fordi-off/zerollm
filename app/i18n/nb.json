@@ -58,5 +58,13 @@
   "language": "Språk",
   "openFromShortcut": "Kunne ikke koble til. Start appen på nytt med snarveien.",
   "sidebarToggle": "Vis/skjul sidepanel",
-  "scrollDown": "Til bunnen"
+  "scrollDown": "Til bunnen",
+  "noChats": "Ingen samtaler ennå",
+  "rename": "Gi nytt navn",
+  "deleteChat": "Slett samtalen",
+  "confirmDelete": "Slett?",
+  "editResend": "Send på nytt",
+  "cancel": "Avbryt",
+  "editWarn": "Svarene etter denne meldingen slettes.",
+  "chatNotFound": "Fant ikke samtalen"
 }

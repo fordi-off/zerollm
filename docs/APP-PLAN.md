@@ -117,7 +117,8 @@ Why BM25 first: it needs no model, no extra RAM, works on the locked-down machin
 
 ## 7. Milestones
 
-**Status (2026-11-04):** A0 done. A1 built and tested against the synthetic model (server, API, streaming chat, stop/continue/regenerate, context meter, prefill progress, settings, light/dark, phone width); what is still open for A1 is the manual check on the laptop with the NB Llama 8B (`docs/APP-CHECKS.md`). Math (KaTeX) is deferred. Chats live only in the page until A2. Start with `npm run app` (or `node app/main.js --data <folder>`).
+**Status (2026-11-04):** A0 done. A1 built and tested against the synthetic model (server, API, streaming chat, stop/continue/regenerate, context meter, prefill progress, settings, light/dark, phone width); what is still open for A1 is the manual check on the laptop with the NB Llama 8B (`docs/APP-CHECKS.md`). Math (KaTeX) is deferred.
+**A2 built (2026-11-04):** chats auto-save after every reply in Skibeti37's file format (system message first, extras and `attached_docs` preserved, epoch-second `updated_at`), sidebar list grouped by today/yesterday/earlier, open, rename, two-click delete (also removes the summary cache), edit-and-resend with a warning when later replies will be removed, switching chats stops a running reply first. Tested with a Skibeti37-style file and a scripted browser flow (`tools/ui-smoke.mjs`); still to check by hand: opening a chat file written by the real Python app. Start with `npm run app` (or `node app/main.js --data <folder>`).
 
 Every milestone leaves the app runnable and tested. S/M/L = relative size.
 
