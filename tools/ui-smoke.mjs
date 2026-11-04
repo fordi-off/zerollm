@@ -43,7 +43,7 @@ try {
   const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
   const page = await ctx.newPage();
   page.on('pageerror', (e) => errors.push(`flow: ${e.message}`));
-  page.on('console', (m) => { if (m.type() === 'error') errors.push(`flow: ${m.text()}`); });
+  page.on('console', (m) => { if (m.type() === 'error' && !/status of 500/.test(m.text())) errors.push(`flow: ${m.text()}`); }); // 500 = the expected rejection of an invalid skill
   await page.goto(flowApp.app.url); await page.waitForSelector('#model-name');
   const send = async (text) => { const n = await page.locator('.msg.assistant .meta').count(); await page.fill('#input', text); await page.press('#input', 'Enter'); await page.waitForFunction((k) => document.querySelectorAll('.msg.assistant .meta').length > k, n, { timeout: 30000 }); };
   await send('Første spørsmål om kommuner');
@@ -80,10 +80,33 @@ try {
   await page.click('.editor .btn.primary');
   await page.waitForFunction(() => document.querySelectorAll('.msg').length === 2 && document.querySelectorAll('.msg.assistant .meta').length >= 1, null, { timeout: 30000 });
   check((await page.locator('.msg.user .bubble').first().textContent()) === 'Redigert spørsmål', 'edited text shown, later messages removed');
+  // slash commands: menu, Tab to pick, chip on the sent message, saved with the chat
+  await page.click('#btn-new');
+  await page.fill('#input', '/hum'); await page.locator('#input').press('End');
+  await page.dispatchEvent('#input', 'input');
+  await page.waitForSelector('#cmd-menu:not([hidden]) .cmd-row');
+  await page.screenshot({ path: path.join(out, 'flow-4-slash-menu.png') });
+  await page.press('#input', 'Tab');
+  check((await page.inputValue('#input')) === '/humanize ', 'Tab completes the command');
+  await page.press('#input', 'End'); await page.keyboard.type('Skriv kort om kommuner');
+  const before = await page.locator('.msg.assistant .meta').count();
+  await page.press('#input', 'Enter');
+  await page.waitForSelector('.msg.user .cmd-chip');
+  check((await page.locator('.msg.user .bubble').first().textContent()) === 'Skriv kort om kommuner', 'command is not part of the message text');
+  check((await page.locator('.cmd-chip').first().textContent()) === '/humanize', 'command chip shown');
+  await page.waitForFunction((k) => document.querySelectorAll('.msg.assistant .meta').length > k, before, { timeout: 30000 });
+  // settings: add a skill, error for a bad one
+  await page.click('#btn-settings'); await page.click('.tabs [data-tab="skills"]');
+  await page.fill('.skill-form input', 'Test'); await page.fill('.skill-form textarea', 'bare tekst'); await page.click('.skill-form button[type=submit]');
+  await page.waitForSelector('.form-error:not([hidden])');
+  await page.fill('.skill-form textarea', '## /test  Prøve\nGjør noe lurt.'); await page.click('.skill-form button[type=submit]');
+  await page.waitForSelector('.skill-box:has-text("/test")');
+  await page.screenshot({ path: path.join(out, 'flow-5-skills.png') });
+  await page.keyboard.press('Escape');
   // delete (two clicks)
   const row = page.locator('.chat-row', { hasText: 'Omdøpt' }); await row.hover();
   await row.locator('.chat-act').nth(1).click(); await row.locator('.chat-act.armed').click();
-  await page.waitForFunction(() => document.querySelectorAll('.chat-row').length === 1, null, { timeout: 5000 }).catch(async () => { await page.screenshot({ path: path.join(out, 'flow-fail-delete.png') }); errors.push(`CHECK FAILED: delete (rows: ${await page.locator('.chat-row').count()}, armed: ${await page.locator('.chat-act.armed').count()})`); });
+  await page.waitForFunction(() => document.querySelectorAll('.chat-row').length === 2, null, { timeout: 5000 }).catch(async () => { await page.screenshot({ path: path.join(out, 'flow-fail-delete.png') }); errors.push(`CHECK FAILED: delete (rows: ${await page.locator('.chat-row').count()}, armed: ${await page.locator('.chat-act.armed').count()})`); });
   await page.screenshot({ path: path.join(out, 'flow-3-after-delete.png') });
   await ctx.close(); await flowApp.close();
 

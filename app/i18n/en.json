@@ -85,5 +85,16 @@
   "noModelAction": "Download a model",
   "remaining": "{n} left",
   "downloadingNow": "Downloading…",
-  "downloadsHint": "Files are downloaded into the \"models\" folder. You can also put a .gguf file there yourself."
+  "downloadsHint": "Files are downloaded into the \"models\" folder. You can also put a .gguf file there yourself.",
+  "skillsTab": "Commands",
+  "skillsHint": "Each file in the \"skills\" folder can define several /commands. Type /name at the start of a message to use it for that one reply.",
+  "addSkill": "Add a command",
+  "skillName": "Name",
+  "skillContent": "## /name  Short description\nThe instruction the model should follow …",
+  "saveSkill": "Save",
+  "deleteSkill": "Delete",
+  "noCommands": "No commands. Add one in Settings.",
+  "writeAfterCommand": "Write a message after the command.",
+  "commandsMenu": "Commands",
+  "skillAdded": "Command added"
 }

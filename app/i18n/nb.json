@@ -85,5 +85,16 @@
   "noModelAction": "Last ned en modell",
   "remaining": "{n} igjen",
   "downloadingNow": "Laster ned…",
-  "downloadsHint": "Filene lastes ned til mappen «models». Du kan også legge en .gguf-fil der selv."
+  "downloadsHint": "Filene lastes ned til mappen «models». Du kan også legge en .gguf-fil der selv.",
+  "skillsTab": "Kommandoer",
+  "skillsHint": "Hver fil i mappen «skills» kan definere flere /kommandoer. Skriv /navn først i en melding for å bruke den på ett svar.",
+  "addSkill": "Legg til kommando",
+  "skillName": "Navn",
+  "skillContent": "## /navn  Kort beskrivelse\nInstruksjonen modellen skal følge …",
+  "saveSkill": "Lagre",
+  "deleteSkill": "Slett",
+  "noCommands": "Ingen kommandoer. Legg til en under Innstillinger.",
+  "writeAfterCommand": "Skriv en melding etter kommandoen.",
+  "commandsMenu": "Kommandoer",
+  "skillAdded": "Kommando lagt til"
 }
