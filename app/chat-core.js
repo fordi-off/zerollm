@@ -1,11 +1,15 @@
 // Prompt building and generation safeguards, ported from Skibeti37 (chats.py / generation.py / state.js).
 
+// Kept SHORT on purpose: small models (1B-8B) latch onto every topic the system prompt mentions - a sentence about math made
+// Llama 3.2 1B answer "hei" with a LaTeX exercise - and every token of it costs prefill time.
 export const SYSTEM_PROMPT =
   "You are a helpful assistant. Reply in the same language as the user's most recent message, and keep the whole reply " +
-  'in that one language - never switch or mix languages partway through. If the user changes language, follow them from ' +
-  'their next message on. Keep code, direct quotes and proper names in their original form. Match the user\'s tone, and ' +
-  'think step by step when a question needs it. The chat renders Markdown plus math: use \\( \\) for inline formulas and ' +
-  '\\[ \\] or $$ $$ for standalone ones; never use a bare single $ for math, since that reads as currency.';
+  'in that one language. Keep code, direct quotes and proper names in their original form. Match the user\'s tone.';
+
+/** Only when the user is actually asking something mathematical: how to write formulas (the page renders them with KaTeX). */
+export const MATH_HINT = 'When you write formulas, use \\( \\) for inline math and \\[ \\] for standalone formulas; never use a bare single $ for math, since that reads as currency.';
+const MATHY = /\\(frac|sum|int|sqrt)|\d\s*[-+*/^=]\s*\d|\b(ligning\w*|formel|formler|integral\w*|deriver\w*|derivert|matematikk\w*|regn(e|er|ut)?|beregn\w*|likning\w*|equation|formula|calculate|solve|derivative|algebra|geometri\w*|sannsynlighet|probability|proof|bevis)\b/i;
+export const looksMathy = (text) => MATHY.test(String(text ?? ''));
 
 export const CONTINUATION_PROMPT =
   'Continue your previous answer exactly where you left off. Do not repeat anything you have already written, and do not ' +
@@ -48,6 +52,7 @@ export function buildMessages(history, { extraSystem = '' } = {}) {
   const lastUser = [...history].reverse().find((m) => m.role === 'user');
   let system = SYSTEM_PROMPT;
   if (extraSystem) system += `\n\n${extraSystem}`;
+  if (looksMathy(lastUser?.content)) system += `\n\n${MATH_HINT}`;
   system += `\n\n${languageDirective(lastUser?.content ?? '')}`;
   return [{ role: 'system', content: system }, ...history.map(({ role, content }) => ({ role, content }))];
 }
