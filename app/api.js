@@ -99,6 +99,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
       }
       const fitted = fitToContext(build(), count, ctxMax, DEFAULT_MAX_TOKENS);
       const contextUsed = engine.countPromptTokens(fitted.messages);
+      if (process.env.ZEROCHAT_DEBUG_PROMPT === '1') log.info(`PROMPT (${contextUsed} tokens):\n${engine.tok.decode(engine.promptIds(fitted.messages), { skipControl: false })}`);
       log.info(`generating: ${model} | ${contextUsed}/${ctxMax} ctx tokens${fitted.trimmed ? ' | prompt trimmed to fit' : ''}`);
 
       // A freshly loaded model has read nothing yet: restore the system prompt's state from disk (or read it once and save it).
@@ -115,7 +116,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
       const stats = {};
       let answer = ''; let checkedAt = 0; let looped = false; let first = true;
       const gen = engine.generate({
-        messages: fitted.messages, maxTokens: DEFAULT_MAX_TOKENS, sampling: SAMPLING, signal: abort, stats,
+        messages: fitted.messages, maxTokens: DEFAULT_MAX_TOKENS, sampling: SAMPLING, signal: abort, stats, penalizePrompt: false,
         onPrefill: (done, total) => send('progress', { done, total }),
       });
       for await (const text of gen) {

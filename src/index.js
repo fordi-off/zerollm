@@ -167,6 +167,7 @@ export class Engine extends PromptTools {
    * @param {import('./sampling/sampler.js').SamplerOptions} [o.sampling]
    * @param {string[]} [o.stop]                                      stop strings (not included in the output)
    * @param {{aborted: boolean}|AbortSignal} [o.signal]
+   * @param {boolean} [o.penalizePrompt]                             false: repetition penalties ignore prompt tokens (default true)
    * @param {object} [o.stats]                                       filled with promptTokens, cachedTokens, prefillMs, decodeMs, generated, stopReason
    * @param {(done: number, total: number) => void} [o.onPrefill]    prompt-reading progress
    * @returns {AsyncGenerator<string>} text chunks
@@ -183,7 +184,7 @@ export class Engine extends PromptTools {
     const filter = new StopFilter(o.stop ?? []);
     const dec = this.tok.streamDecoder();
     const gen = generateTokens(this.model, ids, {
-      maxTokens: o.maxTokens ?? 512, sample, stopIds: this.stopIds, signal, stats, onPrefillProgress: o.onPrefill,
+      maxTokens: o.maxTokens ?? 512, sample, stopIds: this.stopIds, signal, stats, onPrefillProgress: o.onPrefill, penalizePrompt: o.penalizePrompt,
     });
     for await (const id of gen) {
       const text = filter.push(dec.push(id));
