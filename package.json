@@ -1,0 +1,14 @@
+{
+  "name": "zerollm",
+  "version": "0.0.1",
+  "description": "Zero-dependency, pure-code local LLM inference engine in Node.js (GGUF, WebAssembly SIMD, worker threads).",
+  "type": "module",
+  "license": "MIT",
+  "private": true,
+  "bin": { "zerollm": "bin/zerollm.js" },
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node --test test/",
+    "doctor": "node bin/zerollm.js doctor"
+  }
+}
