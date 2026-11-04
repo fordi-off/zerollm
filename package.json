@@ -8,7 +8,7 @@
   "bin": { "zerollm": "bin/zerollm.js" },
   "engines": { "node": ">=22" },
   "scripts": {
-    "test": "node --test test/",
+    "test": "node --test",
     "doctor": "node bin/zerollm.js doctor"
   }
 }
