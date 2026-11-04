@@ -21,3 +21,11 @@ Run `npm run app -- --data <folder containing models/>` (or `node app/main.js`).
 - [ ] Edit a user message ("Rediger"): the later replies are removed and a new reply is generated.
 - [ ] Clicking another chat or "Ny samtale" while a reply is being written stops it first, and the partial reply is saved.
 - [ ] Shared folder with Skibeti37: copy a few of its `chats/*.json` into this data folder - they show up and open; a chat saved here still opens in Skibeti37.
+
+## A3 - models and downloads
+- [ ] In an empty data folder the first-run card appears; "Last ned en modell" opens Settings with the catalog.
+- [ ] Download the smallest model (Llama 3.2 1B): progress, speed and ETA move; when finished it is selectable and chats. **Note the download speed** (and compare with a browser download of the same file) - if much slower, tell me (Node vs curl TLS throttling).
+- [ ] Cancel in the middle, then "Fortsett nedlasting" continues from the same byte count.
+- [ ] Unplug the network for a few seconds during a download: it retries and continues.
+- [ ] All catalog URLs work (each shows a size close to the listed one); report any 404.
+- [ ] KV f32/f16 selector changes the RAM estimate; delete model asks for confirmation and removes the file.

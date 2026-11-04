@@ -33,11 +33,12 @@ export function listModels(paths, cfg, opts = {}) {
     let info = cache.get(key);
     if (!info) { info = inspectModel(full); cache.set(key, info); }
     const mcfg = cfg.models?.[filename] ?? {};
-    const est = info.supported ? estimateModelRam(info, { ctx, threads, kv: 'f16' }) : null;
+    const est = info.supported ? estimateModelRam(info, { ctx, threads, kv: mcfg.kv === 'f32' ? 'f32' : 'f16' }) : null;
     out.push({
       filename,
       displayName: mcfg.display_name || humanizeFilename(filename),
       active: mcfg.active !== false,
+      kv: mcfg.kv === 'f32' ? 'f32' : 'f16',
       sizeBytes: st.size,
       supported: info.supported,
       reason: info.reason,

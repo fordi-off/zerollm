@@ -2,7 +2,9 @@
 // and save screenshots. Usage: node tools/ui-smoke.mjs [outDir]
 import fs from 'node:fs';
 import path from 'node:path';
+import http from 'node:http';
 import { createRequire } from 'node:module';
+import { makeTinyModel } from '../tools/make-tiny-gguf.js';
 import { startTestApp } from '../test/app/helpers.js';
 
 const require = createRequire(import.meta.url);
@@ -53,6 +55,7 @@ try {
   // new chat, then a second chat
   await page.click('#btn-new'); check(await page.locator('.msg').count() === 0, 'new chat is empty');
   await send('Helt annen samtale');
+  await page.waitForFunction(() => document.querySelectorAll('.chat-row').length === 2, null, { timeout: 5000 }).catch(() => {});
   check(await page.locator('.chat-row').count() === 2, 'two chats listed');
   await page.screenshot({ path: path.join(out, 'flow-1-two-chats.png') });
   // open the older chat
@@ -83,6 +86,34 @@ try {
   await page.waitForFunction(() => document.querySelectorAll('.chat-row').length === 1, null, { timeout: 5000 }).catch(async () => { await page.screenshot({ path: path.join(out, 'flow-fail-delete.png') }); errors.push(`CHECK FAILED: delete (rows: ${await page.locator('.chat-row').count()}, armed: ${await page.locator('.chat-act.armed').count()})`); });
   await page.screenshot({ path: path.join(out, 'flow-3-after-delete.png') });
   await ctx.close(); await flowApp.close();
+
+  // ---- first run: no model -> download card -> download -> chat
+  const body = makeTinyModel({ arch: 'llama', quant: 'q8_0', seed: 3, ctx: 512 }).buffer;
+  const fileServer = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Length': body.length }); let pos = 0;
+    const step = () => { if (res.destroyed) return; if (pos >= body.length) return res.end(); res.write(body.subarray(pos, pos + 8192)); pos += 8192; setTimeout(step, 30); };
+    step();
+  });
+  await new Promise((r) => fileServer.listen(0, '127.0.0.1', r));
+  const dlApp = await startTestApp({ models: [], catalog: [{ id: 'tiny', filename: 'tiny-dl.gguf', displayName: 'Liten testmodell', sizeBytes: body.length, ramGB: 0.1, recommended: true, url: `http://127.0.0.1:${fileServer.address().port}/x.gguf` }] });
+  {
+    const c2 = await browser.newContext({ viewport: { width: 1200, height: 800 } }); const pg = await c2.newPage();
+    pg.on('pageerror', (e) => errors.push(`download: ${e.message}`)); pg.on('console', (m) => { if (m.type() === 'error') errors.push(`download: ${m.text()}`); });
+    await pg.goto(dlApp.app.url); await pg.waitForSelector('#no-model:not([hidden])');
+    await pg.screenshot({ path: path.join(out, 'dl-1-first-run.png') });
+    await pg.click('#no-model .btn'); await pg.waitForSelector('#dl-box .model-row');
+    await pg.click('#dl-box .btn.primary');
+    await pg.waitForSelector('#dl-fill', { timeout: 5000 }).catch(() => errors.push('CHECK FAILED: no progress bar while downloading'));
+    await pg.screenshot({ path: path.join(out, 'dl-2-progress.png') });
+    await pg.waitForSelector('#dl-box .btn:text("Installert")', { timeout: 30000 });
+    await pg.screenshot({ path: path.join(out, 'dl-3-installed.png') });
+    await pg.keyboard.press('Escape');
+    await pg.waitForFunction(() => document.getElementById('model-name').textContent.includes('Tiny dl') || document.getElementById('model-name').textContent.length > 0);
+    check(await pg.locator('#no-model').isHidden(), 'first-run card disappears once a model is installed');
+    check((await pg.textContent('#model-name')).toLowerCase().includes('tiny'), 'the downloaded model is selected');
+    await c2.close();
+  }
+  await dlApp.close(); fileServer.close();
 } finally { await browser.close(); await t.close(); }
 console.log(errors.length ? `console errors:\n${errors.join('\n')}` : 'no console errors');
 console.log(`screenshots in ${out}`);

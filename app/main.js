@@ -18,7 +18,7 @@ import { createAppServer } from './server.js';
 const here = path.dirname(fileURLToPath(import.meta.url));
 
 /** Start everything. Returns handles (used by the tests and by main()). */
-export async function startApp({ dataDir, port = 0, quiet = false } = {}) {
+export async function startApp({ dataDir, port = 0, quiet = false, catalog, retryDelayMs } = {}) {
   const paths = resolvePaths(dataDir ?? process.cwd());
   ensureDirs(paths);
   const log = createLogger(paths, { quiet });
@@ -30,7 +30,7 @@ export async function startApp({ dataDir, port = 0, quiet = false } = {}) {
   const host = new EngineHost({ paths, getConfig, log });
   const holder = {};
   const emit = (type, data) => holder.server?.emit(type, data);
-  const api = createApi({ paths, host, getConfig, setConfig, log, emit });
+  const api = createApi({ paths, host, getConfig, setConfig, log, emit, catalog, retryDelayMs });
   const app = createAppServer({ token, methods: api.methods, publicDir: path.join(here, 'public'), log });
   holder.server = app;
   const actualPort = await app.listen(port);
