@@ -19,6 +19,7 @@ export function resolvePaths(root) {
     configPath: path.join(abs, 'config.json'),
     logPath: path.join(abs, 'app.log'),
     lockPath: path.join(abs, 'app.lock'),
+    cacheDir: path.join(abs, 'cache'),
   };
 }
 

@@ -16,7 +16,7 @@ import { Tokenizer } from './tokenizer/bpe.js';
 import { detectTemplate, encodeChat, stopTokenIds } from './tokenizer/chat-templates.js';
 import { createSampler } from './sampling/sampler.js';
 import { StopFilter } from './sampling/stop.js';
-import { generate as generateTokens } from './model/generate.js';
+import { generate as generateTokens, prefillTokens } from './model/generate.js';
 import { PoolModel } from './compute/pool.js';
 import { PrefixCache, modelFingerprint } from './model/prefix-cache.js';
 
@@ -195,6 +195,22 @@ export class Engine extends PromptTools {
       if (tail) yield tail;
     }
     if (stoppedByString && stats.stopReason === 'aborted') stats.stopReason = 'stop-string';
+  }
+
+  /**
+   * Make the model hold the KV state of `prefixIds` (typically the system prompt), from the on-disk cache when it has
+   * been computed before, otherwise by reading it once and saving it. Only acts on a fresh model (nothing cached yet).
+   * Returns 'hit' | 'saved' | 'unsaved' | 'off' (model not fresh / too short) | 'aborted'.
+   * @param {number[]} prefixIds  must be a prefix of the prompt that will be generated next
+   * @param {{dir: string, minTokens?: number, signal?: {aborted: boolean}, onProgress?: (done: number, total: number) => void}} o
+   */
+  async primePrefix(prefixIds, { dir, minTokens = 32, signal, onProgress } = {}) {
+    if (this.closed || this.model.pos !== 0 || prefixIds.length < minTokens || prefixIds.length >= this.ctx) return 'off';
+    const cache = new PrefixCache(dir, modelFingerprint(this.path, `${this.model.kernels === 'wasm' ? 'wasm' : 'js'}/kv-${this.model.kv ?? 'f32'}`));
+    if (await cache.load(this.model, prefixIds)) return 'hit';
+    const r = await prefillTokens(this.model, prefixIds, { wantLogits: false, signal, onProgress });
+    if (r.aborted) return 'aborted';
+    try { await cache.save(this.model, prefixIds); return 'saved'; } catch { return 'unsaved'; }
   }
 
   /** Forget the conversation held in the KV cache (the next prompt is processed from scratch). */
