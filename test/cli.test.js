@@ -95,7 +95,7 @@ test('prefix reuse: second turn only prefills the new tokens and matches a fresh
 test('streamReply never erases printed text with the progress-line escape (terminal regression)', async () => {
   const { loadEngine, streamReply } = await import('../src/cli/common.js');
   const { path: p } = tinyFile({ arch: 'qwen3', quant: 'q8_0', seed: 5 });
-  const eng = loadEngine(p, {});
+  const eng = await loadEngine(p, { threads: 2 });
   const events = [];
   const out = { write: (s) => events.push(['out', s]) };
   const err = { write: (s) => events.push(['err', s]) };
@@ -107,4 +107,5 @@ test('streamReply never erases printed text with the progress-line escape (termi
   assert.ok(events.slice(0, firstOut).some((e) => e[0] === 'err' && e[1].startsWith('\rprefill')), 'progress was shown');
   assert.ok(events.slice(0, firstOut).some((e) => e[0] === 'err' && e[1] === '\r\x1b[K'), 'progress erased before text');
   assert.ok(!events.slice(firstOut).some((e) => e[0] === 'err' && e[1].includes('\x1b[K')), 'nothing erased after text');
+  await eng.close();
 });

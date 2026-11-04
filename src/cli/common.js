@@ -3,6 +3,7 @@ import os from 'node:os';
 import { readGGUF } from '../gguf/reader.js';
 import { modelConfig, estimateRam } from '../model/config.js';
 import { RefModel } from '../model/forward.js';
+import { PoolModel } from '../compute/pool.js';
 import { generate } from '../model/generate.js';
 import { Tokenizer } from '../tokenizer/bpe.js';
 import { detectTemplate, stopTokenIds, TEMPLATE_KINDS } from '../tokenizer/chat-templates.js';
@@ -28,35 +29,58 @@ export function samplerFromFlags(flags) {
   });
 }
 
+/** Default worker count: a guess at physical cores (logical / 2), at least 1. */
+export function defaultThreads() { return Math.max(1, Math.floor((os.availableParallelism?.() ?? os.cpus().length) / 2)); }
+
+/** @param {Record<string, any>} flags */
+export function threadsFromFlags(flags) {
+  if (flags.threads === undefined || flags.threads === 'auto' || flags.threads === true) return defaultThreads();
+  const n = num(flags.threads, 1);
+  if (!Number.isInteger(n) || n < 1) throw new Error(`--threads must be a positive integer, got "${flags.threads}"`);
+  return n;
+}
+
+/** Progress printer for model loading (stderr, TTY only). */
+function loadProgress() {
+  if (!process.stderr.isTTY) return undefined;
+  let last = 0;
+  return (d, n) => { const now = Date.now(); if (now - last > 100 || d === n) { last = now; process.stderr.write(`\rloading ${Math.round((100 * d) / n)}%`); } };
+}
+
+/**
+ * Create the compute model: the single-thread reference path for 1 thread, the SPMD worker pool otherwise.
+ * @param {import('../gguf/reader.js').GGUFFile} g
+ */
+export async function createModel(g, { threads, ctx, spin, onProgress }) {
+  const model = threads > 1 ? await PoolModel.create(g, { ctx, workers: threads, spin, onProgress }) : new RefModel(g, { ctx, onProgress });
+  if (process.stderr.isTTY) process.stderr.write('\r\x1b[K');
+  return model;
+}
+
 /**
  * Load GGUF + tokenizer + model.
  * @param {string} modelPath
  * @param {Record<string, any>} flags
  */
-export function loadEngine(modelPath, flags) {
+export async function loadEngine(modelPath, flags) {
   if (!modelPath) throw new Error('missing model path (e.g. models/Qwen3-0.6B-Q8_0.gguf)');
-  if (flags.threads !== undefined && num(flags.threads, 1) !== 1) warn('--threads is ignored until the worker pool lands (M5); running single-threaded.');
   const t0 = performance.now();
   const g = readGGUF(modelPath);
   const cfg = modelConfig(g);
   const ctx = num(flags.ctx, 2048);
+  const threads = threadsFromFlags(flags);
   const est = estimateRam(g, cfg, { ctx });
   if (est.total > os.freemem() * 0.9) warn(`estimated RAM need ${formatBytes(est.total)} vs ${formatBytes(os.freemem())} free: close other apps or lower --ctx.`);
   const tok = Tokenizer.fromGGUF(g);
-  const show = process.stderr.isTTY;
-  let last = 0;
-  const model = new RefModel(g, {
-    ctx,
-    onProgress: show ? (d, n) => { const now = Date.now(); if (now - last > 100 || d === n) { last = now; process.stderr.write(`\rloading ${d}/${n} tensors`); } } : undefined,
-  });
-  if (show) process.stderr.write('\r\x1b[K');
+  const model = await createModel(g, { threads, ctx, spin: flags.spin === undefined ? undefined : num(flags.spin, 20000), onProgress: loadProgress() });
   let kind = typeof flags.template === 'string' ? flags.template : flags.raw ? 'raw' : detectTemplate(cfg.arch, g.get('tokenizer.chat_template'), tok);
-  if (!TEMPLATE_KINDS.includes(kind)) throw new Error(`unknown --template "${kind}" (use ${TEMPLATE_KINDS.join(', ')})`);
+  if (!TEMPLATE_KINDS.includes(kind)) { await model.close?.(); throw new Error(`unknown --template "${kind}" (use ${TEMPLATE_KINDS.join(', ')})`); }
   return {
-    g, cfg, tok, model, kind, ctx: model.ctx,
+    g, cfg, tok, model, kind, ctx: model.ctx, threads,
     jinja: g.get('tokenizer.chat_template'),
     stopIds: stopTokenIds(tok, kind),
     loadMs: performance.now() - t0,
+    close: async () => { await model.close?.(); },
   };
 }
 
