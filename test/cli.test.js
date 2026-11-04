@@ -59,7 +59,8 @@ test('chat: scripted session, /reset and /exit', () => {
   assert.equal((r.stderr.match(/generated 5 tok/g) ?? []).length, 2);
 });
 
-test('Ctrl+C (SIGINT) during generation stops cleanly with exit code 130 and stats', async () => {
+// Windows cannot deliver a catchable SIGINT via child.kill() (it terminates the process), so check Ctrl+C by hand there.
+test('Ctrl+C (SIGINT) during generation stops cleanly with exit code 130 and stats', { skip: process.platform === 'win32' && 'child.kill(SIGINT) kills the process on Windows' }, async () => {
   // bigger tiny model so generation is slow enough to interrupt
   const { path: p } = tinyFile({ arch: 'qwen3', quant: 'q8_0', nEmbd: 256, nLayer: 6, nFF: 512, ctx: 4096, seed: 3 });
   const child = spawn(process.execPath, [BIN, 'run', p, '-p', 'hi', '--n', '3000', '--ctx', '4096', '--temp', '0'], { stdio: ['ignore', 'pipe', 'pipe'] });
