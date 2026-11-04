@@ -28,16 +28,19 @@ export async function run(argv) {
   rl.on('SIGINT', () => {
     if (busy) { signal.aborted = true; } else { process.stdout.write('\n'); rl.close(); }
   });
-  rl.on('close', () => { if (!busy) process.exit(0); });
+  // stdin can end (piped input, Ctrl+D) while a reply is still streaming: finish the reply, then exit.
+  let closed = false;
+  rl.on('close', () => { closed = true; if (!busy) process.exit(0); });
+  const prompt = () => { if (!closed) rl.prompt(); };
 
-  rl.prompt();
+  prompt();
   for await (const line of rl) {
     const input = line.trim();
-    if (!input) { rl.prompt(); continue; }
+    if (!input) { prompt(); continue; }
     if (input === '/exit' || input === '/quit') break;
-    if (input === '/reset') { messages = []; eng.model.reset(); process.stdout.write('(conversation cleared)\n'); rl.prompt(); continue; }
-    if (input.startsWith('/system')) { system = input.slice(7).trim() || null; messages = []; eng.model.reset(); process.stdout.write('(system prompt set, conversation cleared)\n'); rl.prompt(); continue; }
-    if (input === '/think' || input === '/nothink') { think = input === '/think'; process.stdout.write(`(thinking ${think ? 'on' : 'off'})\n`); rl.prompt(); continue; }
+    if (input === '/reset') { messages = []; eng.model.reset(); process.stdout.write('(conversation cleared)\n'); prompt(); continue; }
+    if (input.startsWith('/system')) { system = input.slice(7).trim() || null; messages = []; eng.model.reset(); process.stdout.write('(system prompt set, conversation cleared)\n'); prompt(); continue; }
+    if (input === '/think' || input === '/nothink') { think = input === '/think'; process.stdout.write(`(thinking ${think ? 'on' : 'off'})\n`); prompt(); continue; }
 
     messages.push({ role: 'user', content: input });
     const convo = system ? [{ role: 'system', content: system }, ...messages] : messages;
@@ -55,7 +58,7 @@ export async function run(argv) {
       process.stderr.write(`error: ${e.message}\n`);
     }
     busy = false;
-    rl.prompt();
+    prompt();
   }
   rl.close();
   process.exit(0);
