@@ -17,3 +17,10 @@ Decisions already made in the brief are in `docs/BRIEF.md` section 3. This file 
 - Reference path uses a Q8_0-style activation quantization with **f32** scales (as in the brief); ggml itself uses f16 scales, so logits differ very slightly from llama.cpp.
 - Reference kernels support F32/F16/BF16/Q8_0/Q4_0 only; K-quants arrive in M8.
 - Tests use an independent naive whole-sequence forward pass (`test/naive-forward.js`, double precision, no KV cache) as the oracle for the optimized-style reference path. Mutation-checked: GQA mapping, attention scale, RoPE on K, QK-norm, SiLU, causal range and residual mistakes are all caught.
+
+## 2026-11-04 — M4
+- `generate()` is an async generator that yields to the event loop after every token **including during prefill**, so Ctrl+C is responsive even on long prompts (setImmediate cost is negligible vs ~0.5 s/token). It also reuses the longest common prefix between `model.tokens` and the new prompt (multi-turn chat only prefills the new turn), and always recomputes the last prompt token to obtain logits.
+- Sampler order: penalties (in place, restored afterwards) -> top-k (O(V log k) heap) -> temperature softmax -> min-p -> top-p -> sample. `--temp 0` is plain argmax (after penalties).
+- Stop strings are matched on the decoded text stream with hold-back of partial matches (`StopFilter`); the matched text is never printed.
+- In `chat`, readline owns Ctrl+C (raw mode), so the REPL listens to `rl.on('SIGINT')`; `run` uses `process.on('SIGINT')`. Second Ctrl+C force-exits (130).
+- `--threads` is accepted but ignored (with a warning) until M5.
