@@ -6,11 +6,6 @@ export const SYSTEM_PROMPT =
   "You are a helpful assistant. Reply in the same language as the user's most recent message, and keep the whole reply " +
   'in that one language. Keep code, direct quotes and proper names in their original form. Match the user\'s tone.';
 
-/** Only when the user is actually asking something mathematical: how to write formulas (the page renders them with KaTeX). */
-export const MATH_HINT = 'When you write formulas, use \\( \\) for inline math and \\[ \\] for standalone formulas; never use a bare single $ for math, since that reads as currency.';
-const MATHY = /\\(frac|sum|int|sqrt)|\d\s*[-+*/^=]\s*\d|\b(ligning\w*|formel|formler|integral\w*|deriver\w*|derivert|matematikk\w*|regn(e|er|ut)?|beregn\w*|likning\w*|equation|formula|calculate|solve|derivative|algebra|geometri\w*|sannsynlighet|probability|proof|bevis)\b/i;
-export const looksMathy = (text) => MATHY.test(String(text ?? ''));
-
 export const CONTINUATION_PROMPT =
   'Continue your previous answer exactly where you left off. Do not repeat anything you have already written, and do not ' +
   'write any introduction - continue straight on, in the very same language as the rest of your answer.';
@@ -19,42 +14,15 @@ export const CONTINUATION_PROMPT =
 export const SAMPLING = { temperature: 0.6, topP: 0.95, topK: 40, minP: 0.05, repeatPenalty: 1.18, repeatLastN: 320, frequencyPenalty: 0.1, presencePenalty: 0.3 };
 export const DEFAULT_MAX_TOKENS = 2000;
 
-// --- a small, dependency-free Norwegian/English sniff (small models drift, naming the language last keeps them steady)
-const NO_WORDS = new Set(['og', 'ikke', 'ikkje', 'jeg', 'det', 'er', 'som', 'på', 'en', 'et', 'ein', 'ei', 'å', 'har', 'kan', 'vil', 'hva', 'kva', 'hvorfor', 'hvordan', 'med', 'til', 'de', 'vi', 'du', 'meg', 'deg', 'være', 'blir', 'gjøre', 'hvis', 'eller', 'men', 'så', 'noen', 'noe', 'mye', 'mer', 'mest', 'veldig', 'bare', 'hele', 'takk', 'hei', 'kanskje', 'fordi', 'denne', 'dette', 'disse', 'slik', 'her', 'der', 'når', 'skal', 'må', 'om', 'av', 'at', 'den', 'ja', 'nei', 'mellom']);
-const EN_WORDS = new Set(['the', 'and', 'is', 'are', 'you', 'what', 'why', 'how', 'this', 'that', 'of', 'to', 'in', 'it', 'for', 'with', 'can', 'could', 'would', 'should', 'please', 'thanks', 'hey', 'hello', 'make', 'want', 'need', 'because', 'there', 'their', 'about', 'which', 'when', 'where', 'does', 'do', 'explain', 'write', 'tell', 'give', 'list', 'show', 'describe', 'compare', 'summarize', 'summarise', 'into', 'terms', 'between', 'difference', 'example', 'simple', 'help']);
-
-/** "Norwegian", "English", or null (unsure: let the model decide). */
-export function detectLanguage(text) {
-  if (!text) return null;
-  const low = text.toLowerCase();
-  const words = low.match(/[a-zà-ÿæøå]+/g) ?? [];
-  if (words.length < 2) return null;
-  let no = 0; let en = 0;
-  for (const w of words) { if (NO_WORDS.has(w)) no++; if (EN_WORDS.has(w)) en++; }
-  const hasNoChars = /[æøå]/.test(low);
-  if (hasNoChars && en === 0) return 'Norwegian';
-  if (no > en && (no >= 2 || hasNoChars)) return 'Norwegian';
-  if (en > no && en >= 2) return 'English';
-  if (hasNoChars && no >= en) return 'Norwegian';
-  return null;
-}
-
-export function languageDirective(lastUserText) {
-  const lang = detectLanguage(lastUserText);
-  if (lang) {
-    return `LANGUAGE: The user's latest message is written in ${lang}. Write your entire reply in ${lang} (from the first word to the last). Do not switch or mix languages partway through, and do not translate the user's own words back to them. Keep code, direct quotes and proper names in their original form.`;
-  }
-  return "LANGUAGE: Reply in the exact same language as the user's latest message (from the first word to the last). Do not switch or mix languages partway through. Keep code, direct quotes and proper names in their original form.";
-}
-
-/** The messages actually sent to the model: one system message (prompt + extras + language reminder LAST) + history. */
+/**
+ * The messages actually sent to the model: the system prompt (+ optional extra text) and the history. NOTHING in an earlier
+ * message may change from one turn to the next - the model keeps what it has already read (its KV cache) only for an unchanged
+ * prefix, so a changing language reminder or re-picked document excerpts would make it re-read the whole conversation.
+ * A user message that carries document context (`context`, stored with the message) renders it in front of the question.
+ */
 export function buildMessages(history, { extraSystem = '' } = {}) {
-  const lastUser = [...history].reverse().find((m) => m.role === 'user');
-  let system = SYSTEM_PROMPT;
-  if (extraSystem) system += `\n\n${extraSystem}`;
-  if (looksMathy(lastUser?.content)) system += `\n\n${MATH_HINT}`;
-  system += `\n\n${languageDirective(lastUser?.content ?? '')}`;
-  return [{ role: 'system', content: system }, ...history.map(({ role, content }) => ({ role, content }))];
+  const system = extraSystem ? `${SYSTEM_PROMPT}\n\n${extraSystem}` : SYSTEM_PROMPT;
+  return [{ role: 'system', content: system }, ...history.map((m) => ({ role: m.role, content: m.role === 'user' ? renderWithContext(m.content, m.context) : m.content }))];
 }
 
 const CUT = '\n\n[...forkortet for å passe kontekstvinduet...]';
@@ -98,17 +66,10 @@ export function looksLooped(text) {
 /** Length of the common leading run of two token arrays. */
 function commonLen(a, b) { let i = 0; const n = Math.min(a.length, b.length); while (i < n && a[i] === b[i]) i++; return i; }
 
-/**
- * Token ids at the start of every prompt this app builds (system prompt + the template header), whatever language the
- * user writes in: the common prefix of the prompts for a Norwegian, an English and an unrecognised message. These are
- * the tokens worth caching on disk.
- * @param {{promptIds: (m: any[]) => number[]}} tools
- */
+/** Token ids at the start of every prompt this app builds (system prompt + the template header): the part worth caching on disk. */
 export function stablePrefixIds(tools, { extraSystem = '' } = {}) {
-  const variants = ['Hei, hva skjer i dag?', 'Hello, what is going on today?', 'x'];
-  const all = variants.map((v) => tools.promptIds(buildMessages([{ role: 'user', content: v }], { extraSystem })));
-  const len = all.reduce((m, ids) => Math.min(m, commonLen(all[0], ids)), all[0].length);
-  return all[0].slice(0, len);
+  const all = ['x', 'yy zz'].map((v) => tools.promptIds(buildMessages([{ role: 'user', content: v }], { extraSystem })));
+  return all[0].slice(0, commonLen(all[0], all[1]));
 }
 
 // --- rolling summary of old messages (same wording and cache format as Skibeti37)
@@ -140,23 +101,20 @@ export function chunkForSummary(chunk, maxChars = 7000) {
   return passes;
 }
 
-// --- document excerpts. They go into the LAST user message (not the system prompt), so everything before them keeps
-// its cached KV state from turn to turn; only this message and the reply are read anew.
+// --- document context. It is stored WITH the user message it was retrieved for (`context`) and rendered in front of that message
+// for the rest of the conversation, so the prompt only ever grows at the end and the model never re-reads old turns. Chunks that
+// are already somewhere earlier in the conversation are not added again.
 export const RAG_PREFIX =
   "Answer the question using the documents below when they are relevant, in the language of the question. " +
   "If the answer is not in them, say so instead of guessing. Do not repeat or quote the documents at length.";
 
 const words = (text, n) => { const p = String(text).split(/\s+/); return p.slice(0, n).join(' ') + (p.length > n ? '...' : ''); };
 
-/** Prompt messages with the excerpts placed before the question in the final user message. */
-export function withExcerpts(messages, excerpts) {
-  if (!excerpts?.length) return messages;
-  const i = messages.map((m) => m.role).lastIndexOf('user');
-  if (i < 0) return messages;
-  const block = excerpts.map((e) => `<document name="${String(e.filename).replace(/"/g, "'")}">\n${e.text}\n</document>`).join('\n');
-  const out = messages.slice();
-  out[i] = { ...out[i], content: `${RAG_PREFIX}\n\n<documents>\n${block}\n</documents>\n\nQuestion: ${out[i].content}` };
-  return out;
+/** One user message with its stored document context in front of the question (unchanged text for messages without context). */
+export function renderWithContext(content, context) {
+  if (!context?.length) return content;
+  const block = context.map((e) => `<document name="${String(e.filename).replace(/"/g, "'")}">\n${e.text}\n</document>`).join('\n');
+  return `${RAG_PREFIX}\n\n<documents>\n${block}\n</documents>\n\nQuestion: ${content}`;
 }
 
 /** What the page shows under a reply: which excerpts it was based on. */

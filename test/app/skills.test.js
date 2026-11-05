@@ -63,11 +63,9 @@ test('commands on the last user message add their instruction to the system prom
   } finally { await t.close(); }
 });
 
-import { SYSTEM_PROMPT, MATH_HINT, buildMessages, looksMathy } from '../../app/chat-core.js';
-test('the system prompt stays free of topics (math made a 1B model answer "hei" with a LaTeX exercise); the math hint appears only for math questions', () => {
+import { SYSTEM_PROMPT, buildMessages } from '../../app/chat-core.js';
+test('the system prompt stays free of topics, and it is the same for every message (no per-message language or math reminders)', () => {
   assert.ok(!/math|formula|latex|\$/i.test(SYSTEM_PROMPT));
   const sys = (t) => buildMessages([{ role: 'user', content: t }])[0].content;
-  for (const t of ['hei', 'Hvem har ansvar for barnehager?', 'hva er den om', 'Skriv en e-post til sjefen']) { assert.equal(looksMathy(t), false, t); assert.ok(!sys(t).includes(MATH_HINT), t); }
-  for (const t of ['Hva er 2+3?', 'Regn ut arealet av en sirkel', 'solve x^2 = 4', 'Forklar ligningen \\frac{a}{b}']) { assert.equal(looksMathy(t), true, t); assert.ok(sys(t).includes(MATH_HINT), t); }
-  assert.ok(sys('Hva er 2+3?').indexOf(MATH_HINT) < sys('Hva er 2+3?').indexOf('LANGUAGE:'), 'the language reminder stays last');
+  for (const t of ['hei', 'Hva er 2+3?', 'Regn ut arealet av en sirkel', 'And who pays for it?', 'ok']) assert.equal(sys(t), SYSTEM_PROMPT, t);
 });

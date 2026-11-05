@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { startTestApp } from './helpers.js';
 import { bm25, chunkText, selectExcerpts, tokenize, stem } from '../../app/retrieval.js';
-import { withExcerpts, sourcesOf } from '../../app/chat-core.js';
+import { renderWithContext, buildMessages, sourcesOf } from '../../app/chat-core.js';
 
 const user = (content) => ({ role: 'user', content });
 const KOMMUNE = 'Kommunen har ansvar for skoler og barnehager. Kommunene finansieres blant annet gjennom skatt og overføringer fra staten. '.repeat(10);
@@ -33,13 +33,13 @@ test('chunkText overlaps, bm25 ranks the right chunk, selectExcerpts respects co
   assert.deepEqual(selectExcerpts(chunks, 'zxqv blorp', { k: 2 }), [], 'a question that matches nothing gets no excerpts');
 });
 
-test('withExcerpts puts excerpts before the question in the last user message only', () => {
-  const msgs = [{ role: 'system', content: 'S' }, user('første'), { role: 'assistant', content: 'a' }, user('spørsmål')];
-  const out = withExcerpts(msgs, [{ filename: 'f.txt', text: 'utdrag', score: 1 }]);
-  assert.equal(out[1].content, 'første');
-  assert.match(out[3].content, /<documents>\n<document name="f\.txt">\nutdrag\n<\/document>\n<\/documents>\n\nQuestion: spørsmål$/);
-  assert.match(out[3].content, /^Answer the question using the documents below/);
-  assert.equal(withExcerpts(msgs, []), msgs);
+test('a user message renders its stored document context in front of the question; other messages are untouched', () => {
+  const msgs = buildMessages([user('første'), { role: 'assistant', content: 'a' }, { role: 'user', content: 'spørsmål', context: [{ filename: 'f.txt', text: 'utdrag', score: 1 }] }]);
+  assert.equal(msgs[1].content, 'første');
+  assert.match(msgs[3].content, /<documents>\n<document name="f\.txt">\nutdrag\n<\/document>\n<\/documents>\n\nQuestion: spørsmål$/);
+  assert.match(msgs[3].content, /^Answer the question using the documents below/);
+  assert.equal(renderWithContext('x', []), 'x');
+  assert.equal(renderWithContext('x', undefined), 'x');
   assert.deepEqual(sourcesOf([{ filename: 'f', text: 'a b c', score: 0.5 }]), [{ filename: 'f', snippet: 'a b c', score: 0.5 }]);
 });
 
