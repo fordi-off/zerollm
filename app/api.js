@@ -16,7 +16,7 @@ import { createEmbeddings } from './embeddings.js';
 import { createDownloader, freeDiskBytes } from './downloader.js';
 import { CATALOG } from './catalog.js';
 import { createSummarizer } from './summarizer.js';
-import { buildMessages, fitToContext, looksLooped, stablePrefixIds, withExcerpts, sourcesOf, RECENT_KEEP, SUMMARIZE_AT, SUMMARY_PREFIX, SAMPLING, DEFAULT_MAX_TOKENS, CONTINUATION_PROMPT } from './chat-core.js';
+import { buildMessages, fitToContext, looksLooped, stablePrefixIds, sourcesOf, RECENT_KEEP, SUMMARIZE_AT, SUMMARY_PREFIX, SAMPLING, DEFAULT_MAX_TOKENS, CONTINUATION_PROMPT } from './chat-core.js';
 
 const I18N_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'i18n');
 
@@ -71,6 +71,25 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
   /** While documents are being indexed, chat generation, summaries and model changes are refused: the search model needs every core. */
   const assertNotIndexing = () => { if (indexing) throw new Error('indexing'); };
 
+  /**
+   * Document context of the LAST user message. A message that already carries `context` (regenerate, continue, an older turn)
+   * keeps it unchanged; otherwise the best matching chunks are retrieved, and those not already somewhere earlier in the
+   * conversation become the message's new `context` (stored by the page with the message, so the prompt stays append-only).
+   * @returns {Promise<{history: any[], context: any[]|undefined, sources: any[]}>} history = with the last user message's context set
+   */
+  async function withLastContext(chatId, history, countTokens, ctxMax, { retrieve = true, vector = false } = {}) {
+    const i = history.map((m) => m.role).lastIndexOf('user');
+    if (i < 0) return { history, context: undefined, sources: [] };
+    const last = history[i];
+    if (Array.isArray(last.context)) return { history, context: last.context, sources: sourcesOf(last.context) };
+    if (!retrieve) return { history, context: undefined, sources: [] };
+    const picked = await excerptsFor(chatId, history, countTokens, ctxMax, { vector });
+    const seen = new Set(history.flatMap((m) => (Array.isArray(m.context) ? m.context.map((c) => c.text) : [])));
+    const fresh = picked.filter((e) => !seen.has(e.text)).map(({ filename, text, score }) => ({ filename, text, score }));
+    const out = history.slice(); out[i] = { ...last, context: fresh };
+    return { history: out, context: fresh, sources: sourcesOf(picked) };
+  }
+
   /** Embed the chunks of documents that have no vectors yet, in the background; progress goes out as `docindex` events.
    *  The lock (`indexing`) is set synchronously, so nothing can start between "document added" and "indexing running". */
   function startIndexing(docIds) {
@@ -121,8 +140,8 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
       const count = (m) => engine.countPromptTokens(m);
       const withCont = (h) => (continuation ? [...h, { role: 'user', content: CONTINUATION_PROMPT }] : h);
       let { summary, summarized } = summaryState(chatId, history.length);
-      const excerpts = continuation ? [] : await excerptsFor(chatId, history, (t) => engine.countTokens(t), ctxMax, { vector: true });
-      const build = () => withExcerpts(buildMessages(withCont(history.slice(summarized)), { extraSystem: extraText(history, summary) }), excerpts);
+      const lc = await withLastContext(chatId, history, (t) => engine.countTokens(t), ctxMax, { retrieve: !continuation, vector: true });
+      const build = () => buildMessages(withCont(lc.history.slice(summarized)), { extraSystem: extraText(history, summary) });
 
       // Long conversation: fold the older messages into the rolling summary (cached on disk), keep the newest ones verbatim.
       const budget = ctxMax - DEFAULT_MAX_TOKENS - 64;
@@ -171,7 +190,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
       log.info(`done: ${stats.generated} tokens, prefill ${(stats.prefillMs / 1000).toFixed(1)}s (${stats.cachedTokens} cached of ${stats.promptTokens}), decode ${tokPerSec.toFixed(1)} tok/s - ${looped ? 'looped' : stats.stopReason}`);
       send('done', {
         stopReason: looped ? 'looped' : stats.stopReason, truncated: stats.stopReason === 'length', stopped: abort.aborted && !looped, looped,
-        trimmed: fitted.trimmed, compressed: summarized > 0, sources: sourcesOf(excerpts), prefixCache, generated: stats.generated, promptTokens: stats.promptTokens, cachedTokens: stats.cachedTokens,
+        trimmed: fitted.trimmed, compressed: summarized > 0, sources: lc.sources, context: lc.context, prefixCache, generated: stats.generated, promptTokens: stats.promptTokens, cachedTokens: stats.cachedTokens,
         prefillMs: stats.prefillMs, decodeMs: stats.decodeMs, tokPerSec, contextUsed, contextMax: ctxMax, model,
       });
     } catch (e) {
@@ -335,8 +354,8 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
     async estimate_context({ model, messages, chatId }) {
       const tools = toolsFor(model);
       const { summary, summarized } = summaryState(chatId ?? null, messages.length);
-      const excerpts = await excerptsFor(chatId ?? null, messages, (t) => tools.countTokens(t), Math.min(contextMax(), tools.cfg.nCtxTrain));
-      const fitted = withExcerpts(buildMessages(messages.slice(summarized), { extraSystem: extraText(messages, summary) }), excerpts);
+      const lc = await withLastContext(chatId ?? null, messages, (t) => tools.countTokens(t), Math.min(contextMax(), tools.cfg.nCtxTrain));
+      const fitted = buildMessages(lc.history.slice(summarized), { extraSystem: extraText(messages, summary) });
       return { contextUsed: tools.countPromptTokens(fitted), contextMax: Math.min(contextMax(), tools.cfg.nCtxTrain), compressed: summarized > 0 };
     },
 

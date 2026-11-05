@@ -8,7 +8,7 @@ import { stablePrefixIds, buildMessages } from '../../app/chat-core.js';
 
 const user = (content) => ({ role: 'user', content });
 
-test('the stable prefix is shared by prompts in every language', async () => {
+test('the stable prefix is the system prompt and is shared by every prompt', async () => {
   const t = await startTestApp({ ctx: 4096 });
   try {
     const tools = loadTokenizer(path.join(t.dir, 'models', 'tiny-llama.gguf'));

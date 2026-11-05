@@ -139,7 +139,7 @@ function startEdit(msg) {
     box.remove(); msg.bubble.hidden = false;
     for (const m of S.messages.slice(idx + 1)) m.node.remove();
     S.messages.length = idx + 1;
-    msg.content = text; paintMessage(msg); addUserActions(msg);
+    msg.content = text; delete msg.context; paintMessage(msg); addUserActions(msg);
     const reply = { role: 'assistant', content: '' }; S.messages.push(reply); buildMessageNode(reply); updateWelcome();
     await startRun();
   });
@@ -255,7 +255,7 @@ function finishRun() {
 }
 
 // ---------- saving chats ----------
-const apiMsg = ({ role, content, commands }) => (commands?.length ? { role, content, commands } : { role, content });
+const apiMsg = ({ role, content, commands, context }) => ({ role, content, ...(commands?.length ? { commands } : {}), ...(Array.isArray(context) ? { context } : {}) });
 const UI_KEYS = new Set(['node', 'bubble']);
 const plain = (m) => Object.fromEntries(Object.entries(m).filter(([k]) => !UI_KEYS.has(k)));
 async function persist() {
@@ -349,6 +349,7 @@ const events = {
     else if (d.stopped) setMeta(msg, t('stopped'), 'warn');
     else if (truncated) setMeta(msg, t('cut'), 'warn');
     msg.sources = d.sources?.length ? d.sources : undefined; if (!msg.sources) delete msg.sources;
+    { const u = S.messages[S.messages.indexOf(msg) - 1]; if (u?.role === 'user' && Array.isArray(d.context)) u.context = d.context; } // stored with the question so the prompt stays the same next turn
     renderSources(msg.node, msg.sources);
     if (d.compressed) setMeta(msg, t('compressedNote'));
     if (d.trimmed) setMeta(msg, t('trimmed'), 'warn');

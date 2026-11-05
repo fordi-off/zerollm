@@ -128,10 +128,11 @@ try {
   // math rendering (KaTeX) and its safety
   const math = await page.evaluate(async () => {
     const { renderMarkdown } = await import('/js/markdown.js');
-    return { inline: renderMarkdown('Areal \\(A = \\pi r^2\\) ok'), display: renderMarkdown('\\[ \\frac{a}{b} \\]'), money: renderMarkdown('koster $5 og $10'), evil: renderMarkdown('\\(<img src=x onerror=alert(1)>\\)') };
+    return { inline: renderMarkdown('Areal \\(A = \\pi r^2\\) ok'), display: renderMarkdown('\\[ \\frac{a}{b} \\]'), money: renderMarkdown('koster $5 og $10'), spaced: renderMarkdown('fart $ v \\\\approx 874.4 , \\\\text{m/s} $ og $ r $'), evil: renderMarkdown('\\(<img src=x onerror=alert(1)>\\)') };
   });
   check(/class="katex"/.test(math.inline) && !math.inline.includes('\\('), 'inline math rendered');
   check(/math-block/.test(math.display), 'display math rendered');
+  check((math.spaced.match(/class="katex"/g) ?? []).length === 2, 'single-dollar math with spaces inside renders (how models write it)');
   check(!/katex/.test(math.money) && math.money.includes('$5'), 'dollar amounts are not math');
   check(!/<img/.test(math.evil), 'math cannot inject HTML');
   // delete (two clicks)

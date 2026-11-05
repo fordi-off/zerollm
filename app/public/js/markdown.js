@@ -26,9 +26,11 @@ function setup() {
   });
 }
 
-// ---- math: \( inline \), \[ display \] and $$ display $$ (a bare single $ is NOT math: it is usually currency).
+// ---- math: \( inline \), \[ display \], $$ display $$, and single-dollar inline math in the two shapes models actually write:
+// "$ x + 1 $" (spaces inside both dollars) and "$x^2$" (no spaces, but a TeX/operator character inside). "$5 og $10" stays money:
+// its dollars are not symmetric (tight opening, spaced closing).
 // Math is cut out before marked (which would eat the backslashes), and put back as KaTeX HTML afterwards. Code is left alone.
-const MATH = /\\\(([\s\S]+?)\\\)|\\\[([\s\S]+?)\\\]|\$\$([\s\S]+?)\$\$/g;
+const MATH = /\\\(([\s\S]+?)\\\)|\\\[([\s\S]+?)\\\]|\$\$([\s\S]+?)\$\$|\$[ \t]+([^$\n]+?)[ \t]+\$|\$(?![\s$])([^$\n]*?[\\^_{}=+*\/<>()][^$\n]*?)(?<![\s$])\$/g;
 const katexCache = new Map();
 function renderTex(tex, display) {
   const key = `${display ? 'D' : 'I'}${tex}`;
@@ -49,8 +51,8 @@ export function extractMath(text) {
   const parts = String(text).split(/(```[\s\S]*?(?:```|$)|`[^`\n]*`)/g);
   const out = parts.map((part, i) => {
     if (i % 2 === 1) return part; // code
-    return part.replace(MATH, (m, a, b, c) => {
-      const display = a === undefined; const tex = a ?? b ?? c;
+    return part.replace(MATH, (m, a, b, c, d, e) => {
+      const display = b !== undefined || c !== undefined; const tex = a ?? b ?? c ?? d ?? e;
       pieces.push({ tex, display });
       return `ZCMATH${pieces.length - 1}X`;
     });
@@ -61,7 +63,7 @@ export function extractMath(text) {
 export function renderMarkdown(text) {
   setup();
   if (!window.marked) return `<p>${esc(text)}</p>`;
-  const hasMath = window.katex && /\\[(\[]|\$\$/.test(text ?? '');
+  const hasMath = window.katex && /\\[(\[]|\$/.test(text ?? '');
   const { text: src, pieces } = hasMath ? extractMath(text) : { text: text ?? '', pieces: [] };
   let html = window.marked.parse(src);
   if (pieces.length) {
