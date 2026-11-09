@@ -57,6 +57,9 @@ export function renderSegments(kind, messages, opts = {}) {
     }
     for (const m of msgs) {
       S(`<|im_start|>${m.role}\n`);
+      // Qwen3 in non-thinking mode generates "<think>\n\n</think>\n\n" before every reply; showing the same empty block in the history
+      // keeps the prompt identical to what the model already read (its cache stays valid) instead of re-reading each earlier reply.
+      if (m.role === 'assistant' && opts.arch === 'qwen3' && !opts.think) S('<think>\n\n</think>\n\n');
       C(m.role === 'assistant' ? stripThink(m.content) : m.content);
       S('<|im_end|>\n');
     }

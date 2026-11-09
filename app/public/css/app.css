@@ -210,3 +210,11 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .lock-banner { margin: 0 6px 8px; padding: 10px 14px; border: 1px solid var(--accent); border-radius: 12px; background: var(--card); font-size: 13px; }
 .lock-banner .progress-bar { margin-top: 6px; max-width: none; }
 .app.locked .composer, .app.locked #model-btn, .app.locked .starters { opacity: .45; pointer-events: none; }
+
+.think-toggle { margin-left: auto; border: 1px solid var(--line); background: var(--card); color: var(--ink-2); border-radius: 999px; padding: 2px 12px; font-size: 12px; }
+.think-toggle:hover { border-color: var(--accent); }
+.think-toggle.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.think { margin: 0 0 10px; border-left: 3px solid var(--line); padding-left: 12px; }
+.think summary { cursor: pointer; color: var(--ink-3); font-size: 13px; padding: 2px 0; user-select: none; }
+.think[open] summary { margin-bottom: 4px; }
+.think-body { color: var(--ink-2); font-size: 13.5px; max-height: 360px; overflow-y: auto; }

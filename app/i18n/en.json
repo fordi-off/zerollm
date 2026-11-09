@@ -141,5 +141,11 @@
   "noIndex": "keywords only",
   "indexingLock": "Building the search index for \"{name}\"… {done}/{total}. Chat and models are locked until it is done.",
   "indexingBlocked": "Wait until the document has been indexed.",
-  "indexingError": "Indexing failed"
+  "indexingError": "Indexing failed",
+  "thinkToggle": "Think first",
+  "thinkHint": "The model reasons before it answers. Better at maths and logic, but much slower (minutes). Qwen3 models only.",
+  "thinkingNow": "Thinking… {time}",
+  "thoughtFor": "Thought for {time}",
+  "thoughtDone": "Thought",
+  "thinkCut": "Thinking was cut off (length limit) without an answer. Try again, or turn off \"Think first\"."
 }

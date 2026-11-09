@@ -135,6 +135,25 @@ try {
   check((math.spaced.match(/class="katex"/g) ?? []).length === 2, 'single-dollar math with spaces inside renders (how models write it)');
   check(!/katex/.test(math.money) && math.money.includes('$5'), 'dollar amounts are not math');
   check(!/<img/.test(math.evil), 'math cannot inject HTML');
+  // thinking block: live (open, timer) -> finished (folded, stored apart from the answer) -> reopenable
+  const th = await page.evaluate(() => {
+    const z = window.__zc; z.S.messages = []; document.getElementById('messages').textContent = '';
+    const m = { role: 'assistant', content: '<think>\nFarten er \\(v = \\sqrt{2gh}\\). Jeg regner' };
+    z.S.messages.push(m); z.buildMessageNode(m);
+    const live = { open: m.thinkBox.open, summary: m.thinkSum.textContent, answer: m.bubble.textContent };
+    m.content += ' ferdig.\n</think>\n\nSvaret er **875 m/s**.';
+    z.paintMessage(m);
+    const closed = { open: m.thinkBox.open, summary: m.thinkSum.textContent, answer: m.bubble.textContent, hasMath: m.thinkBody.querySelector('.katex') !== null };
+    z.finalizeThinking(m); z.paintMessage(m);
+    const stored = { thinking: m.thinking, content: m.content, keys: Object.keys(m).filter((k) => !/^think[A-Z]|node|bubble/.test(k)) };
+    m.thinkBox.open = true; z.paintMessage(m);
+    return { live, closed, stored, reopened: m.thinkBox.open };
+  });
+  check(th.live.open === true && /^Tenker/.test(th.live.summary) && th.live.answer === '', 'while thinking: block open, "Tenker…", no answer yet');
+  check(th.closed.open === false && /^Tenkte i /.test(th.closed.summary) && th.closed.answer.trim() === 'Svaret er 875 m/s.' && th.closed.hasMath, 'thinking finished: block folds away, answer shown, math in the reasoning rendered');
+  check(th.stored.thinking.includes('Jeg regner ferdig.') && th.stored.content === 'Svaret er **875 m/s**.', 'reasoning is stored apart from the answer that goes back to the model');
+  check(th.reopened === true, 'the user can unfold it again and a repaint keeps it open');
+  await page.screenshot({ path: path.join(out, 'flow-9-thinking.png') });
   // delete (two clicks)
   const row = page.locator('.chat-row', { hasText: 'Omdøpt' }); await row.hover();
   await row.locator('.chat-act').nth(1).click(); await row.locator('.chat-act.armed').click();

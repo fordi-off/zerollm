@@ -16,7 +16,7 @@ import { createEmbeddings } from './embeddings.js';
 import { createDownloader, freeDiskBytes } from './downloader.js';
 import { CATALOG } from './catalog.js';
 import { createSummarizer } from './summarizer.js';
-import { buildMessages, fitToContext, looksLooped, stablePrefixIds, sourcesOf, RECENT_KEEP, SUMMARIZE_AT, SUMMARY_PREFIX, SAMPLING, DEFAULT_MAX_TOKENS, CONTINUATION_PROMPT } from './chat-core.js';
+import { buildMessages, fitToContext, looksLooped, stablePrefixIds, sourcesOf, RECENT_KEEP, SUMMARIZE_AT, SUMMARY_PREFIX, SAMPLING, THINK_SAMPLING, THINK_MAX_TOKENS, DEFAULT_MAX_TOKENS, CONTINUATION_PROMPT } from './chat-core.js';
 
 const I18N_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'i18n');
 
@@ -124,7 +124,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
     return `Ikke nok ledig minne til å laste denne modellen. Den trenger omtrent ${(e.needed / 1e9).toFixed(1)} GB (modell + kontekst), men bare ${(e.free / 1e9).toFixed(1)} GB er ledig. Lukk andre programmer, velg en mindre modell, eller senk kontekstvinduet i Innstillinger.`;
   }
 
-  async function run(model, history, { continuation, chatId }) {
+  async function run(model, history, { continuation, chatId, think = false }) {
     const id = ++runSeq;
     const abort = { aborted: false };
     current = { id, abort };
@@ -137,14 +137,17 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
       send('phase', { phase: 'preparing', model });
 
       const ctxMax = engine.ctx;
-      const count = (m) => engine.countPromptTokens(m);
+      // Qwen3 can reason before it answers (the page's "Tenk først"); other models ignore the switch
+      const thinking = !!think && engine.cfg.arch === 'qwen3';
+      const reserve = thinking ? Math.min(THINK_MAX_TOKENS, Math.floor(ctxMax / 2)) : DEFAULT_MAX_TOKENS;
+      const count = (m) => engine.countPromptTokens(m, { think: thinking });
       const withCont = (h) => (continuation ? [...h, { role: 'user', content: CONTINUATION_PROMPT }] : h);
       let { summary, summarized } = summaryState(chatId, history.length);
       const lc = await withLastContext(chatId, history, (t) => engine.countTokens(t), ctxMax, { retrieve: !continuation, vector: true });
       const build = () => buildMessages(withCont(lc.history.slice(summarized)), { extraSystem: extraText(history, summary) });
 
       // Long conversation: fold the older messages into the rolling summary (cached on disk), keep the newest ones verbatim.
-      const budget = ctxMax - DEFAULT_MAX_TOKENS - 64;
+      const budget = ctxMax - reserve - 64;
       const keepFrom = history.length - RECENT_KEEP;
       if (chatId && keepFrom > summarized && count(build()) > SUMMARIZE_AT * budget) {
         send('phase', { phase: 'summarizing', model });
@@ -155,9 +158,9 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
         if (abort.aborted) { send('done', { stopReason: 'aborted', stopped: true, generated: 0, model }); return; }
         send('phase', { phase: 'preparing', model });
       }
-      const fitted = fitToContext(build(), count, ctxMax, DEFAULT_MAX_TOKENS);
-      const contextUsed = engine.countPromptTokens(fitted.messages);
-      if (process.env.ZEROCHAT_DEBUG_PROMPT === '1') log.info(`PROMPT (${contextUsed} tokens):\n${engine.tok.decode(engine.promptIds(fitted.messages), { skipControl: false })}`);
+      const fitted = fitToContext(build(), count, ctxMax, reserve);
+      const contextUsed = count(fitted.messages);
+      if (process.env.ZEROCHAT_DEBUG_PROMPT === '1') log.info(`PROMPT (${contextUsed} tokens):\n${engine.tok.decode(engine.promptIds(fitted.messages, { think: thinking }), { skipControl: false })}`);
       log.info(`generating: ${model} | ${contextUsed}/${ctxMax} ctx tokens${fitted.trimmed ? ' | prompt trimmed to fit' : ''}`);
 
       // A freshly loaded model has read nothing yet: restore the system prompt's state from disk (or read it once and save it).
@@ -174,7 +177,8 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
       const stats = {};
       let answer = ''; let checkedAt = 0; let looped = false; let first = true;
       const gen = engine.generate({
-        messages: fitted.messages, maxTokens: DEFAULT_MAX_TOKENS, sampling: SAMPLING, signal: abort, stats, penalizePrompt: false,
+        messages: fitted.messages, think: thinking, maxTokens: thinking ? Math.max(256, Math.min(reserve, ctxMax - contextUsed - 8)) : DEFAULT_MAX_TOKENS,
+        sampling: thinking ? THINK_SAMPLING : SAMPLING, signal: abort, stats, penalizePrompt: false,
         onPrefill: (done, total) => send('progress', { done, total }),
       });
       for await (const text of gen) {
@@ -190,7 +194,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
       log.info(`done: ${stats.generated} tokens, prefill ${(stats.prefillMs / 1000).toFixed(1)}s (${stats.cachedTokens} cached of ${stats.promptTokens}), decode ${tokPerSec.toFixed(1)} tok/s - ${looped ? 'looped' : stats.stopReason}`);
       send('done', {
         stopReason: looped ? 'looped' : stats.stopReason, truncated: stats.stopReason === 'length', stopped: abort.aborted && !looped, looped,
-        trimmed: fitted.trimmed, compressed: summarized > 0, sources: lc.sources, context: lc.context, prefixCache, generated: stats.generated, promptTokens: stats.promptTokens, cachedTokens: stats.cachedTokens,
+        thinking, trimmed: fitted.trimmed, compressed: summarized > 0, sources: lc.sources, context: lc.context, prefixCache, generated: stats.generated, promptTokens: stats.promptTokens, cachedTokens: stats.cachedTokens,
         prefillMs: stats.prefillMs, decodeMs: stats.decodeMs, tokPerSec, contextUsed, contextMax: ctxMax, model,
       });
     } catch (e) {
@@ -328,22 +332,22 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
     async rename_chat({ id, name }) { return { ok: chatStore.rename(id, name) }; },
     async delete_chat({ id }) { return { ok: chatStore.delete(id) }; },
 
-    async send_message({ model, messages, chatId }) {
+    async send_message({ model, messages, chatId, think }) {
       modelPath(paths, model);
       assertNotIndexing();
       if (current) throw new Error('busy');
       const started = new Promise((resolve) => setImmediate(resolve));
-      run(model, messages, { continuation: false, chatId: chatId ?? null });
+      run(model, messages, { continuation: false, chatId: chatId ?? null, think: think === true });
       await started;
       return { started: true, runId: runSeq };
     },
 
-    async continue_message({ model, messages, chatId }) {
+    async continue_message({ model, messages, chatId, think }) {
       modelPath(paths, model);
       assertNotIndexing();
       if (current) throw new Error('busy');
       const started = new Promise((resolve) => setImmediate(resolve));
-      run(model, messages, { continuation: true, chatId: chatId ?? null });
+      run(model, messages, { continuation: true, chatId: chatId ?? null, think: think === true });
       await started;
       return { started: true, runId: runSeq };
     },
@@ -351,12 +355,12 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
     async stop_generation() { if (current) current.abort.aborted = true; return { stopping: current !== null }; },
 
     /** Exact prompt size for the context meter (works without loading the model's weights). */
-    async estimate_context({ model, messages, chatId }) {
+    async estimate_context({ model, messages, chatId, think }) {
       const tools = toolsFor(model);
       const { summary, summarized } = summaryState(chatId ?? null, messages.length);
       const lc = await withLastContext(chatId ?? null, messages, (t) => tools.countTokens(t), Math.min(contextMax(), tools.cfg.nCtxTrain));
       const fitted = buildMessages(lc.history.slice(summarized), { extraSystem: extraText(messages, summary) });
-      return { contextUsed: tools.countPromptTokens(fitted), contextMax: Math.min(contextMax(), tools.cfg.nCtxTrain), compressed: summarized > 0 };
+      return { contextUsed: tools.countPromptTokens(fitted, { think: think === true && tools.cfg.arch === 'qwen3' }), contextMax: Math.min(contextMax(), tools.cfg.nCtxTrain), compressed: summarized > 0 };
     },
 
     async set_context_window({ value }) {

@@ -141,5 +141,11 @@
   "noIndex": "kun nøkkelord",
   "indexingLock": "Lager søkeindeks for «{name}»… {done}/{total}. Chat og modeller er låst til det er ferdig.",
   "indexingBlocked": "Vent til indekseringen av dokumentet er ferdig.",
-  "indexingError": "Indekseringen feilet"
+  "indexingError": "Indekseringen feilet",
+  "thinkToggle": "Tenk først",
+  "thinkHint": "Modellen resonnerer før den svarer. Bedre på regning og logikk, men mye tregere (flere minutter). Kun for Qwen3-modeller.",
+  "thinkingNow": "Tenker… {time}",
+  "thoughtFor": "Tenkte i {time}",
+  "thoughtDone": "Tenkte",
+  "thinkCut": "Tenkingen ble avbrutt (lengdegrense) uten svar. Prøv igjen, eller slå av «Tenk først»."
 }

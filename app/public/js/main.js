@@ -3,6 +3,7 @@ import { loadStrings, t, apply } from './i18n.js';
 import { renderMarkdown } from './markdown.js';
 import { initSettings, openSettings, onDownloadEvent, onDocProgress, onDocIndex } from './settings.js';
 import { initCommandMenu, loadCommands, extractCommands, openAll } from './commands.js';
+import { splitThinking, fmtDuration } from './thinking.js';
 import { initDocuments, refreshChips, renderSources } from './documents.js';
 import { initChatList, refreshChatList, setActive } from './chats.js';
 
@@ -11,6 +12,7 @@ const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls)
 
 const S = {
   models: [], model: null, settings: null, messages: [], // messages: [{role, content, ...extras from the file, node, bubble}]
+  think: (() => { try { return localStorage.getItem('zc-think') === '1'; } catch { return false; } })(), // "Tenk først" (Qwen3 only)
   chatId: null, chatName: null, idleWaiters: [], indexing: null, // indexing: {filename, done, total} while a document is being indexed (chat is locked)
   busy: false, runId: null, waiting: false, current: null, // current: {msg, bubble, status, bar}
   stickBottom: true,
@@ -32,6 +34,14 @@ const scroller = () => $('scroller');
 const nearBottom = () => scroller().scrollHeight - scroller().scrollTop - scroller().clientHeight < 80;
 function scrollToBottom(force = false) { if (force || S.stickBottom) scroller().scrollTop = scroller().scrollHeight; }
 
+// ---------- "Tenk først" (Qwen3 reasoning) ----------
+const thinkSupported = () => currentModel()?.arch === 'qwen3';
+const thinkOn = () => S.think && thinkSupported();
+function updateThinkToggle() {
+  const b = $('btn-think'); b.hidden = !thinkSupported();
+  b.setAttribute('aria-pressed', String(S.think)); b.classList.toggle('on', S.think);
+}
+
 // ---------- model picker ----------
 const currentModel = () => S.models.find((m) => m.filename === S.model) ?? null;
 function renderModelPicker() {
@@ -48,6 +58,7 @@ function renderModelPicker() {
   }
   const m = currentModel();
   $('model-name').textContent = m ? m.displayName : t('chooseModel');
+  updateThinkToggle();
   const none = S.models.filter((x) => x.supported).length === 0;
   $('no-model').hidden = !none;
   if (none) {
@@ -72,7 +83,7 @@ function updateMeter() {
     const draft = extractCommands($('input').value.trim());
     if (draft.text || draft.commands.length) msgs.push({ role: 'user', content: draft.text, ...(draft.commands.length ? { commands: draft.commands } : {}) });
     if (msgs.length === 0) { setMeter(0, S.settings?.contextWindow ?? 0); return; }
-    try { const r = await call('estimate_context', { model: S.model, messages: msgs, chatId: S.chatId }); setMeter(r.contextUsed, r.contextMax); } catch { /* model not readable */ }
+    try { const r = await call('estimate_context', { model: S.model, messages: msgs, chatId: S.chatId, think: thinkOn() }); setMeter(r.contextUsed, r.contextMax); } catch { /* model not readable */ }
   }, 350);
 }
 function setMeter(used, max) {
@@ -94,9 +105,36 @@ function buildMessageNode(msg) {
   return wrap;
 }
 let paintQueued = new Set();
+/** The foldable thinking block above an answer (created on demand, kept across repaints so the user's fold/unfold sticks). */
+function paintThinking(msg, text, live) {
+  if (!msg.thinkBox) {
+    const d = el('details', 'think'); const sum = el('summary'); const body = el('div', 'think-body md');
+    d.append(sum, body); msg.node.insertBefore(d, msg.bubble);
+    msg.thinkBox = d; msg.thinkSum = sum; msg.thinkBody = body;
+    if (live) { d.open = true; msg.thinkWasLive = true; }
+  }
+  if (live && msg.thinkStart === undefined) msg.thinkStart = performance.now();
+  if (!live && msg.thinkWasLive) { msg.thinkWasLive = false; msg.thinkBox.open = false; if (msg.thinkEnd === undefined) msg.thinkEnd = performance.now(); } // done thinking: fold it away
+  const ms = msg.thinkMs ?? (msg.thinkStart !== undefined ? (msg.thinkEnd ?? performance.now()) - msg.thinkStart : null);
+  msg.thinkSum.textContent = live ? t('thinkingNow', { time: ms != null ? fmtDuration(ms) : '' }) : (ms != null ? t('thoughtFor', { time: fmtDuration(ms) }) : t('thoughtDone'));
+  msg.thinkBody.innerHTML = renderMarkdown(text);
+}
 function paintMessage(msg) {
   if (msg.role === 'user') { msg.bubble.textContent = msg.content; return; }
-  msg.bubble.innerHTML = renderMarkdown(msg.content);
+  // while streaming, `content` holds the raw "<think>..</think>answer"; once finished the parts live in `thinking` / `content`
+  const s = msg.thinking !== undefined ? { thinking: msg.thinking, answer: msg.content, state: 'done' } : splitThinking(msg.content);
+  if (s.state !== 'none') paintThinking(msg, s.thinking, s.state === 'open');
+  msg.bubble.innerHTML = renderMarkdown(s.answer);
+}
+/** At the end of a run: move the reasoning out of `content` into `thinking` (what is stored with the chat). */
+function finalizeThinking(msg) {
+  const s = splitThinking(msg.content);
+  if (s.state === 'none') return;
+  msg.thinking = s.thinking; msg.content = s.answer;
+  msg.thinkMs = msg.thinkStart !== undefined ? (msg.thinkEnd ?? performance.now()) - msg.thinkStart : undefined;
+  if (msg.thinkMs === undefined) delete msg.thinkMs;
+  msg.thinkWasLive = false; if (msg.thinkBox) msg.thinkBox.open = false;
+  return s.state;
 }
 function schedulePaint(msg) {
   if (paintQueued.has(msg)) return; paintQueued.add(msg);
@@ -208,7 +246,7 @@ async function startRun() {
   reply.bubble.classList.add('caret-blink');
   scrollToBottom(true); S.stickBottom = true;
   const history = S.messages.slice(0, -1).map(apiMsg);
-  try { await call('send_message', { model: S.model, messages: history, chatId: S.chatId }); }
+  try { await call('send_message', { model: S.model, messages: history, chatId: S.chatId, think: thinkOn() }); }
   catch (e) { finishRun(); setMeta(reply, e.message === 'busy' ? t('busy') : e.message === 'indexing' ? t('indexingBlocked') : `${t('error')}: ${e.message}`, 'err'); }
 }
 
@@ -244,7 +282,7 @@ async function continueReply() {
   S.current = { msg: reply }; S.waiting = true; S.runId = null; setBusy(true);
   showProgress(t('loadingModel'), null); reply.bubble.classList.add('caret-blink');
   const history = S.messages.map(apiMsg);
-  try { await call('continue_message', { model: S.model, messages: history, chatId: S.chatId }); } catch (e) { finishRun(); setMeta(reply, `${t('error')}: ${e.message}`, 'err'); }
+  try { await call('continue_message', { model: S.model, messages: history, chatId: S.chatId, think: thinkOn() }); } catch (e) { finishRun(); setMeta(reply, `${t('error')}: ${e.message}`, 'err'); }
 }
 
 function finishRun() {
@@ -256,10 +294,10 @@ function finishRun() {
 
 // ---------- saving chats ----------
 const apiMsg = ({ role, content, commands, context }) => ({ role, content, ...(commands?.length ? { commands } : {}), ...(Array.isArray(context) ? { context } : {}) });
-const UI_KEYS = new Set(['node', 'bubble']);
+const UI_KEYS = new Set(['node', 'bubble', 'thinkBox', 'thinkSum', 'thinkBody', 'thinkStart', 'thinkEnd', 'thinkWasLive']);
 const plain = (m) => Object.fromEntries(Object.entries(m).filter(([k]) => !UI_KEYS.has(k)));
 async function persist() {
-  const msgs = S.messages.filter((m) => m.role === 'user' || m.content).map(plain); // snapshot now: the chat may change while saving
+  const msgs = S.messages.filter((m) => m.role === 'user' || m.content || m.thinking).map(plain); // snapshot now: the chat may change while saving
   if (!msgs.some((m) => m.role === 'user')) return;
   if (!S.chatName) S.chatName = (msgs.find((m) => m.role === 'user')?.content ?? '').replace(/\s+/g, ' ').trim().slice(0, 45) || t('newChat');
   try {
@@ -271,7 +309,7 @@ async function persist() {
 /** Make sure the conversation exists as a file (documents attach to a saved chat). */
 async function ensureChat() {
   if (S.chatId) return S.chatId;
-  const msgs = S.messages.filter((m) => m.role === 'user' || m.content).map(plain);
+  const msgs = S.messages.filter((m) => m.role === 'user' || m.content || m.thinking).map(plain);
   const name = S.chatName ?? t('newChat');
   const r = await call('save_chat', { id: null, name, model: S.model, messages: msgs });
   S.chatId = r.id; S.chatName = msgs.some((m) => m.role === 'user') ? S.chatName : null;
@@ -339,6 +377,7 @@ const events = {
     if (!ours(d)) return;
     const msg = S.current.msg;
     finishRun();
+    const thinkState = finalizeThinking(msg); if (thinkState) paintMessage(msg);
     const truncated = d.stopReason === 'length' || d.truncated;
     addActions(msg, { last: true, truncated });
     const bits = [];
@@ -347,6 +386,7 @@ const events = {
     if (bits.length) setMeta(msg, bits.join(' · '));
     if (d.looped) setMeta(msg, t('looped'), 'warn');
     else if (d.stopped) setMeta(msg, t('stopped'), 'warn');
+    else if (truncated && thinkState === 'open') setMeta(msg, t('thinkCut'), 'warn');
     else if (truncated) setMeta(msg, t('cut'), 'warn');
     msg.sources = d.sources?.length ? d.sources : undefined; if (!msg.sources) delete msg.sources;
     { const u = S.messages[S.messages.indexOf(msg) - 1]; if (u?.role === 'user' && Array.isArray(d.context)) u.context = d.context; } // stored with the question so the prompt stays the same next turn
@@ -381,6 +421,7 @@ function wireUi() {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); $('composer').requestSubmit(); }
   });
   $('btn-new').addEventListener('click', newChat);
+  $('btn-think').addEventListener('click', () => { S.think = !S.think; try { localStorage.setItem('zc-think', S.think ? '1' : '0'); } catch { /* ignore */ } updateThinkToggle(); updateMeter(); });
   $('btn-sidebar').addEventListener('click', () => $('app').classList.toggle('side-closed'));
   $('btn-settings').addEventListener('click', () => openSettings());
   $('model-btn').addEventListener('click', (e) => { e.stopPropagation(); const m = $('model-menu'); m.hidden = !m.hidden; $('model-btn').setAttribute('aria-expanded', String(!m.hidden)); });
@@ -439,6 +480,7 @@ async function init() {
   applyLock();
 }
 
+window.__zc = { S, buildMessageNode, paintMessage, finalizeThinking }; // handles for the browser smoke test
 window.addEventListener('unhandledrejection', (e) => {
   const m = String(e.reason?.message ?? '');
   if (m === 'indexing') { toast(t('indexingBlocked')); e.preventDefault(); } else if (m === 'busy') { toast(t('busy')); e.preventDefault(); }

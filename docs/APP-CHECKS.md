@@ -64,3 +64,11 @@ Run `npm run app -- --data <folder containing models/>` (or `node app/main.js`).
 - [ ] `node bin/zerollm.js embed models/nomic-embed-text-v1.5.Q4_K_M.gguf "Hva er en kommune?" "Kommunen har ansvar for skoler" "Pizza med ost"` - the first two should be clearly more similar than either is to the third.
 - [ ] `node tools/embed-bench.mjs models/nomic-embed-text-v1.5.Q4_K_M.gguf` - note chunks/second.
 - [ ] Add a document in the app: Settings > Dokumenter shows "Lager søkeindeks… n/m" then "søkeindeks m/m"; a question phrased with different words than the text still finds the right passage.
+
+## Thinking mode (Qwen3 only)
+- [ ] Select a Qwen3 model: a "Tenk først" pill appears under the message box; with a Llama/NB model it is hidden.
+- [ ] Turn it on and ask the falling-stone question (constant g, then with Newtonian gravity). While it works you see an open "Tenker… m:ss" block with the reasoning; when the answer starts the block folds to "Tenkte i m:ss"; click it to read the reasoning. Note the total time.
+- [ ] Reload the page / reopen the chat: the folded reasoning is still there.
+- [ ] Ask a follow-up question: it must start quickly (previous reasoning is not re-read).
+- [ ] `node tools/think-eval.mjs models/<qwen3 file>.gguf --only 3,4` (then without --only): send me the printed table and `think-eval-results.json`.
+- [ ] Non-thinking Qwen3 chats: second and later answers should start faster than before (earlier replies are no longer re-read).

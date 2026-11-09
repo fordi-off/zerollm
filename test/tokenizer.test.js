@@ -171,8 +171,12 @@ test('qwen ChatML rendering, Qwen3 think handling', () => {
   // history: reasoning is stripped from earlier assistant turns
   const hist = [...msgs, { role: 'assistant', content: '<think>secret</think>Hello!' }, { role: 'user', content: 'Again' }];
   const out = flat('qwen', hist, { arch: 'qwen3' });
-  assert.ok(out.includes('<|im_start|>assistant\nHello!<|im_end|>\n'));
+  assert.ok(out.includes('<|im_start|>assistant\n<think>\n\n</think>\n\nHello!<|im_end|>\n'), 'non-thinking mode: earlier replies carry the same empty think block the model generated (cache stays valid)');
   assert.ok(!out.includes('secret'));
+  const outThink = flat('qwen', hist, { arch: 'qwen3', think: true });
+  assert.ok(outThink.includes('<|im_start|>assistant\nHello!<|im_end|>\n'), 'thinking mode: earlier replies without any think block (Qwen3 convention)');
+  assert.ok(!outThink.includes('secret'));
+  assert.ok(!flat('qwen', hist, { arch: 'qwen2' }).includes('<think>'));
 });
 
 test('llama3 rendering', () => {

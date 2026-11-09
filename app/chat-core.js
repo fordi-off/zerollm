@@ -13,6 +13,9 @@ export const CONTINUATION_PROMPT =
 /** Sampling defaults tuned in Skibeti37 (repeat penalty over a 320-token window; a low frequency penalty on purpose). */
 export const SAMPLING = { temperature: 0.6, topP: 0.95, topK: 40, minP: 0.05, repeatPenalty: 1.18, repeatLastN: 320, frequencyPenalty: 0.1, presencePenalty: 0.3 };
 export const DEFAULT_MAX_TOKENS = 2000;
+/** Qwen3 thinking mode (Qwen's recommended settings): no repetition penalties - they punish the digits and phrases a long chain of reasoning must repeat. */
+export const THINK_SAMPLING = { temperature: 0.6, topP: 0.95, topK: 20, minP: 0, repeatPenalty: 1, frequencyPenalty: 0, presencePenalty: 0 };
+export const THINK_MAX_TOKENS = 6000;
 
 /**
  * The messages actually sent to the model: the system prompt (+ optional extra text) and the history. NOTHING in an earlier
