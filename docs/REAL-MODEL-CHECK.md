@@ -192,6 +192,12 @@ Paste back everything printed (stdout and the `[...]` lines on stderr). The firs
 - Output correct but much slower than the estimate: report the stats line; the estimate is for the K-quant matvecs only.
 - If you have llama.cpp: `llama-cli -m models/Qwen3.5-4B-Q4_K_M.gguf -p "<|im_start|>user\nHva er hovedstaden i Frankrike?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n" -n 30 --temp 0 -no-cnv` and compare the first ~10 tokens with ours (float summation order may make them diverge later, not at the start).
 
+### Result so far on the real file (Ryzen 5 7530U, Windows, Node 26)
+
+- **Reference path (A):** `Hva er hovedstaden i Frankrike?` -> correct, Norwegian (`Hovedstaden i Frankrike er **Paris**...`); a 120-token physics answer stayed coherent and on topic (no loops or drift; it answered in Danish with a German word, which is probably the missing system prompt, not checked further). Speed 0.09-0.21 tok/s depending on the run, RSS 2.8 GB.
+- **Pool (B), 6 threads, wasm-simd, f32 KV:** decode 2.55 tok/s, prefill 4.28 tok/s (22-token prompt), RSS 3.08 GB, load 1.4 s. The 30 generated tokens are IDENTICAL to the reference path's (`fc.exe ref.txt pool.txt`: no differences).
+- **Still open:** `bench` table, `--think` run, `chat` second turn, the app. The value-head mapping (`h % 16`) and the conv tap order are shared by both paths, so this comparison cannot catch an error in them; only a comparison against another implementation (llama.cpp / Ollama at `--temp 0`) can.
+
 ### B. The worker pool + SIMD kernels (default path; Qwen3.5 on `--threads 6`)
 
 The pool runs the same file with the SIMD matvec kernels, the recurrent state in shared memory sharded by value head, and the delta rule / conv in JS inside the workers (profiling showed them at ~10% of a decode step on the dev VM, so no SIMD kernel for them; docs/DECISIONS.md). Tested on synthetic models only: pool == reference bit-for-bit with `--kernels js`, rounding-level with the SIMD kernels, on every thread count, f32 and f16 KV. **Not run on the real weights, not measured on the laptop.** Same file, same free-RAM advice (about 3.1 GB, plus up to 0.3 GB of state snapshots; `info` prints the estimate).

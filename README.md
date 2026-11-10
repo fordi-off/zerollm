@@ -72,9 +72,9 @@ npm test                                                # node --test (about 410
 | Qwen3 0.6B Q8_0 | 0.6 GB | ~28 tok/s | ~30 tok/s | 0.8 GB |
 | Qwen3 4B Q4_K_M | 2.3 GB | ~5-6 tok/s | ~8 tok/s | 2.7 GB |
 | Qwen3 8B Q4_K_M | 4.7 GB | ~3 tok/s | ~7 tok/s | 5.0 GB |
-| Qwen3.5 4B Q4_K_M | 2.7 GB | not measured yet | not measured yet | not measured yet |
+| Qwen3.5 4B Q4_K_M | 2.7 GB | ~2.5 tok/s | ~4 tok/s (22-token prompt) | 3.1 GB |
 
-The Qwen3.5 row is empty on purpose: it has not been run on the laptop (nor on the real weights). On the 4-vCPU dev VM with random weights of the real shapes the pool does ~2.7-2.9 tok/s decode and ~4-5 tok/s prefill with 4 threads (indicative only, `docs/BENCHMARKS.md`).
+The Qwen3.5 row is one `run` on the real file (6 threads, f32 KV, 30 generated tokens, 22-token prompt): decode 2.55 tok/s, prefill 4.28 tok/s, RSS 3.08 GB; the single-thread reference path on the same file does 0.09-0.19 tok/s. Its text was identical to the pool's for those 30 tokens (`fc`: no differences). A longer, batched prefill and a `bench` table have not been measured on the laptop yet.
 
 Laptop speed varies about +-15% from run to run; more models, the spin experiment, kernel micro-benchmarks and the embedding encoder in `docs/BENCHMARKS.md`. Reading the prompt (prefill) is the slow part of everything on large models, which is why the app is built to avoid re-reading.
 
