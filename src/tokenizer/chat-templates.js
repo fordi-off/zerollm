@@ -3,7 +3,7 @@
 // Scaffolding text (role markers) is encoded with special-token parsing ON; user/assistant content is encoded
 // with it OFF, so text like "<|im_end|>" typed by a user cannot inject control tokens.
 
-/** @typedef {{role: 'system'|'user'|'assistant', content: string}} Message */
+/** @typedef {{role: 'system'|'user'|'assistant', content: string, reasoning_content?: string}} Message */
 
 export const TEMPLATE_KINDS = ['qwen', 'llama3', 'raw'];
 
@@ -16,16 +16,64 @@ export const TEMPLATE_KINDS = ['qwen', 'llama3', 'raw'];
 export function detectTemplate(arch, jinja, tok) {
   if (jinja?.includes('<|im_start|>')) return 'qwen';
   if (jinja?.includes('<|start_header_id|>')) return 'llama3';
-  if (arch === 'qwen2' || arch === 'qwen3') return 'qwen';
+  if (arch === 'qwen2' || arch === 'qwen3' || arch === 'qwen35') return 'qwen';
   if (arch === 'llama' && tok?.idOf('<|start_header_id|>') !== undefined) return 'llama3';
   return 'raw';
 }
 
 const stripThink = (s) => s.replace(/<think>[\s\S]*?<\/think>\s*/g, '');
 
+/** Python's str.rstrip('\n') / lstrip('\n') as the Qwen3.5 Jinja template uses them. */
+const rstripNl = (s) => s.replace(/\n+$/, '');
+const lstripNl = (s) => s.replace(/^\n+/, '');
+
+/**
+ * Qwen3.5 (arch qwen35) ChatML, text only, following the model's Jinja template: contents are trimmed; the system message
+ * comes first (a later one is an error, like the template's raise_exception); an assistant turn AFTER the last user query
+ * is rendered `<think>\n{reasoning}\n</think>\n\n{content}` and earlier ones as bare `{content}`; the generation prompt
+ * is `<|im_start|>assistant\n` + `<think>\n` (thinking on: the model continues with its reasoning and writes `</think>`
+ * itself) or `<think>\n\n</think>\n\n` (thinking off, the default).
+ *
+ * One deliberate deviation, as for Qwen3 (see the 'qwen' branch below): with thinking OFF every assistant turn in the history is
+ * rendered with the same empty think block the model generated after the generation prompt, so the prompt stays an exact
+ * extension of what is already in the model's cache (the real template would drop the block of earlier turns).
+ * With thinking ON the real template is followed exactly (earlier turns carry no reasoning).
+ * Tool calls / tool responses / images are not implemented.
+ */
+function qwen35Segments(messages, opts, S, C) {
+  const think = opts.think === true;
+  let lastQuery = messages.length - 1;
+  for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === 'user') { lastQuery = i; break; }
+  messages.forEach((m, i) => {
+    const content = String(m.content ?? '').trim();
+    if (m.role === 'system') {
+      if (i !== 0) throw new Error('System message must be at the beginning.');
+      S('<|im_start|>system\n'); C(content); S('<|im_end|>\n');
+    } else if (m.role === 'user') {
+      S('<|im_start|>user\n'); C(content); S('<|im_end|>\n');
+    } else if (m.role === 'assistant') {
+      let reasoning = '';
+      let text = content;
+      if (typeof m.reasoning_content === 'string') reasoning = m.reasoning_content;
+      else if (content.includes('</think>')) {
+        const parts = content.split('</think>');
+        reasoning = lstripNl(rstripNl(parts[0]).split('<think>').pop());
+        text = lstripNl(parts[parts.length - 1]);
+      }
+      S('<|im_start|>assistant\n');
+      if (!think) { S('<think>\n\n</think>\n\n'); C(typeof m.reasoning_content === 'string' ? text : stripThink(text)); } else if (i > lastQuery) {
+        S('<think>\n'); C(reasoning.trim()); S('\n</think>\n\n'); C(text);
+      } else C(text);
+      S('<|im_end|>\n');
+    } else throw new Error('Unexpected message role.');
+  });
+  if (opts.generationPrompt ?? true) S(think ? '<|im_start|>assistant\n<think>\n' : '<|im_start|>assistant\n<think>\n\n</think>\n\n');
+}
+
 /**
  * @typedef {Object} TemplateOptions
- * @property {boolean} [think]        Qwen3: allow thinking. false (default) pre-fills an empty <think></think> block.
+ * @property {boolean} [think]        Qwen3 / Qwen3.5: allow thinking. false (default) pre-fills an empty <think></think> block.
+ *                                    Qwen3.5 thinking on: the prompt ends with `<think>\n` (Qwen3: the model writes <think> itself).
  * @property {string} [dateString]    Llama 3.1/3.2 system header date (fixed default keeps output deterministic).
  * @property {boolean} [generationPrompt] append the assistant header (default true)
  * @property {string} [arch]
@@ -47,6 +95,11 @@ export function renderSegments(kind, messages, opts = {}) {
 
   if (kind === 'raw') {
     for (const m of messages) C(m.content);
+    return seg;
+  }
+
+  if (kind === 'qwen' && opts.arch === 'qwen35') {
+    qwen35Segments(messages, opts, S, C);
     return seg;
   }
 

@@ -9,6 +9,9 @@ const tail = (digits) => `[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|${digits}| ?[^\\s\\p{L}\
 export const PRETOKENIZERS = {
   // Qwen2 / Qwen2.5 / Qwen3: digits split one at a time
   qwen2: new RegExp(`${CONTRACTIONS}|${tail('\\p{N}')}`, 'gu'),
+  // Qwen3.5 (llama.cpp LLAMA_VOCAB_PRE_TYPE_QWEN35): like qwen2, but combining marks (\\p{M}) belong to words: letters are
+  // [\\p{L}\\p{M}]+ and the punctuation run excludes \\p{M} (the optional lead character of a word still may not be \\p{L}/\\p{N}/CR/LF)
+  qwen35: new RegExp(`${CONTRACTIONS}|[^\\r\\n\\p{L}\\p{N}]?[\\p{L}\\p{M}]+|\\p{N}| ?[^\\s\\p{L}\\p{M}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+`, 'gu'),
   // Llama 3.x: digits grouped 1-3
   llama3: new RegExp(`${CONTRACTIONS}|${tail('\\p{N}{1,3}')}`, 'gu'),
   // original GPT-2
@@ -18,14 +21,15 @@ export const PRETOKENIZERS = {
 /** Map GGUF `tokenizer.ggml.pre` to a pre-tokenizer kind. */
 export function preKind(pre) {
   switch (pre) {
-    case 'qwen2': case 'qwen3': case 'qwen35': return 'qwen2';
+    case 'qwen2': case 'qwen3': return 'qwen2';
+    case 'qwen35': return 'qwen35';
     case 'llama-bpe': case 'llama3': case 'smaug-bpe': return 'llama3';
     case 'gpt-2': case 'gpt2': case undefined: return 'gpt2';
-    default: throw new Error(`unsupported tokenizer.ggml.pre "${pre}" (supported: qwen2, llama-bpe, gpt-2)`);
+    default: throw new Error(`unsupported tokenizer.ggml.pre "${pre}" (supported: qwen2, qwen35, llama-bpe, gpt-2)`);
   }
 }
 
-/** @param {string} text @param {'qwen2'|'llama3'|'gpt2'} kind */
+/** @param {string} text @param {'qwen2'|'qwen35'|'llama3'|'gpt2'} kind */
 export function preTokenize(text, kind) {
   return text.match(PRETOKENIZERS[kind]) ?? [];
 }
