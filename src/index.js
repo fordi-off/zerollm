@@ -11,7 +11,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import { readGGUF } from './gguf/reader.js';
 import { typeName } from './gguf/types.js';
-import { modelConfig, estimateRam, assertSupportedTensorTypes, SUPPORTED_ARCHS, SUPPORTED_TENSOR_TYPES, UnsupportedArchError } from './model/config.js';
+import { modelConfig, estimateRam, assertSupportedTensorTypes, SUPPORTED_ARCHS, SUPPORTED_TENSOR_TYPES, UnsupportedArchError, REFERENCE_ONLY_REASON } from './model/config.js';
+import { RefModel } from './model/forward.js';
 import { Tokenizer } from './tokenizer/bpe.js';
 import { detectTemplate, encodeChat, stopTokenIds } from './tokenizer/chat-templates.js';
 import { createSampler } from './sampling/sampler.js';
@@ -60,6 +61,7 @@ export function inspectModel(path) {
     out.cfg = cfg; out.nLayer = cfg.nLayer; out.ctxTrain = cfg.nCtxTrain;
     assertSupportedTensorTypes(g);
     if (g.get('tokenizer.ggml.model') !== 'gpt2') throw new UnsupportedModelError(`unsupported tokenizer "${g.get('tokenizer.ggml.model')}"`);
+    if (cfg.referenceOnly) throw new UnsupportedModelError(REFERENCE_ONLY_REASON);
     out.supported = true;
   } catch (e) {
     out.reason = e instanceof UnsupportedArchError ? `Architecture "${out.arch}" is not supported (supported: ${SUPPORTED_ARCHS.join(', ')})` : e.message;
@@ -92,6 +94,8 @@ export async function loadModel(path, opts = {}) {
   if (g.get('tokenizer.ggml.model') !== 'gpt2') throw new UnsupportedModelError(`unsupported tokenizer "${g.get('tokenizer.ggml.model')}"`);
   const threads = opts.threads ?? defaultThreads();
   const kv = opts.kv ?? 'f32';
+  const referencePath = opts.threads === 1 && opts.kernels === 'js' && kv === 'f32';
+  if (cfg.referenceOnly && !referencePath) throw new UnsupportedModelError(`${REFERENCE_ONLY_REASON}: pass { threads: 1, kernels: 'js' }`);
   const ctx = Math.min(opts.ctx ?? 2048, cfg.nCtxTrain);
   const est = estimateRam(g, cfg, { ctx, threads, kvBytes: kv === 'f16' ? 2 : 4 });
   if (opts.ramCheck !== false) {
@@ -106,7 +110,9 @@ export async function loadModel(path, opts = {}) {
   const tok = Tokenizer.fromGGUF(g);
   const jinja = g.get('tokenizer.chat_template');
   const kind = opts.template ?? detectTemplate(cfg.arch, jinja, tok);
-  const model = await PoolModel.create(g, { ctx, workers: threads, kernels: opts.kernels ?? 'auto', kv, maxBatch: opts.maxBatch, onProgress: opts.onProgress });
+  const model = cfg.referenceOnly
+    ? new RefModel(g, { ctx, onProgress: opts.onProgress })
+    : await PoolModel.create(g, { ctx, workers: threads, kernels: opts.kernels ?? 'auto', kv, maxBatch: opts.maxBatch, onProgress: opts.onProgress });
   return new Engine({ path, g, cfg, tok, kind, jinja, model, ctx, threads, kv, estimate: est, loadMs: performance.now() - t0 });
 }
 
@@ -206,7 +212,7 @@ export class Engine extends PromptTools {
    * @param {{dir: string, minTokens?: number, signal?: {aborted: boolean}, onProgress?: (done: number, total: number) => void}} o
    */
   async primePrefix(prefixIds, { dir, minTokens = 32, signal, onProgress } = {}) {
-    if (this.closed || this.model.pos !== 0 || prefixIds.length < minTokens || prefixIds.length >= this.ctx) return 'off';
+    if (this.closed || this.cfg.hybrid || this.model.pos !== 0 || prefixIds.length < minTokens || prefixIds.length >= this.ctx) return 'off';
     const cache = new PrefixCache(dir, modelFingerprint(this.path, `${this.model.kernels === 'wasm' ? 'wasm' : 'js'}/kv-${this.model.kv ?? 'f32'}`));
     if (await cache.load(this.model, prefixIds)) return 'hit';
     const r = await prefillTokens(this.model, prefixIds, { wantLogits: false, signal, onProgress });

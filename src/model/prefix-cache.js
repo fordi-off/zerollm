@@ -32,7 +32,7 @@ export class PrefixCache {
   async load(model, ids) {
     let fd = null;
     try {
-      if (model.pos !== 0 || ids.length === 0) return false;
+      if (model.pos !== 0 || ids.length === 0 || model.cfg.hybrid) return false; // KV only: hybrid models also need recurrent state
       fd = fs.openSync(this.file(ids), 'r');
       const head = Buffer.alloc(12);
       if (fs.readSync(fd, head, 0, 12, 0) !== 12 || head.toString('latin1', 0, 8) !== MAGIC) return false;
@@ -66,6 +66,7 @@ export class PrefixCache {
 
   /** Write the KV state of the first ids.length positions (the model must hold exactly that prefix). */
   async save(model, ids) {
+    if (model.cfg.hybrid) throw new Error('the KV prefix cache cannot store the recurrent state of hybrid models (Qwen3.5)');
     const kvDim = model.cfg.nHeadKv * model.cfg.headDim;
     const n = ids.length;
     if (model.pos < n) throw new Error('model does not hold the prefix');

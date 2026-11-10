@@ -37,7 +37,7 @@ Manual test checklist for a real laptop with real models: [docs/APP-CHECKS.md](d
 
 Download a `.gguf` (e.g. `Qwen3-0.6B-Q8_0.gguf`) from Hugging Face into `models/` (gitignored).
 
-**Supported:** architectures `qwen3`, `qwen2`, `llama` (Llama 3.x, including fine-tunes such as the NB Norwegian ones); tensor types F32, F16, BF16, Q4_0, Q5_0, Q8_0, Q4_K, Q5_K, Q6_K (so Q4_K_M, Q5_K_M, Q6_K and Q8_0 files work; Q2_K/Q3_K/IQ*/Q4_1/Q5_1 do not). Not supported yet: Qwen3.5 (hybrid recurrent layers), Gemma, Mistral-style SentencePiece tokenizers.
+**Supported:** architectures `qwen3`, `qwen2`, `llama` (Llama 3.x, including fine-tunes such as the NB Norwegian ones); tensor types F32, F16, BF16, Q4_0, Q5_0, Q8_0, Q4_K, Q5_K, Q6_K (so Q4_K_M, Q5_K_M, Q6_K and Q8_0 files work; Q2_K/Q3_K/IQ*/Q4_1/Q5_1 do not). **Reference path only:** Qwen3.5 (`qwen35`, hybrid Gated DeltaNet + attention; run with `--threads 1 --kernels js`, slow: well below 1 tok/s, not yet checked on the real weights, see docs/REAL-MODEL-CHECK.md; the worker pool and SIMD kernels do not support it yet). Not supported yet: Gemma, Mistral-style SentencePiece tokenizers.
 
 ```
 node bin/zerollm.js doctor                              # environment + feature probe
