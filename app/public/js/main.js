@@ -257,6 +257,7 @@ async function sendDraft(raw) {
   S.messages.push(user, reply);
   buildMessageNode(user); buildMessageNode(reply); updateWelcome();
   $('input').value = ''; autoGrow();
+  await persist(); // the chat appears in the sidebar (named after the question) right away, not only when the reply is ready
   await startRun();
 }
 

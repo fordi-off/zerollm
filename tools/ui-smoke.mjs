@@ -80,6 +80,17 @@ try {
   await page.click('.editor .btn.primary');
   await page.waitForFunction(() => document.querySelectorAll('.msg').length === 2 && document.querySelectorAll('.msg.assistant .meta').length >= 1, null, { timeout: 30000 });
   check((await page.locator('.msg.user .bubble').first().textContent()) === 'Redigert spørsmål', 'edited text shown, later messages removed');
+  // a new chat shows up in the sidebar the moment the first message is sent, before the reply is ready
+  await page.click('#btn-new');
+  const rowsBefore = await page.locator('.chat-row').count(); const metasBefore = await page.locator('.msg.assistant .meta').count();
+  let release; const gate = new Promise((r) => { release = r; });
+  await page.route('**/api/send_message', async (route) => { await gate; await route.continue(); }); // holds the request until the checks are done (later calls pass at once)
+  await page.fill('#input', 'Tidlig synlig samtale i sidepanelet'); await page.press('#input', 'Enter');
+  await page.waitForFunction((n) => document.querySelectorAll('.chat-row').length === n + 1, rowsBefore, { timeout: 1500 }).catch(() => errors.push('CHECK FAILED: chat did not appear in the sidebar before the reply'));
+  check((await page.locator('.chat-row.active .chat-item').first().textContent()).startsWith('Tidlig synlig'), 'the new chat is listed and active, named after the first message');
+  check(await page.locator('.msg.assistant .meta').count() === metasBefore, 'the reply was not ready yet when the chat appeared');
+  release();
+  await page.waitForFunction((k) => document.querySelectorAll('.msg.assistant .meta').length > k, metasBefore, { timeout: 30000 });
   // slash commands: menu, Tab to pick, chip on the sent message, saved with the chat
   await page.click('#btn-new');
   await page.fill('#input', '/hum'); await page.locator('#input').press('End');
@@ -154,7 +165,7 @@ try {
   // delete (two clicks)
   const row = page.locator('.chat-row', { hasText: 'Omdøpt' }); await row.hover();
   await row.locator('.chat-act').nth(1).click(); await row.locator('.chat-act.armed').click();
-  await page.waitForFunction(() => document.querySelectorAll('.chat-row').length === 3, null, { timeout: 5000 }).catch(async () => { await page.screenshot({ path: path.join(out, 'flow-fail-delete.png') }); errors.push(`CHECK FAILED: delete (rows: ${await page.locator('.chat-row').count()}, armed: ${await page.locator('.chat-act.armed').count()})`); });
+  await page.waitForFunction(() => document.querySelectorAll('.chat-row').length === 4, null, { timeout: 5000 }).catch(async () => { await page.screenshot({ path: path.join(out, 'flow-fail-delete.png') }); errors.push(`CHECK FAILED: delete (rows: ${await page.locator('.chat-row').count()}, armed: ${await page.locator('.chat-act.armed').count()})`); });
   await page.screenshot({ path: path.join(out, 'flow-3-after-delete.png') });
   await ctx.close(); await flowApp.close();
 
