@@ -1,6 +1,7 @@
 // Reference (single-thread, plain JS) transformer forward pass. The oracle for the worker/WASM path.
 import fs from 'node:fs';
 import { modelConfig } from './config.js';
+import { Qwen35Model } from './forward-qwen35.js';
 import { KVCache } from './kvcache.js';
 import { loadWeight, loadVector } from './loader.js';
 import { Act, matvec, dequantRow, rmsnorm, softmax, silu, ropeTables, applyRope } from '../compute/ref-kernels.js';
@@ -12,6 +13,8 @@ export class RefModel {
    * @param {{ctx?: number, onProgress?: (done: number, total: number) => void}} [opts]
    */
   constructor(g, opts = {}) {
+    // hybrid Gated DeltaNet + attention models have their own reference forward pass (same interface); a constructor may return an object
+    if (g.get('general.architecture') === 'qwen35') return new Qwen35Model(g, opts);
     const cfg = this.cfg = modelConfig(g);
     this.ctx = Math.min(opts.ctx ?? 2048, cfg.nCtxTrain);
     const fd = fs.openSync(g.path, 'r');
@@ -73,6 +76,8 @@ export class RefModel {
 
   /** After the KV regions were filled from a prefix cache: declare that the model now holds exactly `ids`. */
   restorePrefix(ids) { this.cache.length = ids.length; this.tokens = Array.from(ids); }
+
+  close() { /* nothing to release; lets RefModel stand in for PoolModel */ }
 
   /** Forget everything (start a new conversation). */
   reset() { this.cache.reset(); this.tokens.length = 0; }

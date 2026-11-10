@@ -1,7 +1,7 @@
 // Shared CLI plumbing for run / chat / bench: engine loading, sampler flags, streaming output.
 import os from 'node:os';
 import { readGGUF } from '../gguf/reader.js';
-import { modelConfig, estimateRam, assertSupportedTensorTypes } from '../model/config.js';
+import { modelConfig, estimateRam, assertSupportedTensorTypes, REFERENCE_ONLY_REASON } from '../model/config.js';
 import { RefModel } from '../model/forward.js';
 import { PoolModel } from '../compute/pool.js';
 import path from 'node:path';
@@ -93,6 +93,7 @@ export async function loadEngine(modelPath, flags) {
   const ctx = num(flags.ctx, 2048);
   const threads = threadsFromFlags(flags);
   const kv = kvFromFlags(flags);
+  if (cfg.referenceOnly && !(threads === 1 && kernelsFromFlags(flags) === 'js' && kv === 'f32')) throw new Error(`${REFERENCE_ONLY_REASON}; got --threads ${threads} --kernels ${kernelsFromFlags(flags)} --kv ${kv}`);
   const est = estimateRam(g, cfg, { ctx, threads, kvBytes: kv === 'f16' ? 2 : 4 });
   const free = os.freemem();
   if (est.perWorker > 3.8 * 2 ** 30) throw new Error(`the busiest worker would need ${formatBytes(est.perWorker)} of WebAssembly memory, over the 4 GB wasm32 limit: use more --threads, a smaller --ctx or --kv f16`);
@@ -133,7 +134,7 @@ export function templateOptions(eng, flags) {
  * @param {number[]} promptIds full prompt   @param {{role: string, content: string}[]} systemMessages usually [] or one system message
  */
 export async function usePrefixCache(eng, flags, systemMessages, promptIds, tmplOpts, signal) {
-  if (flags.cache === false || eng.kind === 'raw' || eng.model.pos !== 0) return 'off';
+  if (flags.cache === false || eng.kind === 'raw' || eng.model.pos !== 0 || eng.cfg.hybrid) return 'off'; // the KV prefix cache cannot hold recurrent state
   const prefix = encodeChat(eng.tok, eng.kind, systemMessages, { ...tmplOpts, generationPrompt: false });
   if (prefix.length < MIN_CACHED_PREFIX || prefix.length >= promptIds.length || prefix.some((t, i) => t !== promptIds[i])) return 'skip';
   const dir = typeof flags['cache-dir'] === 'string' ? flags['cache-dir'] : path.join(path.dirname(eng.g.path), '.zerollm-cache');
