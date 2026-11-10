@@ -1,6 +1,11 @@
 // Conversation files, in the same format Skibeti37 uses (chats/<id>.json) so both apps can share one data folder:
 //   { id, name, model, messages: [{role:'system', content}, {role:'user'|'assistant', content, ...extras}], attached_docs, updated_at (seconds) }
 // The system message is stored (Skibeti37 expects it first) but never shown; unknown fields are preserved on save.
+// Extra fields written by zerollm for automatic titles (Skibeti37 ignores them): `auto_title` = 'pending' | 'done' | 'failed' | 'user'
+// (absent = old / foreign chat: never titled) and `auto_placeholder` (the automatic name a title replaced).
+// 'pending': the name is the automatic placeholder the page made from the first message; 'done': the name was written by the title job;
+// 'user': the user chose the name (rename, or a save that carried a different name). A name the page sends that is only the stale
+// placeholder never overwrites an automatic title; a real rename always wins.
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -53,7 +58,10 @@ export function createChatStore(paths) {
       };
     },
 
-    /** Create (no id) or overwrite a chat. Returns the id. */
+    /**
+     * Create (no id, or an unknown id) or overwrite a chat. Returns {id, name}: the stored name can differ from the one sent, because an
+     * automatic title is kept when the page still sends the placeholder it made before the title arrived.
+     */
     save({ id, name, model, messages }) {
       if (!Array.isArray(messages)) throw new Error('messages must be a list');
       const clean = [];
@@ -64,11 +72,57 @@ export function createChatStore(paths) {
       const chatId = id ?? crypto.randomUUID();
       const existing = readRaw(chatId) ?? {};
       const sys = Array.isArray(existing.messages) && existing.messages[0]?.role === 'system' ? existing.messages[0] : { role: 'system', content: SYSTEM_PROMPT };
+      const extra = {};
+      let finalName = cleanName(name ?? existing.name);
+      if (!existing.id) {
+        // a chat the page creates with its first exchange (or just the first question) gets an automatic title later
+        const users = clean.filter((m) => m.role === 'user').length;
+        if (users === 1 && clean.length <= 2 && clean[0].role === 'user') extra.auto_title = 'pending';
+      } else if (existing.auto_title === 'pending' || existing.auto_title === 'done') {
+        const given = typeof name === 'string' && name.trim() ? cleanName(name) : null;
+        if (given === null || given === existing.name || given === existing.auto_placeholder) finalName = existing.name || finalName; // unchanged, or the stale placeholder
+        else extra.auto_title = 'user'; // the page really changed the name
+      }
       writeAtomic(file(chatId), {
-        ...existing, id: chatId, name: cleanName(name ?? existing.name), model: model ?? existing.model ?? null,
+        ...existing, ...extra, id: chatId, name: finalName, model: model ?? existing.model ?? null,
         messages: [sys, ...clean], attached_docs: existing.attached_docs ?? {}, updated_at: Date.now() / 1000,
       });
-      return chatId;
+      return { id: chatId, name: finalName };
+    },
+
+    /**
+     * What the title job needs, or null when this chat is not waiting for a title (not 'pending', or no finished first exchange yet).
+     * `exchanges` is 1 when the chat holds exactly one question and its reply; `history` is the conversation up to the reply.
+     */
+    autoTitleCandidate(id) {
+      const d = readRaw(id);
+      if (!d || d.auto_title !== 'pending' || !Array.isArray(d.messages)) return null;
+      const msgs = d.messages.filter((m) => m && m.role !== 'system' && typeof m.content === 'string');
+      const u = msgs[0]; const a = msgs[1];
+      if (u?.role !== 'user' || a?.role !== 'assistant' || !u.content.trim() || !a.content.trim()) return null;
+      return { id, name: d.name, model: d.model ?? null, userText: u.content, replyText: a.content, exchanges: msgs.length === 2 ? 1 : Math.floor(msgs.length / 2), history: [u] };
+    },
+
+    /**
+     * Write an automatic title - only if the chat is still 'pending' (not renamed, not titled) and its first message is still the one the
+     * title was made from. Read, check and write are one synchronous step, so a rename cannot slip in between. updated_at is NOT touched
+     * (a title that arrives later must not move the chat to the top of the sidebar). Returns the stored name, or null when dropped.
+     */
+    applyAutoTitle(id, title, { userText } = {}) {
+      const d = readRaw(id);
+      if (!d || d.auto_title !== 'pending' || !Array.isArray(d.messages)) return null;
+      const first = d.messages.find((m) => m && m.role === 'user');
+      if (userText !== undefined && first?.content !== userText) return null;
+      d.auto_placeholder = d.name; d.name = cleanName(title); d.auto_title = 'done';
+      writeAtomic(file(id), d);
+      return d.name;
+    },
+
+    /** Mark a still-'pending' chat 'failed' (the model produced nothing usable): it keeps its placeholder and is not tried again. */
+    markAutoTitle(id, state) {
+      const d = readRaw(id);
+      if (!d || d.auto_title !== 'pending') return false;
+      d.auto_title = state; writeAtomic(file(id), d); return true;
     },
 
     /** Rolling summary cache (Skibeti37 format): {summary, summarized_count}. */
@@ -80,7 +134,9 @@ export function createChatStore(paths) {
 
     rename(id, name) {
       const d = readRaw(id); if (!d) return false;
-      d.name = cleanName(name); writeAtomic(file(id), d); return true;
+      d.name = cleanName(name);
+      if (d.auto_title) d.auto_title = 'user'; // the user's name wins over any automatic title, now and later
+      writeAtomic(file(id), d); return true;
     },
 
     delete(id) {

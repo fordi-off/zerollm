@@ -14,16 +14,24 @@ import { createSkills } from './skills.js';
 import { createDownloader, freeDiskBytes } from './downloader.js';
 import { CATALOG } from './catalog.js';
 import { createSummarizer } from './summarizer.js';
+import { createTitler } from './titles.js';
 import { buildMessages, fitToContext, looksLooped, stablePrefixIds, renderWithContext, RECENT_KEEP, SUMMARIZE_AT, SUMMARY_PREFIX, SAMPLING, THINK_SAMPLING, THINK_MAX_TOKENS, DEFAULT_MAX_TOKENS, CONTINUATION_PROMPT } from './chat-core.js';
 
 const I18N_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'i18n');
 
-export function createApi({ paths, host, getConfig, setConfig, log, emit, catalog = CATALOG, retryDelayMs }) {
+export function createApi({ paths, host, getConfig, setConfig, log, emit, catalog = CATALOG, retryDelayMs, titleRun }) {
   let runSeq = 0;
   let current = null; // {id, abort: {aborted}}
   const chatStore = createChatStore(paths);
   const skills = createSkills(paths);
   const summarizer = createSummarizer({ paths, host, getConfig, log });
+  // Automatic chat titles (background job after the first exchange; see app/titles.js). The messages it builds for the chat model are the chat's own.
+  const titler = createTitler({
+    chatStore, summarizer, host, getConfig, log, emit, runActive: () => current !== null, run: titleRun,
+    chatPrompt: (history) => buildMessages(history, { extraSystem: extraText(history, '') }),
+  });
+  /** Unload the chat model - after a running title job (which may be using it) has been stopped. */
+  const unloadHost = async ({ all = false } = {}) => { await titler.stop({ all }); await host.unload(); };
   skills.seed();
   /** Instruction text for the slash commands on the last user message (they apply to that one reply). */
   const extraFor = (history) => skills.bodies([...history].reverse().find((m) => m.role === 'user')?.commands) ?? '';
@@ -64,6 +72,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
     current = { id, abort };
     const send = (type, data = {}) => emit(type, { runId: id, ...data });
     try {
+      await titler.stop(); // a title job in the background gives way at once (the engine serves one thing at a time)
       const resident = host.loadedName === model;
       send('phase', { phase: resident ? 'preparing' : 'loading', model });
       const engine = await host.ensure(model);
@@ -171,7 +180,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
       const models = listModels(paths, cfg);
       return {
         language: cfg.language, models, lastModel: cfg.last_model, loaded: host.loadedName,
-        settings: { preload: cfg.preload_model !== false, utilityModel: cfg.utility_model, contextWindow: cfg.context_window, threads: cfg.n_threads, contextSteps: CONTEXT_STEPS, maxThreads: os.availableParallelism?.() ?? os.cpus().length, defaultThreads: defaultThreads() },
+        settings: { preload: cfg.preload_model !== false, autoTitles: cfg.auto_titles !== false, utilityModel: cfg.utility_model, contextWindow: cfg.context_window, threads: cfg.n_threads, contextSteps: CONTEXT_STEPS, maxThreads: os.availableParallelism?.() ?? os.cpus().length, defaultThreads: defaultThreads() },
         system: { freeRam: os.freemem(), totalRam: os.totalmem() },
         busy: current !== null,
       };
@@ -200,7 +209,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
 
     async delete_model({ filename }) {
       const full = modelPath(paths, filename);
-      if (host.loadedName === filename) await host.unload();
+      if (host.loadedName === filename) await unloadHost();
       fs.unlinkSync(full);
       const cfg = getConfig();
       if (cfg.models?.[filename]) { delete cfg.models[filename]; }
@@ -238,7 +247,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
 
     async list_chats() { return chatStore.list(); },
     async load_chat({ id }) { return chatStore.load(id); },
-    async save_chat(p) { return { id: chatStore.save(p) }; },
+    async save_chat(p) { const r = chatStore.save(p); titler.maybeStart(r.id); return r; },
     async rename_chat({ id, name }) { return { ok: chatStore.rename(id, name) }; },
     async delete_chat({ id }) { return { ok: chatStore.delete(id) }; },
 
@@ -281,11 +290,17 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
       const v = Number(value);
       if (!Number.isInteger(v) || v < 512 || v > 131072) throw new Error('invalid context size');
       const cfg = getConfig(); cfg.context_window = v; setConfig(cfg);
-      await host.unload();
+      await unloadHost();
       return { ok: true, contextWindow: v };
     },
 
     async set_preload({ value }) { const cfg = getConfig(); cfg.preload_model = value === true; setConfig(cfg); return { ok: true, preload: cfg.preload_model }; },
+
+    async set_auto_titles({ value }) {
+      const cfg = getConfig(); cfg.auto_titles = value === true; setConfig(cfg);
+      if (!cfg.auto_titles) await titler.stop();
+      return { ok: true, autoTitles: cfg.auto_titles };
+    },
 
     async set_utility_model({ filename }) {
       const cfg = getConfig();
@@ -298,7 +313,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
       const v = Number(value);
       if (!Number.isInteger(v) || v < 1 || v > 64) throw new Error('invalid thread count');
       const cfg = getConfig(); cfg.n_threads = v; setConfig(cfg);
-      await host.unload();
+      await unloadHost();
       return { ok: true, threads: v };
     },
 
@@ -308,7 +323,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
       const m = { ...(cfg.models[filename] ?? {}) };
       if (kv !== undefined) {
         if (kv !== 'f16' && kv !== 'f32') throw new Error('invalid kv precision');
-        if (m.kv !== kv && host.loadedName === filename) await host.unload();
+        if (m.kv !== kv && host.loadedName === filename) await unloadHost();
         m.kv = kv;
       }
       if (typeof display_name === 'string') m.display_name = display_name.trim().slice(0, 80);
@@ -317,15 +332,15 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
       return { ok: true };
     },
 
-    async unload_model() { await host.unload(); return { ok: true }; },
+    async unload_model() { await unloadHost(); return { ok: true }; },
 
     async reset_settings() {
-      await host.unload();
+      await unloadHost();
       const keep = getConfig();
       setConfig({ ...defaultConfig(), last_model: keep.last_model });
       return { ok: true };
     },
   };
 
-  return { methods, preload, async shutdown() { downloader.cancel(); if (current) current.abort.aborted = true; await host.unload(); } };
+  return { methods, preload, async shutdown() { downloader.cancel(); if (current) current.abort.aborted = true; await unloadHost({ all: true }); } };
 }

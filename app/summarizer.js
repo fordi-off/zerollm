@@ -23,23 +23,29 @@ export function createSummarizer({ paths, host, getConfig, log }) {
     return out.trim();
   }
 
-  /** Run `fn(engine)` with the small model (loaded for the job and closed after), or the chat model when none is usable. */
-  async function withEngine(chatFilename, fn) {
+  /**
+   * Run `fn(engine, {own})` with the small model (loaded for the job and closed after; `own` = true), or the chat model when none is
+   * usable (`own` = false). With `signal`, an abort while the small model was loading ends the job before anything runs (returns null),
+   * and `onLoading(true|false)` brackets the load so the caller knows when the chat engine is certainly not in use.
+   */
+  async function withEngine(chatFilename, fn, { signal, onLoading, label = 'summarizing' } = {}) {
     const cfg = getConfig();
     const utility = pickUtilityModel(listModels(paths, cfg), chatFilename, cfg.utility_model);
     let engine = null; let own = false;
     if (utility) {
+      onLoading?.(true);
       try {
         engine = await loadModel(modelPath(paths, utility), { ctx: UTILITY_CTX, threads: cfg.n_threads, kv: 'f16' });
         own = true;
-        log.info(`summarizing with ${utility}`);
+        log.info(`${label} with ${utility}`);
       } catch (e) {
-        log.info(`utility model ${utility} not used (${e instanceof EngineMemoryError ? 'not enough free RAM' : e.message}); summarizing with the chat model`);
-      }
+        log.info(`utility model ${utility} not used (${e instanceof EngineMemoryError ? 'not enough free RAM' : e.message}); ${label} with the chat model`);
+      } finally { onLoading?.(false); }
     }
+    if (signal?.aborted) { if (own) await engine.close(); return null; }
     if (!engine) engine = host.engine;
     if (!engine) throw new Error('no model available for summarizing');
-    try { return await fn(engine); } finally { if (own) await engine.close(); }
+    try { return await fn(engine, { own }); } finally { if (own) await engine.close(); }
   }
 
   /**
@@ -59,5 +65,5 @@ export function createSummarizer({ paths, host, getConfig, log }) {
     });
   }
 
-  return { fold, pick: (chatFilename) => pickUtilityModel(listModels(paths, getConfig()), chatFilename, getConfig().utility_model) };
+  return { fold, withEngine, pick: (chatFilename) => pickUtilityModel(listModels(paths, getConfig()), chatFilename, getConfig().utility_model) };
 }
