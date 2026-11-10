@@ -14,7 +14,7 @@ import { instantiateKernels, resolveDotMode, usesInt8Acts } from './wasm/kernels
 import { Barrier } from './barrier.js';
 import { CTRL, CMD_EXIT, CMD_KV_EXPORT, CMD_KV_IMPORT, splitRows, splitRange, alignUp } from './layout.js';
 
-const { id, n, cfg, tensors, path, ctx, shared, spin, kernels, maxBatch, kvType } = workerData;
+const { id, n, cfg, tensors, path, ctx, shared, spin, kernels, maxBatch, logitsBatch, kvType } = workerData;
 const kvF16 = kvType === 'f16';
 // opt-in profile of worker 0 (ZEROLLM_PROFILE=1): where does a token's time go?
 const prof = process.env.ZEROLLM_PROFILE === '1' && id === 0;
@@ -71,13 +71,15 @@ function main() {
   const maxCols = Math.max(nEmbd, qDim, nFF);
   const maxRows = Math.max(1, ...plan.map((p) => p.r1 - p.r0));
   const maxRowsBatch = Math.max(1, ...plan.filter((p) => p.key !== 'embd' && p.key !== 'output').map((p) => p.r1 - p.r0));
+  const outPlan = plan.find((p) => p.key === (cfg.tiedEmbeddings ? 'embd' : 'output'));
+  const outRows = outPlan.r1 - outPlan.r0;
   const XQ = total; total += alignUp(maxCols, 64);                       // int8 activation (decode)
   const XD = total; total += alignUp((maxCols / 32) * 4, 64);            // its f32 scales
   const XQ16 = total; total += alignUp(BM * maxCols * 2, 64);            // int16-widened activations (batched)
   const XDB = total; total += alignUp(BM * (maxCols / 32) * 4, 64);      // their scales
   const XS = total; total += alignUp((maxCols / 32) * 4, 64);            // per-block quant sums (decode; used by Q4_K/Q5_K)
   const XSB = total; total += alignUp(BM * (maxCols / 32) * 4, 64);      // same for batches
-  const YO = total; total += alignUp(Math.max(maxRows, BM * maxRowsBatch) * 4, 64); // f32 results
+  const YO = total; total += alignUp(Math.max(maxRows, BM * maxRowsBatch, logitsBatch * outRows) * 4, 64); // f32 results (logits of a whole batch with logits 'all')
   const QHP = total; total += alignUp(headDim * 4, 64);                  // attention: query head
   const SCP = total; total += alignUp(ctx * 4, 64);                       // attention: scores / probabilities
   const OHP = total; total += alignUp(headDim * 4, 64);                   // attention: output head
@@ -138,7 +140,7 @@ function main() {
   const xdBv = new Float32Array(mem.buffer, XDB, (BM * maxCols) / 32);
   const xsv = new Float32Array(mem.buffer, XS, maxCols / 32);
   const xsBv = new Float32Array(mem.buffer, XSB, (BM * maxCols) / 32);
-  const yv = new Float32Array(mem.buffer, YO, Math.max(maxRows, BM * maxRowsBatch));
+  const yv = new Float32Array(mem.buffer, YO, Math.max(maxRows, BM * maxRowsBatch, logitsBatch * outRows));
   let k = null;
   if (useWasm) {
     k = instantiateKernels(mem, { dot });
@@ -315,7 +317,11 @@ function main() {
       bar.wait();
     }
 
-    if (wantLogits) { // only for the LAST token of the batch
+    if (wantLogits === 2) { // every token of the batch: the output weights are read once for all B rows (batched kernel)
+      for (let b = 0; b < B; b++) rmsnorm(xbP, x, outputNorm, rmsEps, nEmbd, b * nEmbd, b * nEmbd);
+      prep(xbP, B, nEmbd);
+      mm(outW, logits, vocabSize, vr0);
+    } else if (wantLogits === 1) { // only for the LAST token of the batch
       rmsnorm(xbP, x, outputNorm, rmsEps, nEmbd, (B - 1) * nEmbd, 0);
       prep(xbP, 1, nEmbd);
       mm(outW, logits, 0, vr0);
@@ -351,7 +357,7 @@ function main() {
     }
     const B = Atomics.load(ctrl, CTRL.BATCH);
     const tt = prof ? performance.now() : 0;
-    runBatch(B, Atomics.load(ctrl, CTRL.POS), Atomics.load(ctrl, CTRL.WANT_LOGITS) === 1);
+    runBatch(B, Atomics.load(ctrl, CTRL.POS), Atomics.load(ctrl, CTRL.WANT_LOGITS));
     if (prof) { PT.total += performance.now() - tt; PT.tokens += B; PT.batches++; }
     Atomics.add(ctrl, CTRL.DONE, 1);
     Atomics.notify(ctrl, CTRL.DONE);

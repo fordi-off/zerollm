@@ -50,8 +50,33 @@ function argmax(logits) {
 }
 
 /**
+ * The distribution a sampler draws from, after every transformation (penalties, temperature, top-k, min-p, top-p).
+ * Sparse: `ids[i]` has probability `probs[i] / total` (candidates sorted by descending probability; every token that is
+ * not listed has probability 0). `probs` is deliberately NOT normalised: drawing uses `rand() * total`, exactly as the
+ * sampler always did, so seeded sampling is bit-identical to what it was before this type existed.
+ * @typedef {Object} TokenDist
+ * @property {Int32Array} ids
+ * @property {Float64Array} probs
+ * @property {number} total  sum of probs
+ * @property {boolean} greedy  point mass on ids[0] (temperature <= 0); drawing consumes no random number
+ */
+
+/**
+ * A sampler: `sample(logits, history)` returns a token id. It also exposes its two halves, used by speculative decoding:
+ * `distribution(logits, history)` (the final probability vector, no random number consumed) and `draw(dist)` (one random
+ * number -> token). `sample(l, h)` is exactly `draw(distribution(l, h))`.
+ * @typedef {((logits: Float32Array, history: number[]) => number) & {
+ *   distribution: (logits: Float32Array, history: number[]) => TokenDist,
+ *   draw: (dist: TokenDist) => number,
+ *   rand: () => number,
+ *   greedy: boolean,
+ *   usesHistory: boolean,  // false: the token history never changes the result (no penalties)
+ * }} Sampler
+ */
+
+/**
  * @param {SamplerOptions} [o]
- * @returns {(logits: Float32Array, history: number[]) => number}
+ * @returns {Sampler}
  */
 export function createSampler(o = {}) {
   const temperature = o.temperature ?? 0.8;
@@ -65,7 +90,8 @@ export function createSampler(o = {}) {
   const rand = mulberry32(o.seed ?? ((Date.now() ^ (Math.random() * 2 ** 32)) >>> 0));
   const penalized = repeatPenalty !== 1 || presence !== 0 || frequency !== 0;
 
-  return function sample(logits, history) {
+  /** @returns {TokenDist} */
+  function distribution(logits, history) {
     // --- penalties (applied in place, restored before returning so callers' buffers stay untouched)
     let saved = null;
     if (penalized && history.length) {
@@ -82,7 +108,7 @@ export function createSampler(o = {}) {
     }
     const restore = () => { if (saved) for (let i = 0; i < saved.length; i += 2) logits[saved[i]] = saved[i + 1]; };
 
-    if (temperature <= 0) { const id = argmax(logits); restore(); return id; }
+    if (temperature <= 0) { const id = argmax(logits); restore(); return { ids: Int32Array.of(id), probs: Float64Array.of(1), total: 1, greedy: true }; }
 
     // --- candidates sorted by logit, descending
     let ids; let vals;
@@ -112,8 +138,18 @@ export function createSampler(o = {}) {
     }
     let total = 0;
     for (let i = 0; i < keep; i++) total += probs[i];
-    let r = rand() * total;
-    for (let i = 0; i < keep; i++) { r -= probs[i]; if (r <= 0) return ids[i]; }
-    return ids[keep - 1];
-  };
+    return { ids: ids.subarray(0, keep), probs: probs.subarray(0, keep), total, greedy: false };
+  }
+
+  /** @param {TokenDist} d */
+  function draw(d) {
+    if (d.greedy) return d.ids[0];
+    const keep = d.ids.length;
+    let r = rand() * d.total;
+    for (let i = 0; i < keep; i++) { r -= d.probs[i]; if (r <= 0) return d.ids[i]; }
+    return d.ids[keep - 1];
+  }
+
+  const sample = (logits, history) => draw(distribution(logits, history));
+  return Object.assign(sample, { distribution, draw, rand, greedy: temperature <= 0, usesHistory: penalized });
 }

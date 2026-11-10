@@ -18,13 +18,18 @@ export const TINY_MERGES = [
 
 /**
  * @param {{arch?: string, quant?: 'f32'|'q8_0'|'q4_0'|'q5_0'|'q4_k'|'q5_k'|'q6_k'|'q4_k_m', seed?: number, tied?: boolean, nEmbd?: number, nLayer?: number,
- *          nHead?: number, nHeadKv?: number, headDim?: number, nFF?: number, ctx?: number, alignment?: number, ropeFreqs?: boolean, padVocabTo?: number, outFile?: string}} [o]
+ *          nHead?: number, nHeadKv?: number, headDim?: number, nFF?: number, ctx?: number, alignment?: number, ropeFreqs?: boolean, padVocabTo?: number, outFile?: string,
+ *          std?: number, embdStd?: number, perturb?: number, perturbSeed?: number, fadeAfter?: number, fade?: number}} [o]  fadeAfter/fade: multiply the output projections of layers >= fadeAfter by `fade` (they
+ *          only nudge the residual stream), so a model with `nLayer: fadeAfter` and the same seed is a cheaper draft that mostly agrees with this one.  perturb: add gaussian noise of this relative size (x std) to every float weight
+ *          (separate random stream `perturbSeed`; the model keeps its shape): a related-but-different model, e.g. a draft with partial acceptance.  std: stddev of the layer weights (default 0.05; larger = more context-dependent, peakier logits),
+ *          embdStd: stddev of token_embd / output (default 0.05). Two models with the same arch share the vocabulary whatever their size/seed.
  * @returns {{ buffer: Buffer, tokens: string[], cfg: object }}
  */
 export function makeTinyModel(o = {}) {
   const arch = o.arch ?? 'qwen3';
   const quant = o.quant ?? 'f32';
   const rand = mulberry32(o.seed ?? 1);
+  const prand = mulberry32(o.perturbSeed ?? 12345);
   const nEmbd = o.nEmbd ?? 64;
   const nLayer = o.nLayer ?? 2;
   const nHead = o.nHead ?? 4;
@@ -57,7 +62,8 @@ export function makeTinyModel(o = {}) {
   // --- tensors
   const tensors = [];
   const RAW_TYPES = { q5_0: GGML_TYPE.Q5_0, q4_k: GGML_TYPE.Q4_K, q5_k: GGML_TYPE.Q5_K, q6_k: GGML_TYPE.Q6_K };
-  const mat = (name, ne0, ne1, std = 0.05) => {
+  const mat = (name, ne0, ne1, std0) => {
+    const std = std0 ?? ((name === 'token_embd.weight' || name === 'output.weight' ? o.embdStd : o.std) ?? 0.05);
     const n = ne0 * ne1;
     // K-quant style per-tensor type choice. 'q4_k_m' mimics llama.cpp's Q4_K_M mix: Q6_K for attn_v / ffn_down / output,
     // Q4_K for the rest. Rows whose length is not a whole number of blocks fall back to F32 (ggml falls back too).
@@ -70,6 +76,9 @@ export function makeTinyModel(o = {}) {
     }
     const f = new Float32Array(n);
     for (let i = 0; i < n; i++) f[i] = gaussian(rand) * std;
+    if (o.perturb) for (let i = 0; i < n; i++) f[i] += gaussian(prand) * std * o.perturb;
+    const fadeLayer = /^blk\.(\d+)\.(attn_output|ffn_down)\.weight$/.exec(name);
+    if (o.fadeAfter !== undefined && fadeLayer && Number(fadeLayer[1]) >= o.fadeAfter) for (let i = 0; i < n; i++) f[i] *= o.fade ?? 0.1;
     if (quant === 'q8_0' && ne0 % 32 === 0) tensors.push({ name, dims: [ne0, ne1], type: GGML_TYPE.Q8_0, data: quantizeQ8_0(f) });
     else if (quant === 'q4_0' && ne0 % 32 === 0) tensors.push({ name, dims: [ne0, ne1], type: GGML_TYPE.Q4_0, data: quantizeQ4_0(f) });
     else tensors.push({ name, dims: [ne0, ne1], type: GGML_TYPE.F32, data: new Uint8Array(f.buffer) });

@@ -299,3 +299,84 @@ $env:ZEROLLM_DOT="relaxed-add"; $env:ZEROLLM_PROFILE=1; node bin/zerollm.js benc
 ```
 
 Reading the result: `dotbench` prints median (min-max) over interleaved rounds; trust differences only when they exceed the spread (the laptop varies +-15% run to run). If `kbench` shows the batched Q4_K/Q6_K columns clearly above `extmul` AND `dotbench` shows prefill above the spread, relaxed is worth making the default for K-quant models (the first mode that wins decides between `relaxed` and `relaxed-add`; `kbench`'s Q4_0/Q5_0 rows say which is better for legacy files). If the relaxed columns are at or below extmul on Zen 3, the finding is that Node 26 on this CPU lowers the relaxed dot no better than widen + `dot_i16x8_s`, and nothing changes. Please paste the `kbench` table, the `dotbench` summary and `node bin/zerollm.js doctor` back.
+
+## Speculative decoding (draft model + batched verification)
+
+Added 2026-11-10. **Nothing in this section has been measured on the target laptop yet.** The dev-VM numbers below only show that the mechanism works and what it costs; they say nothing about the laptop. Design and guarantees: `docs/DECISIONS.md`, "Speculative decoding".
+
+### What to expect (arithmetic, not a measurement)
+
+Speculative decoding wins when `tokens per step > (k * t_draft + t_verify(k+1)) / t_decode`. From the numbers measured on the laptop: Qwen3-8B Q4_K_M decodes at ~3.1 tok/s (t_decode ~ 320 ms) and prefills at ~7 tok/s in batches of 16 (so a verified extra token costs ~143 ms, about 45% of a decode step); Qwen3-0.6B Q8_0 decodes at ~28 tok/s (t_draft ~ 36 ms). If verifying B tokens costs `t_mem + B * t_cmp` with t_mem ~ 190 ms and t_cmp ~ 131 ms (fitted to those two points), and a drafted token is accepted with probability 0.7, the tokens/s ratio against plain decoding comes out around 1.1x for k = 1-2 and ~1.0x for k = 3, and about 1.4x if the batched pass overlaps memory and compute perfectly (`max(t_mem, B * t_cmp)`). So the realistic range is **roughly 1.0-1.5x for this pair on this laptop, with acceptance as the deciding factor**; the hard ceiling is the prefill/decode ratio (~2.2x). `--draft-k` defaults to 3 because k + 1 = 4 tokens fill exactly one tile of the batched kernels (see the dev-VM table below); the real optimum for the laptop is what the procedure below finds. The measurement replaces this guess.
+
+### Procedure for the laptop (PowerShell or cmd, repo root, nothing else running; ~6.5 GB must be free: 8B Q4_K_M ~5.0 GB + 0.6B Q8_0 ~0.9 GB)
+
+Files: `models/Qwen3-8B-Q4_K_M.gguf` and `models/Qwen3-0.6B-Q8_0.gguf` (same tokenizer; any other same-family pair works the same, e.g. Llama-3.1-8B + Llama-3.2-1B).
+
+1. Compatibility and memory (no weights are read for the check; a mismatch stops with a clear message):
+   `node bin/zerollm.js run models/Qwen3-8B-Q4_K_M.gguf --draft models/Qwen3-0.6B-Q8_0.gguf -p "Hi" --n 8 --threads 6 --kv f16`
+   Note the RSS in the stats line (plain 8B run was ~5.0 GB).
+2. Correctness on the real pair (greedy must give identical text; `fc` is the Windows file compare):
+   `node bin/zerollm.js run models/Qwen3-8B-Q4_K_M.gguf -p "Explain how a hash table works." --n 150 --temp 0 --threads 6 --kv f16 > plain.txt`
+   `node bin/zerollm.js run models/Qwen3-8B-Q4_K_M.gguf --draft models/Qwen3-0.6B-Q8_0.gguf -p "Explain how a hash table works." --n 150 --temp 0 --threads 6 --kv f16 > spec.txt`
+   `fc plain.txt spec.txt`
+   (The two texts can differ in a rare near-tie: the batched verification pass and the single-token pass are bit-identical on every synthetic model tried, but this has not been confirmed on a real Q4_K_M file. If they differ, send both files and the first differing token.)
+3. Speed, paired and interleaved (5 rounds, medians; takes ~10-15 minutes; `--chat` wraps the prompts in the chat template like the app does):
+   `node tools/specbench.mjs models/Qwen3-8B-Q4_K_M.gguf models/Qwen3-0.6B-Q8_0.gguf --threads 6 --draft-threads 2,4,6 --k 1,2,3,4 --n 128 --rounds 5 --chat --kv f16 --ctx 2048`
+   Paste the whole table. Columns: plain tok/s, speculative tok/s, speed-up (median of paired ratios and min-max), accepted (share of drafted tokens that were kept), tok/step (1 + accepted drafts per verification pass), draft ms/step and verify ms/step.
+4. Same with sampling (chat default is temperature 0.7; texts differ, so only speed and acceptance are compared):
+   `node tools/specbench.mjs models/Qwen3-8B-Q4_K_M.gguf models/Qwen3-0.6B-Q8_0.gguf --threads 6 --draft-threads 4 --k 2,3 --n 128 --rounds 5 --chat --temp 0.7 --kv f16`
+5. A real conversation, the number that matters in the app (look at "decode X tok/s" and the "speculative k=..." part of the stats line after each answer; compare with the same chat without `--draft`):
+   `node bin/zerollm.js chat models/Qwen3-8B-Q4_K_M.gguf --draft models/Qwen3-0.6B-Q8_0.gguf --draft-k 2 --threads 6 --kv f16 --system "Be brief."`
+6. The one-shot variant of step 3 for a single configuration, with the built-in prompt (not representative, only for comparing runs of the same file): `node bin/zerollm.js bench models/Qwen3-8B-Q4_K_M.gguf --threads 6 --kv f16 --n 64 --prompt-file prompt.txt --draft models/Qwen3-0.6B-Q8_0.gguf --draft-k 1,2,3 --draft-threads 4`.
+
+What to look at: (a) is `speculative tok/s` above `plain tok/s` for some k and draft thread count? (b) what is the acceptance on chat-style text (and on code, if you ask for code)? (c) `verify ms/step` against the plain decode time: that is the real cost of verifying k+1 tokens on this machine; (d) does the draft slow the target (compare plain tok/s here with the earlier 3.1 tok/s; if it is lower, the two pools are fighting for cores or memory: try fewer draft threads); (e) RSS with both models loaded. Draft and target workers never run at the same time; the default is min(`--threads`, 4) draft threads.
+
+### Dev VM (4 vCPU, noisy), synthetic models, indicative only
+
+All models below are **synthetic random-weight GGUFs** made with `tools/make-tiny-gguf.js` (Qwen3 architecture, Q8_0, width 1024, 16/8 heads, head_dim 128, FFN 3072). A draft that agrees with the target is built by giving both the same seed and making the target's layers beyond the draft's depth contribute little (`fadeAfter` / `fade` options: target = 28 layers, draft = its first 3 or 7 layers, same embeddings and output head). **The dev VM is noisy**: plain decode of one file varied by up to 2x between runs at times, so `tools/specbench.mjs` runs plain and speculative decoding interleaved, in the same process, and the speed-up column is the median of the paired ratios (min-max in brackets). Greedy, 64 tokens per run, 5 rounds, 4 target workers, kernels wasm-simd, f32 KV. Everything here: *synthetic model on a 4-vCPU dev VM, indicative only*.
+
+**1. Cost of one verification pass** (`forwardBatch(B tokens, {logits: 'all'})`) divided by the cost of one decode step, pair "cheap" target (28 layers, vocabulary 8000, 455 MB), 4 workers, median of 12 repetitions, ranges over 2-3 runs. B = k + 1 drafted-plus-pending tokens; "B sequential steps" is what plain decoding would pay for the same tokens (B x 1.0).
+
+| B | before the kernel change | after (tiles of 3 and 2 tokens added) |
+|---|---|---|
+| 1 | 1.00 | 1.00 |
+| 2 | 1.75-1.85 | 1.23-1.39 |
+| 3 | 2.59-2.63 | 1.33-1.47 |
+| 4 | 1.42-1.67 | 1.42-1.65 |
+| 5 | 2.12-2.41 | 2.11-2.53 |
+| 6 | 2.91-3.01 | 2.26-2.86 |
+| 7 | 3.62-3.85 | 2.49-3.10 |
+| 8 | 2.60-3.02 | 2.53-3.35 |
+
+The batched kernels work in tiles of 4 tokens and used to do a remainder of 1-3 tokens as lone-token tiles (each re-widening the weight tile), so B = 3 cost more than B = 4 and about as much as three decode steps. B = 4 (k = 3) fills one tile, which is why `--draft-k` defaults to 3; B = 5 needs a second pass over the tile and costs ~50% more. (Also measured on a Qwen3-0.6B-shaped Q8_0 target with the full 151936-token vocabulary, old kernels, single run: B = 2/3/4/5/6/8 cost 1.53/1.87/1.78/2.09/2.44/3.05 decode steps.) A run on an 8B-shaped synthetic Q4_K_M model was too noisy to use (non-monotonic times) and is not reported.
+
+**2. Speculative vs plain decoding** (`node tools/specbench.mjs target draft --threads 4 --draft-threads 1,2 --k 2,3,4,6 --n 64 --rounds 5`; after the kernel change):
+
+Pair "cheap": target 28 layers / vocabulary 8000 (455 MB), draft = its first 3 layers (56 MB, draft pass ~0.1-0.2 of a target pass). Greedy output identical to plain in every run.
+
+| draft threads | k | plain tok/s | speculative tok/s | speed-up (median paired, min-max) | accepted | tok/step | draft ms/step | verify ms/step |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 2 | 14.44 | 19.62 | 1.34x (1.30-1.49) | 81% | 2.56 | 30.5 | 99.7 |
+| 1 | 3 | 14.44 | 20.86 | 1.48x (1.39-1.56) | 77% | 3.20 | 42.4 | 114.9 |
+| 1 | 4 | 14.44 | 18.37 | 1.28x (1.16-1.30) | 75% | 4.00 | 52.2 | 161.6 |
+| 1 | 6 | 14.44 | 19.06 | 1.32x (1.29-1.36) | 66% | 4.57 | 62.7 | 188.3 |
+| 2 | 2 | 14.57 | 21.92 | 1.50x (1.42-1.67) | 81% | 2.56 | 19.2 | 100.3 |
+| 2 | 3 | 14.57 | 23.89 | 1.62x (1.51-1.86) | 77% | 3.20 | 25.5 | 112.6 |
+| 2 | 4 | 14.57 | 20.59 | 1.39x (1.18-1.55) | 75% | 4.00 | 29.5 | 161.9 |
+| 2 | 6 | 14.57 | 20.95 | 1.46x (1.37-1.65) | 66% | 4.57 | 38.8 | 182.3 |
+
+(Before the kernel change the same pair gave 0.87-1.58x with a dip at k = 2 (B = 3): k = 2/3/4/6 at 1 draft thread: 0.87x/1.58x/1.30x/1.02x.)
+
+Pair "0.6B-shaped": target 28 layers with the real 151936-token vocabulary (604 MB), draft = its first 7 layers (269 MB: the big output head makes it only ~2.2x cheaper than the target per token, a poor draft), 2 draft threads. Draft/target cost ratio ~0.45 and 77-81% acceptance:
+
+| k | plain tok/s | speculative tok/s | speed-up | accepted | tok/step | draft ms/step | verify ms/step |
+|---|---|---|---|---|---|---|---|
+| 2 | 12.53 | 13.89 | 1.11x (1.02-1.15) | 81% | 2.56 | 69.2 | 112.0 |
+| 3 | 12.53 | 13.67 | 1.05x (1.00-1.14) | 77% | 3.20 | 111.9 | 130.4 |
+| 4 | 12.53 | 12.12 | 0.98x (0.88-1.04) | 77% | 4.00 | 139.8 | 176.5 |
+
+Worst cases, to show the cost when speculation does not pay (pair "0.6B-shaped" with a target whose extra layers matter more, so only 18-31% of the drafts are accepted; measured BEFORE the kernel change, so the verify column is pessimistic): 0.47x (0.34-0.67) at k = 2 with 31% accepted, 0.41x at k = 4 with 18% accepted. And an "oracle" draft (an identical copy of the 455 MB target as draft, 100% accepted, k = 3, 4 draft threads): 0.77x (0.74-0.79), 4.00 tok/step, with the loop's own bookkeeping (sampling, acceptance test, rollback, event-loop turns) costing **0.2 ms per step** of 361 ms: the machinery adds no measurable overhead, the loss is the draft pass costing as much as a target pass.
+
+Rule of thumb from these tables: speculation pays when the draft pass is much cheaper than a target pass (<= ~0.25) AND at least ~70% of drafted tokens are accepted; the dev VM gives 1.3-1.6x in that regime and ~1.0-1.1x with a draft that costs 0.45 of the target.
+
+**3. Default (non-speculative) path unchanged** (`zerollm bench cheap-target.gguf --threads 4 --n 40 --prompt-tokens 48`, 8 interleaved runs of the previous revision and this one, medians): prefill 38.8 vs 39.1 tok/s, decode 13.66 vs 13.53 tok/s, i.e. within noise.

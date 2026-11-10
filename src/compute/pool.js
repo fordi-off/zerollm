@@ -3,7 +3,7 @@
 import os from 'node:os';
 import { Worker } from 'node:worker_threads';
 import { modelConfig } from '../model/config.js';
-import { CTRL, CMD_TOKEN, CMD_EXIT, CMD_KV_EXPORT, CMD_KV_IMPORT, MAX_BATCH, allocShared } from './layout.js';
+import { CTRL, CMD_TOKEN, CMD_EXIT, CMD_KV_EXPORT, CMD_KV_IMPORT, MAX_BATCH, DEFAULT_LOGITS_BATCH, allocShared } from './layout.js';
 import { probeWasmFeatures } from './wasm/features.js';
 
 /**
@@ -21,7 +21,8 @@ export function defaultSpin(workers, logical = os.availableParallelism?.() ?? os
 export class PoolModel {
   /**
    * @param {import('../gguf/reader.js').GGUFFile} g
-   * @param {{ctx?: number, workers?: number, spin?: number, kernels?: 'auto'|'wasm'|'js', maxBatch?: number, kv?: 'f32'|'f16', onProgress?: (done: number, total: number) => void}} [opts]
+   * @param {{ctx?: number, workers?: number, spin?: number, kernels?: 'auto'|'wasm'|'js', maxBatch?: number, logitsBatch?: number, kv?: 'f32'|'f16', onProgress?: (done: number, total: number) => void}} [opts]
+   *   logitsBatch: most positions one pass can return logits for (`forwardBatch(.., {logits: 'all'})`); default min(maxBatch, 16), 1 = off
    * @returns {Promise<PoolModel>}
    */
   static async create(g, opts = {}) {
@@ -51,7 +52,9 @@ export class PoolModel {
     this.issued = 0;
     /** largest prompt batch one pass may carry (weights are read once per batch) */
     this.maxBatch = Math.max(1, Math.min(opts.maxBatch ?? 16, MAX_BATCH));
-    const sh = this.shared = allocShared(cfg, this.ctx, this.maxBatch);
+    /** largest batch that can return per-position logits (the shared logits buffer holds this many vocabulary rows) */
+    this.logitsBatch = Math.max(1, Math.min(opts.logitsBatch ?? DEFAULT_LOGITS_BATCH, this.maxBatch));
+    const sh = this.shared = allocShared(cfg, this.ctx, this.maxBatch, this.logitsBatch);
     this.kvStage = new Float32Array(sh.kvStage);
     this.ctrl = new Int32Array(sh.ctrl);
     this.x = new Float32Array(sh.x);
@@ -72,7 +75,7 @@ export class PoolModel {
     this.exits = [];
     const ready = [];
     for (let id = 0; id < this.n; id++) {
-      const w = new Worker(url, { workerData: { id, n: this.n, cfg, tensors, path: g.path, ctx: this.ctx, shared: sh, spin: this.spin, kernels: this.kernels, maxBatch: this.maxBatch, kvType: this.kv } });
+      const w = new Worker(url, { workerData: { id, n: this.n, cfg, tensors, path: g.path, ctx: this.ctx, shared: sh, spin: this.spin, kernels: this.kernels, maxBatch: this.maxBatch, logitsBatch: this.logitsBatch, kvType: this.kv } });
       this.workers.push(w);
       this.exits.push(new Promise((r) => w.once('exit', r)));
       ready.push(new Promise((resolve, reject) => {
@@ -118,11 +121,12 @@ export class PoolModel {
   forward(token, opts = {}) { return this.forwardBatch([token], opts); }
 
   /**
-   * Run several tokens (at consecutive positions) in ONE pass over the weights. Logits, if requested, are for the
-   * last token only.
-   * @param {ArrayLike<number>} tokens at most `maxBatch` of them
-   * @param {{logits?: boolean}} [opts]
-   * @returns {Promise<Float32Array|null>}
+   * Run several tokens (at consecutive positions) in ONE pass over the weights. By default the logits are for the
+   * last token only; `{logits: 'all'}` returns the logits of EVERY token of the batch (row b, at offset b * vocab, is the
+   * distribution of the token that follows batch token b): the output weights are still read once for the whole batch.
+   * @param {ArrayLike<number>} tokens at most `maxBatch` of them (`logitsBatch` with logits 'all')
+   * @param {{logits?: boolean|'last'|'all'|'none'}} [opts]
+   * @returns {Promise<Float32Array|null>} view over shared memory, valid until the next forward call: vocab floats, or B * vocab floats with 'all'
    */
   async forwardBatch(tokens, opts = {}) {
     if (this.failed) throw this.failed;
@@ -132,7 +136,9 @@ export class PoolModel {
     const pos = this.tokens.length;
     if (pos + B > this.ctx) throw new Error(`context full (${this.ctx} tokens)`);
     for (let i = 0; i < B; i++) if (!(tokens[i] >= 0 && tokens[i] < this.cfg.vocabSize)) throw new Error(`token id ${tokens[i]} out of range`);
-    const want = opts.logits === false ? 0 : 1;
+    const lg = opts.logits;
+    const want = lg === false || lg === 'none' ? 0 : lg === 'all' ? 2 : 1;
+    if (want === 2 && B > this.logitsBatch) throw new Error(`logits for all positions of a batch of ${B} tokens (this pool supports ${this.logitsBatch}; raise the logitsBatch option)`);
     const { ctrl } = this;
     for (let i = 0; i < B; i++) Atomics.store(ctrl, CTRL.TOKENS + i, tokens[i]);
     Atomics.store(ctrl, CTRL.BATCH, B);
@@ -140,7 +146,8 @@ export class PoolModel {
     Atomics.store(ctrl, CTRL.WANT_LOGITS, want);
     await this.#issue(CMD_TOKEN);
     for (let i = 0; i < B; i++) this.tokens.push(tokens[i]);
-    return want ? this.logits : null;
+    if (want === 2) return this.logits.subarray(0, B * this.cfg.vocabSize);
+    return want ? this.logits.subarray(0, this.cfg.vocabSize) : null;
   }
 
   /** Send a command to all workers and wait until every one of them has finished it. */

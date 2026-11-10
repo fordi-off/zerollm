@@ -6,7 +6,7 @@ export const CTRL = Object.freeze({
   DONE: 1,      // each worker increments when it finishes a command
   TOKEN: 2,
   POS: 3,
-  WANT_LOGITS: 4,
+  WANT_LOGITS: 4, // 0 = none, 1 = last token of the batch, 2 = every token of the batch (speculative verification)
   ERROR: 5,     // worker id + 1 of the first failing worker
   CMD: 6,       // 0 = run tokens, 1 = exit
   BATCH: 7,     // number of tokens in this command (1 = decode)
@@ -44,15 +44,21 @@ export function splitRows(rows, n, w, align = 4) {
 /** Round up to a multiple of `a`. */
 export const alignUp = (v, a) => Math.ceil(v / a) * a;
 
-/** Allocate the SharedArrayBuffers a pool needs. */
-export function allocShared(cfg, ctx, maxBatch = 1) {
+/** Largest batch for which per-position logits (`logits: 'all'`) are available unless the pool is told otherwise. */
+export const DEFAULT_LOGITS_BATCH = 16;
+
+/**
+ * Allocate the SharedArrayBuffers a pool needs. `logitsBatch` = how many positions' logits one pass can return
+ * (`logits: 'all'`); the shared logits buffer holds that many vocabulary-sized rows.
+ */
+export function allocShared(cfg, ctx, maxBatch = 1, logitsBatch = 1) {
   const qDim = cfg.nHead * cfg.headDim;
   const kvDim = cfg.nHeadKv * cfg.headDim;
   const f32 = (n) => new SharedArrayBuffer(Math.max(1, n) * 4);
   return {
     ctrl: new SharedArrayBuffer(CTRL.SIZE * 4),
     x: f32(cfg.nEmbd * maxBatch), q: f32(qDim * maxBatch), k: f32(kvDim * maxBatch), v: f32(kvDim * maxBatch), att: f32(qDim * maxBatch),
-    hb: f32(cfg.nFF * maxBatch), logits: f32(cfg.vocabSize),
+    hb: f32(cfg.nFF * maxBatch), logits: f32(cfg.vocabSize * Math.max(1, logitsBatch)),
     kvStage: f32(ctx * kvDim), // staging area for KV export/import (the caches themselves are private to each worker)
   };
 }

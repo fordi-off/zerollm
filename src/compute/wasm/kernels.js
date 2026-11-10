@@ -227,6 +227,8 @@ function genMatmul(m, name, kind, act8 = false) {
           });
         };
         tokGroups(4);
+        tokGroups(3); // tiles of 3 and 2 tokens: a batch of 2-3 tokens (speculative verification) or a remainder after the 4-token tiles should not
+        tokGroups(2); // fall back to one lone-token tile per token (each tile widens the weights again; measured 2.6x vs 1.4x a decode step for B=3)
         tokGroups(1);
         f.get(r).i32(R).op('i32.add').set(r);
         f.br(nextRows);
