@@ -237,39 +237,48 @@ function genMatmul(m, name, kind, act8 = false) {
   rowGroups(1);
 }
 
-/** Integer-dot forms: `extmul` (default) and `wide` differ only in the K-quant DECODE kernels; `relaxed` also replaces every batched kernel. */
-export const DOT_MODES = Object.freeze(['extmul', 'wide', 'relaxed']);
+/**
+ * Integer-dot forms. `extmul` (default) and `wide` differ only in the K-quant DECODE kernels. `relaxed` and `relaxed-add`
+ * replace the decode AND batched Q4_0/Q5_0/Q4_K/Q5_K/Q6_K kernels with relaxed-SIMD ones (see relaxed-kernels.js); they differ
+ * in the instruction used: `relaxed` = i16x8.relaxed_dot_i8x16_i7x16_s + one widening add per 32 weights (cheapest on x64
+ * without AVX-VNNI), `relaxed-add` = i32x4.relaxed_dot_i8x16_i7x16_add_s per 16 weights (a single instruction with AVX-VNNI).
+ */
+export const DOT_MODES = Object.freeze(['extmul', 'wide', 'relaxed', 'relaxed-add']);
+
+/** true for the modes whose batched kernels read INT8 activations (token t at byte offset t*cols) instead of int16-widened ones */
+export const usesInt8Acts = (dot) => dot === 'relaxed' || dot === 'relaxed-add';
 
 let warned = false;
 const warnOnce = (msg) => { if (!warned) { warned = true; process.stderr.write(`zerollm: ${msg}\n`); } };
 
 /**
- * The dot form selected by the environment: `ZEROLLM_DOT=extmul|wide|relaxed|auto` (auto = relaxed when the engine
- * supports relaxed SIMD, else extmul); without it `ZEROLLM_KDOT=wide` still selects `wide`; the default is `extmul`.
- * `relaxed` on an engine without relaxed SIMD falls back to `extmul` with a warning (never an error).
- * NOTE: `relaxed` changes the layout the batched kernels read their activations in (int8 instead of int16), so it only
- * takes effect for callers that ask for it explicitly: `instantiateKernels(mem, { dot: resolveDotMode() })`
+ * The dot form selected by the environment: `ZEROLLM_DOT=extmul|wide|relaxed|relaxed-add`; without it `ZEROLLM_KDOT=wide`
+ * still selects `wide`; the default is `extmul` (there is deliberately no `auto`: the relaxed kernels are an experiment
+ * that has to be measured on the target CPU first, see docs/BENCHMARKS.md).
+ * `relaxed*` on an engine without relaxed SIMD falls back to `extmul` with a warning (never an error).
+ * NOTE: the relaxed modes change the layout the batched kernels read their activations in (int8 instead of int16), so they
+ * only take effect for callers that ask for it explicitly: `instantiateKernels(mem, { dot: resolveDotMode() })`
  * (the decoder worker does; the embedding worker keeps the default kernels).
  * @param {NodeJS.ProcessEnv} [env]
- * @returns {'extmul'|'wide'|'relaxed'}
+ * @returns {'extmul'|'wide'|'relaxed'|'relaxed-add'}
  */
 export function resolveDotMode(env = process.env) {
   const v = (env.ZEROLLM_DOT ?? '').trim().toLowerCase();
-  if (v === 'relaxed' || v === 'auto') {
-    if (probeWasmFeatures().relaxedSimd) return 'relaxed';
-    if (v === 'relaxed') warnOnce('ZEROLLM_DOT=relaxed requested but this Node/V8 has no WebAssembly relaxed SIMD; using the default (extmul) kernels');
+  if (v === 'relaxed' || v === 'relaxed-add') {
+    if (probeWasmFeatures().relaxedSimd) return v;
+    warnOnce(`ZEROLLM_DOT=${v} requested but this Node/V8 has no WebAssembly relaxed SIMD; using the default (extmul) kernels`);
     return 'extmul';
   }
   if (v === 'extmul' || v === 'wide') return v;
-  if (v) warnOnce(`ZEROLLM_DOT=${env.ZEROLLM_DOT} is not one of extmul|wide|relaxed|auto; ignored`);
+  if (v) warnOnce(`ZEROLLM_DOT=${env.ZEROLLM_DOT} is not one of extmul|wide|relaxed|relaxed-add; ignored`);
   return env.ZEROLLM_KDOT === 'wide' ? 'wide' : 'extmul';
 }
 
 /**
- * @param {{dot?: 'extmul'|'wide'|'relaxed', kdot?: 'extmul'|'wide'}} [opts] dot: integer dot form (kdot is the older name of the
- *   same option, minus `relaxed`); default 'extmul'. `extmul` / `wide` choose the dot form of the K-quant decode kernels;
- *   `relaxed` builds the relaxed-SIMD kernels for Q4_0/Q5_0/Q4_K/Q5_K/Q6_K (decode + batched) and an int8-activation
- *   Q8_0 batched kernel: in that module EVERY batched kernel reads int8 activations (token t at byte offset t*cols).
+ * @param {{dot?: 'extmul'|'wide'|'relaxed'|'relaxed-add', kdot?: 'extmul'|'wide'}} [opts] dot: integer dot form (kdot is the
+ *   older name of the same option, minus the relaxed modes); default 'extmul'. `extmul` / `wide` choose the dot form of the
+ *   K-quant decode kernels; the relaxed modes build the relaxed-SIMD kernels for Q4_0/Q5_0/Q4_K/Q5_K/Q6_K (decode + batched)
+ *   and an int8-activation Q8_0 batched kernel: in such a module EVERY batched kernel reads int8 activations (usesInt8Acts).
  * @returns {Uint8Array} the kernel module bytes
  */
 export function buildKernelModule(opts = {}) {
@@ -277,9 +286,9 @@ export function buildKernelModule(opts = {}) {
   if (!DOT_MODES.includes(dot)) throw new Error(`unknown dot mode "${dot}" (expected ${DOT_MODES.join('|')})`);
   const m = new ModuleBuilder().withImportedMemory(1);
   genMatvec(m, 'matvec_q8_0', 'q8'); // Q8_0 weights are signed int8 (not i7): the decode kernel stays as it is in every mode
-  if (dot === 'relaxed') {
+  if (usesInt8Acts(dot)) {
     genMatmul(m, 'mm_q8_0', 'q8', true);
-    genRelaxedKernels(m);
+    genRelaxedKernels(m, dot === 'relaxed-add' ? 'add' : 'i16');
   } else {
     genMatvec(m, 'matvec_q4_0', 'q4');
     genMatmul(m, 'mm_q8_0', 'q8');
@@ -296,12 +305,12 @@ const compiled = new Map();
 /**
  * Compile once per thread and variant, instantiate against a worker's private memory.
  * @param {WebAssembly.Memory} memory
- * @param {{dot?: 'extmul'|'wide'|'relaxed', kdot?: 'extmul'|'wide'}} [opts] without `dot`, the environment decides between
- *   extmul and wide only (ZEROLLM_DOT / ZEROLLM_KDOT); `relaxed` must be asked for explicitly (see resolveDotMode).
+ * @param {{dot?: 'extmul'|'wide'|'relaxed'|'relaxed-add', kdot?: 'extmul'|'wide'}} [opts] without `dot`, the environment decides
+ *   between extmul and wide only (ZEROLLM_DOT / ZEROLLM_KDOT); a relaxed mode must be asked for explicitly (see resolveDotMode).
  */
 export function instantiateKernels(memory, opts = {}) {
   let dot = opts.dot ?? opts.kdot;
-  if (!dot) { dot = resolveDotMode(); if (dot === 'relaxed') dot = 'extmul'; }
+  if (!dot) { dot = resolveDotMode(); if (usesInt8Acts(dot)) dot = 'extmul'; }
   if (!compiled.has(dot)) compiled.set(dot, new WebAssembly.Module(buildKernelModule({ dot })));
   return new WebAssembly.Instance(compiled.get(dot), { env: { mem: memory } }).exports;
 }

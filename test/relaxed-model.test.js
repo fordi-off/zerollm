@@ -22,16 +22,16 @@ async function createPool(g, dot, opts) {
   try { return await PoolModel.create(g, { ctx: 32, kernels: 'wasm', ...opts }); } finally { if (was === undefined) delete process.env.ZEROLLM_DOT; else process.env.ZEROLLM_DOT = was; }
 }
 
-for (const quant of ['q4_k_m', 'q5_k', 'q5_0', 'q4_0', 'q8_0']) {
-  test(`${quant}: ZEROLLM_DOT=relaxed pool tracks the default pool; batched prefill is bit-identical to token-by-token; independent of worker count`, { skip: SKIP }, async () => {
+for (const mode of ['relaxed', 'relaxed-add']) for (const quant of ['q4_k_m', 'q5_k', 'q5_0', 'q4_0', 'q8_0']) {
+  test(`${quant}: ZEROLLM_DOT=${mode} pool tracks the default pool; batched prefill is bit-identical to token-by-token; independent of worker count`, { skip: SKIP }, async () => {
     const { g } = tinyFile({ arch: 'qwen3', quant, seed: 9, ...DIMS });
     const base = await createPool(g, undefined, { workers: 2 });
-    const rx1 = await createPool(g, 'relaxed', { workers: 1 });
-    const rx3 = await createPool(g, 'relaxed', { workers: 3 });
-    const rxB = await createPool(g, 'relaxed', { workers: 2, maxBatch: 16 });
+    const rx1 = await createPool(g, mode, { workers: 1 });
+    const rx3 = await createPool(g, mode, { workers: 3 });
+    const rxB = await createPool(g, mode, { workers: 2, maxBatch: 16 });
     try {
       assert.ok(base.workerInfo.every((i) => i.dot === 'extmul'), 'default pool uses the default kernels');
-      for (const p of [rx1, rx3, rxB]) assert.ok(p.workerInfo.every((i) => i.dot === 'relaxed'), 'ZEROLLM_DOT=relaxed reaches every worker');
+      for (const p of [rx1, rx3, rxB]) assert.ok(p.workerInfo.every((i) => i.dot === mode), `ZEROLLM_DOT=${mode} reaches every worker`);
 
       let exact = 0;
       const seq = [];

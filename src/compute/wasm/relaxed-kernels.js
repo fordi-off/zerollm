@@ -21,43 +21,78 @@
 // order only (the integer partial sums are identical); the relaxed batched kernels are bit-identical to the relaxed
 // decode kernels, because float operations are performed in the same order in both.
 //
+// Unpacking. V8 lowers an i8x16 shift by a constant to a 16-bit shift plus a byte mask that it REBUILDS at every use
+// (mov imm32, movd, pshufd, pand: 5 instructions). Here byte shifts are written as i16x8 shifts followed by an explicit
+// `v128.and` with a mask kept in a local (2 instructions), and Q6_K's "(qh >> 2k & 3) << 4" is a single shift plus one mask.
+//
 // Activations: int8 everywhere. The batched kernels read int8 activations (token t at byte offset t*cols), NOT the
 // int16-widened layout of the default batched kernels; worker.js stages them accordingly when this mode is active.
 import { T } from './builder.js';
 import {
-  splat, f16At, hsum, accumulate, scaffold, scaffoldBatch, q50Init, q50Unpack,
-  q45kInit, q45kRowSetup, byteOf, q45kNibbles, q6kInit, q6kGroup,
+  splat, f16At, hsum, accumulate, scaffold, scaffoldBatch, q50Init, q45kInit, q45kRowSetup, byteOf,
 } from './kquant-kernels.js';
 
-const RD = 'i32x4.relaxed_dot_i8x16_i7x16_add_s';
+const RD = 'i32x4.relaxed_dot_i8x16_i7x16_add_s'; // 0x113
+const MA = 'i16x8.relaxed_dot_i8x16_i7x16_s';       // 0x112
 
-/** stack: [] -> [relaxed_dot(a, b, c)], all three are v128 locals (a = signed int8 vector, b = weights 0..127, c = accumulator) */
-const rd = (f, a, b, c) => f.get(a).get(b).get(c).op(RD);
-
-/** stack: [] -> [dot(x1, n1, dot(x0, n0, c))] : the 32 products of one block, accumulated onto c */
-function rd2(f, x0, n0, x1, n1, c) { f.get(x1).get(n1); rd(f, x0, n0, c); f.op(RD); }
-
-/** dst = -(sum of the activations per i32 lane << shift) for the vectors `xs` (1 or 2 locals): the accumulator start value */
-function negSum(f, st, xs, shift, dst) {
-  f.get(st.zv);
-  if (xs.length === 2) { f.get(xs[1]).get(st.ones); rd(f, xs[0], st.ones, st.zv); f.op(RD); } else rd(f, xs[0], st.ones, st.zv);
-  f.i32(shift).op('i32x4.shl').op('i32x4.sub').set(dst);
+/**
+ * The integer dot forms of the two flavors. In both, `init` is a v128 local (the accumulator start value, st.zv for zero).
+ *  'i16' (the `relaxed` mode): i16x8.relaxed_dot (one pmaddubsw on x64) for each 16 weights, the two int16 results of a
+ *        32-block are added (weights <= 31: |pair| <= 7936, so the sum of two <= 15872 < 32767) and widened once with
+ *        i32x4.extadd_pairwise_i16x8_s (one pmaddwd): 4 x64 instructions per 32 weights.
+ *  'add' (the `relaxed-add` mode): i32x4.relaxed_dot_..._add_s per 16 weights. A single vpdpbusd with AVX-VNNI, but V8 on
+ *        x64 without it emits pcmpeqd + psrlw (to rebuild the 16-bit ones) + pmaddubsw + pmaddwd + paddd for EACH use:
+ *        12 instructions per 32 weights.
+ */
+function dotOps(flavor) {
+  const add = flavor === 'add';
+  return {
+    /** stack: [] -> [init + the 32 products x0*w0 + x1*w1, summed per i32 lane] */
+    d32(f, st, x0, w0, x1, w1, init) {
+      if (add) { f.get(x1).get(w1).get(x0).get(w0).get(init).op(RD).op(RD); return; }
+      f.get(x0).get(w0).op(MA).get(x1).get(w1).op(MA).op('i16x8.add').op('i32x4.extadd_pairwise_i16x8_s');
+      if (init !== st.zv) f.get(init).op('i32x4.add');
+    },
+    /** stack: [] -> [init + the 16 products x*w, summed per i32 lane] */
+    d16(f, st, x, w, init) {
+      if (add) { f.get(x).get(w).get(init).op(RD); return; }
+      f.get(x).get(w).op(MA).op('i32x4.extadd_pairwise_i16x8_s');
+      if (init !== st.zv) f.get(init).op('i32x4.add');
+    },
+    /** dst = -(sum of the activations per i32 lane << shift) for the vectors `xs` (1 or 2 locals): the accumulator start value */
+    neg(f, st, xs, shift, dst) {
+      f.get(st.zv);
+      if (add) {
+        if (xs.length === 2) f.get(xs[1]).get(st.ones).get(xs[0]).get(st.ones).get(st.zv).op(RD).op(RD);
+        else f.get(xs[0]).get(st.ones).get(st.zv).op(RD);
+      } else {
+        // pairwise sums of int8 (|.| <= 256, two vectors <= 512) fit int16; then four-element sums per i32 lane
+        f.get(xs[0]).op('i16x8.extadd_pairwise_i8x16_s');
+        if (xs.length === 2) f.get(xs[1]).op('i16x8.extadd_pairwise_i8x16_s').op('i16x8.add');
+        f.op('i32x4.extadd_pairwise_i16x8_s');
+      }
+      f.i32(shift).op('i32x4.shl').op('i32x4.sub').set(dst);
+    },
+  };
 }
 
 /** locals shared by every relaxed kernel */
 function baseInit(st) {
   const v = () => st.f.local(T.v128);
-  Object.assign(st, { zv: v(), ones: v() });
-  st.f.v128Const(splat(0)).set(st.zv); st.f.v128Const(splat(1)).set(st.ones);
+  Object.assign(st, { zv: v(), ones: v(), c0f: v() });
+  st.f.v128Const(splat(0)).set(st.zv); st.f.v128Const(splat(1)).set(st.ones); st.f.v128Const(splat(0x0f)).set(st.c0f);
 }
 
+/** [v128 on the stack] -> its low nibbles (and) / high nibbles (16-bit shift, then mask), per byte; uses st.c0f */
+const lowNibbles = (f, st) => f.get(st.c0f).op('v128.and');
+const highNibbles = (f, st) => f.i32(4).op('i16x8.shr_u').get(st.c0f).op('v128.and');
+
 // ------------------------------------------------------------------------------------------------------ Q4_0 / Q5_0
-function genQ4_0(m) {
+function genQ4_0(m, D) {
   const init = (st) => {
     const f = st.f; const v = () => f.local(T.v128);
     baseInit(st);
-    Object.assign(st, { c0f: v(), raw: v(), n0: v(), n1: v(), x0: v(), x1: v(), neg: v(), sc: f.local(T.f32) });
-    f.v128Const(splat(0x0f)).set(st.c0f);
+    Object.assign(st, { raw: v(), n0: v(), n1: v(), x0: v(), x1: v(), neg: v(), sc: f.local(T.f32) });
   };
   scaffold(m, 'matvec_q4_0', {
     noXs: true, blockBytes: 18, xStride: 32, dStride: 4,
@@ -65,13 +100,13 @@ function genQ4_0(m) {
     block(st, R) {
       const f = st.f;
       f.get(st.xp).op('v128.load').set(st.x0); f.get(st.xp).op('v128.load', { offset: 16 }).set(st.x1);
-      negSum(f, st, [st.x0, st.x1], 3, st.neg); // offset 8
+      D.neg(f, st, [st.x0, st.x1], 3, st.neg); // offset 8
       for (let j = 0; j < R; j++) {
         f16At(f, st.p[j], 0, st.h); f.get(st.dp).op('f32.load').op('f32.mul').set(st.sc);
         f.get(st.p[j]).op('v128.load', { offset: 2 }).set(st.raw);
-        f.get(st.raw).get(st.c0f).op('v128.and').set(st.n0);
-        f.get(st.raw).i32(4).op('i8x16.shr_u').set(st.n1);
-        rd2(f, st.x0, st.n0, st.x1, st.n1, st.neg);
+        f.get(st.raw); lowNibbles(f, st); f.set(st.n0);
+        f.get(st.raw); highNibbles(f, st); f.set(st.n1);
+        D.d32(f, st, st.x0, st.n0, st.x1, st.n1, st.neg);
         accumulate(f, st.acc[j], st.sc);
       }
     },
@@ -89,15 +124,15 @@ function genQ4_0(m) {
       for (let j = 0; j < R; j++) {
         f16At(f, st.p[j], 0, st.h); f.set(st.ws[j]);
         f.get(st.p[j]).op('v128.load', { offset: 2 }).set(st.raw);
-        f.get(st.raw).get(st.c0f).op('v128.and').set(st.wn[j][0]);
-        f.get(st.raw).i32(4).op('i8x16.shr_u').set(st.wn[j][1]);
+        f.get(st.raw); lowNibbles(f, st); f.set(st.wn[j][0]);
+        f.get(st.raw); highNibbles(f, st); f.set(st.wn[j][1]);
       }
       for (let q = 0; q < TT; q++) {
         f.get(st.xp[q]).op('v128.load').set(st.x0); f.get(st.xp[q]).op('v128.load', { offset: 16 }).set(st.x1);
-        negSum(f, st, [st.x0, st.x1], 3, st.neg);
+        D.neg(f, st, [st.x0, st.x1], 3, st.neg);
         for (let j = 0; j < R; j++) {
           f.get(st.ws[j]).get(st.dp[q]).op('f32.load').op('f32.mul').set(st.sc);
-          rd2(f, st.x0, st.wn[j][0], st.x1, st.wn[j][1], st.neg);
+          D.d32(f, st, st.x0, st.wn[j][0], st.x1, st.wn[j][1], st.neg);
           accumulate(f, st.acc[j][q], st.sc);
         }
       }
@@ -106,9 +141,20 @@ function genQ4_0(m) {
   });
 }
 
-function genQ5_0(m) {
+/** n0 / n1 = the 32 UNSIGNED 5-bit quants (0..31) of the Q5_0 block at ptr p (same layout logic as the default kernels' q50Unpack) */
+function q50Unsigned(st, p, n0, n1) {
+  const f = st.f;
+  f.get(p).op('v128.load', { offset: 6 }).set(st.raw);
+  f.get(p).op('i32.load', { offset: 2 }).op('i32x4.splat').set(st.qv);
+  // 0x10 in every byte lane whose qh bit is set: swizzle the right qh byte into place, isolate the bit, compare
+  const hbits = (idx) => f.get(st.qv).get(idx).op('i8x16.swizzle').get(st.mask).op('v128.and').get(st.mask).op('i8x16.eq').get(st.c10).op('v128.and');
+  f.get(st.raw); lowNibbles(f, st); hbits(st.idx0); f.op('v128.or').set(n0);
+  f.get(st.raw); highNibbles(f, st); hbits(st.idx1); f.op('v128.or').set(n1);
+}
+
+function genQ5_0(m, D) {
   const init = (st) => {
-    q50Init(st); baseInit(st);
+    q50Init(st); baseInit(st); // q50Init also sets its own c0f (same value)
     const v = () => st.f.local(T.v128);
     Object.assign(st, { n1: v(), x0: v(), x1: v(), neg: v() });
   };
@@ -118,11 +164,11 @@ function genQ5_0(m) {
     block(st, R) {
       const f = st.f;
       f.get(st.xp).op('v128.load').set(st.x0); f.get(st.xp).op('v128.load', { offset: 16 }).set(st.x1);
-      negSum(f, st, [st.x0, st.x1], 4, st.neg); // offset 16
+      D.neg(f, st, [st.x0, st.x1], 4, st.neg); // offset 16
       for (let j = 0; j < R; j++) {
         f16At(f, st.p[j], 0, st.h); f.get(st.dp).op('f32.load').op('f32.mul').set(st.sc);
-        q50Unpack(st, st.p[j], st.n, st.n1, true);
-        rd2(f, st.x0, st.n, st.x1, st.n1, st.neg);
+        q50Unsigned(st, st.p[j], st.n, st.n1);
+        D.d32(f, st, st.x0, st.n, st.x1, st.n1, st.neg);
         accumulate(f, st.acc[j], st.sc);
       }
     },
@@ -139,14 +185,14 @@ function genQ5_0(m) {
       const f = st.f;
       for (let j = 0; j < R; j++) {
         f16At(f, st.p[j], 0, st.h); f.set(st.ws[j]);
-        q50Unpack(st, st.p[j], st.wn[j][0], st.wn[j][1], true);
+        q50Unsigned(st, st.p[j], st.wn[j][0], st.wn[j][1]);
       }
       for (let q = 0; q < TT; q++) {
         f.get(st.xp[q]).op('v128.load').set(st.x0); f.get(st.xp[q]).op('v128.load', { offset: 16 }).set(st.x1);
-        negSum(f, st, [st.x0, st.x1], 4, st.neg);
+        D.neg(f, st, [st.x0, st.x1], 4, st.neg);
         for (let j = 0; j < R; j++) {
           f.get(st.ws[j]).get(st.dp[q]).op('f32.load').op('f32.mul').set(st.sc);
-          rd2(f, st.x0, st.wn[j][0], st.x1, st.wn[j][1], st.neg);
+          D.d32(f, st, st.x0, st.wn[j][0], st.x1, st.wn[j][1], st.neg);
           accumulate(f, st.acc[j][q], st.sc);
         }
       }
@@ -156,7 +202,25 @@ function genQ5_0(m) {
 }
 
 // ------------------------------------------------------------------------------------------------------ Q4_K / Q5_K
-function genQ45K(m, decodeName, batchName, five) {
+/**
+ * Leave the 16 quants (nibbles, plus the 5th bit plane for Q5_K) of sub-block s, bytes at `off` of block ptr p, in local dst.
+ * Q5_K: bit s of the 5th-bit plane hq goes to bit 4 with ONE 16-bit shift and the 0x10 mask (shifts of at most 4 to the left
+ * and 3 to the right never move a neighbouring byte's bits into bit 4).
+ */
+function nibbles(st, p, off, s, five, hq, dst) {
+  const f = st.f;
+  f.get(p).op('v128.load', { offset: off });
+  if (s & 1) f.i32(4).op('i16x8.shr_u');
+  f.get(st.c0f).op('v128.and');
+  if (five) {
+    f.get(hq);
+    if (s < 4) f.i32(4 - s).op('i16x8.shl'); else if (s > 4) f.i32(s - 4).op('i16x8.shr_u');
+    f.get(st.c10).op('v128.and').op('v128.or');
+  }
+  f.set(dst);
+}
+
+function genQ45K(m, D, decodeName, batchName, five) {
   const qsOff = five ? 48 : 16;
   const blockBytes = five ? 176 : 144;
   scaffold(m, decodeName, {
@@ -176,10 +240,10 @@ function genQ45K(m, decodeName, batchName, five) {
         f.get(st.sp).op('f32.load', { offset: 4 * s }).set(st.bs);
         for (let j = 0; j < R; j++) {
           const p = st.p[j]; const base = qsOff + 32 * (s >> 1);
-          q45kNibbles(st, p, base, s, five, st.hq[j][0], st.raw);
-          q45kNibbles(st, p, base + 16, s, five, st.hq[j][1], st.raw1);
+          nibbles(st, p, base, s, five, st.hq[j][0], st.raw);
+          nibbles(st, p, base + 16, s, five, st.hq[j][1], st.raw1);
           byteOf(f, s < 4 ? st.scLo[j] : st.scHi[j], s & 3); f.op('f32.convert_i32_s').get(st.dj[j]).op('f32.mul').get(st.dxs).op('f32.mul').set(st.coef);
-          rd2(f, st.xr0, st.raw, st.xr1, st.raw1, st.zv);
+          D.d32(f, st, st.xr0, st.raw, st.xr1, st.raw1, st.zv);
           accumulate(f, st.acc[j], st.coef);
           byteOf(f, s < 4 ? st.mnLo[j] : st.mnHi[j], s & 3); f.op('f32.convert_i32_s').get(st.dmj[j]).op('f32.mul').get(st.dxs).op('f32.mul').get(st.bs).op('f32.mul').set(st.coef);
           f.get(st.mins[j]).get(st.coef).op('f32.add').set(st.mins[j]);
@@ -205,8 +269,8 @@ function genQ45K(m, decodeName, batchName, five) {
       for (let s = 0; s < 8; s++) {
         for (let j = 0; j < R; j++) {
           const p = st.p[j]; const base = qsOff + 32 * (s >> 1);
-          q45kNibbles(st, p, base, s, five, st.hq[j][0], st.wn[j][0]);
-          q45kNibbles(st, p, base + 16, s, five, st.hq[j][1], st.wn[j][1]);
+          nibbles(st, p, base, s, five, st.hq[j][0], st.wn[j][0]);
+          nibbles(st, p, base + 16, s, five, st.hq[j][1], st.wn[j][1]);
           byteOf(f, s < 4 ? st.scLo[j] : st.scHi[j], s & 3); f.op('f32.convert_i32_s').get(st.dj[j]).op('f32.mul').set(st.arow[j]);
           byteOf(f, s < 4 ? st.mnLo[j] : st.mnHi[j], s & 3); f.op('f32.convert_i32_s').get(st.dmj[j]).op('f32.mul').set(st.mrow[j]);
         }
@@ -217,7 +281,7 @@ function genQ45K(m, decodeName, batchName, five) {
           f.get(st.sp[q]).op('f32.load', { offset: 4 * s }).set(st.bs);
           for (let j = 0; j < R; j++) {
             f.get(st.arow[j]).get(st.dxs).op('f32.mul').set(st.coef);
-            rd2(f, st.x0, st.wn[j][0], st.x1, st.wn[j][1], st.zv);
+            D.d32(f, st, st.x0, st.wn[j][0], st.x1, st.wn[j][1], st.zv);
             accumulate(f, st.acc[j][q], st.coef);
             f.get(st.mrow[j]).get(st.dxs).op('f32.mul').get(st.bs).op('f32.mul').set(st.coef);
             f.get(st.mins[j][q]).get(st.coef).op('f32.add').set(st.mins[j][q]);
@@ -230,11 +294,34 @@ function genQ45K(m, decodeName, batchName, five) {
 }
 
 // ------------------------------------------------------------------------------------------------------------ Q6_K
-function genQ6K(m) {
+function q6Init(st) {
+  const f = st.f; const v = () => f.local(T.v128); const fl = () => f.local(T.f32);
+  baseInit(st);
+  Object.assign(st, { q: v(), c30: v(), dj: [fl(), fl()], coef: fl(), dxs: fl(), h: st.h });
+  f.v128Const(splat(0x30)).set(st.c30);
+}
+
+/**
+ * The 16 UNSIGNED weights q (0..63) of group (half, k, g) of row pointer p, left in local st.q. Low 4 bits come from ql
+ * (low nibble for k < 2, high nibble for k >= 2), the 2 high bits from qh bits 2k..2k+1, moved to bits 4..5 by ONE
+ * 16-bit shift (left by 4-2k, or right by 2 for k = 3) and the 0x30 mask.
+ */
+function q6Group(st, p, half, k, g) {
+  const f = st.f;
+  f.get(p).op('v128.load', { offset: 64 * half + 16 * g + (k & 1) * 32 });
+  if (k >= 2) f.i32(4).op('i16x8.shr_u');
+  f.get(st.c0f).op('v128.and');
+  f.get(p).op('v128.load', { offset: 128 + 32 * half + 16 * g });
+  const sh = 4 - 2 * k;
+  if (sh > 0) f.i32(sh).op('i16x8.shl'); else if (sh < 0) f.i32(-sh).op('i16x8.shr_u');
+  f.get(st.c30).op('v128.and').op('v128.or').set(st.q);
+}
+
+function genQ6K(m, D) {
   scaffold(m, 'matvec_q6_k', {
     blockBytes: 210, xStride: 256, dStride: 32,
     init(st) {
-      q6kInit(st); baseInit(st);
+      q6Init(st);
       const v = () => st.f.local(T.v128);
       Object.assign(st, { xg: v(), neg: v() });
     },
@@ -247,11 +334,11 @@ function genQ6K(m) {
           f.get(st.dp).op('f32.load', { offset: 4 * xblock }).set(st.dxs);
           for (let g = 0; g < 2; g++) {
             f.get(st.xp).op('v128.load', { offset: xblock * 32 + 16 * g }).set(st.xg);
-            negSum(f, st, [st.xg], 5, st.neg); // offset 32, per group of 16
+            D.neg(f, st, [st.xg], 5, st.neg); // offset 32, per group of 16
             for (let j = 0; j < R; j++) {
-              q6kGroup(st, st.p[j], half, k, g, true);
+              q6Group(st, st.p[j], half, k, g);
               f.get(st.p[j]).op('i32.load8_s', { offset: 192 + half * 8 + k * 2 + g }).op('f32.convert_i32_s').get(st.dj[j]).op('f32.mul').get(st.dxs).op('f32.mul').set(st.coef);
-              rd(f, st.xg, st.q, st.neg);
+              D.d16(f, st, st.xg, st.q, st.neg);
               accumulate(f, st.acc[j], st.coef);
             }
           }
@@ -264,7 +351,7 @@ function genQ6K(m) {
   scaffoldBatch(m, 'mm_q6_k', {
     blockBytes: 210, xBytes: 256, dBytes: 32,
     init(st) {
-      q6kInit(st); baseInit(st);
+      q6Init(st);
       const v = () => st.f.local(T.v128);
       Object.assign(st, { wq: [v(), v()], xg: v(), neg: v(), arow: [st.f.local(T.f32), st.f.local(T.f32)] });
     },
@@ -276,16 +363,16 @@ function genQ6K(m) {
           const xblock = half * 4 + k;
           for (let g = 0; g < 2; g++) {
             for (let j = 0; j < R; j++) {
-              q6kGroup(st, st.p[j], half, k, g, true); f.get(st.q).set(st.wq[j]);
+              q6Group(st, st.p[j], half, k, g); f.get(st.q).set(st.wq[j]);
               f.get(st.p[j]).op('i32.load8_s', { offset: 192 + half * 8 + k * 2 + g }).op('f32.convert_i32_s').get(st.dj[j]).op('f32.mul').set(st.arow[j]);
             }
             for (let q = 0; q < TT; q++) {
               f.get(st.xp[q]).op('v128.load', { offset: xblock * 32 + 16 * g }).set(st.xg);
               f.get(st.dp[q]).op('f32.load', { offset: 4 * xblock }).set(st.dxs);
-              negSum(f, st, [st.xg], 5, st.neg);
+              D.neg(f, st, [st.xg], 5, st.neg);
               for (let j = 0; j < R; j++) {
                 f.get(st.arow[j]).get(st.dxs).op('f32.mul').set(st.coef);
-                rd(f, st.xg, st.wq[j], st.neg);
+                D.d16(f, st, st.xg, st.wq[j], st.neg);
                 accumulate(f, st.acc[j][q], st.coef);
               }
             }
@@ -300,11 +387,14 @@ function genQ6K(m) {
 /**
  * Adds the relaxed-SIMD Q4_0, Q5_0, Q4_K, Q5_K and Q6_K decode + batched kernels to a module builder (same export names and
  * signatures as the default kernels; the batched ones take INT8 activations). Requires an engine with relaxed SIMD.
+ * @param {'i16'|'add'} [flavor] which relaxed dot instruction the kernels are built from (see dotOps)
  */
-export function genRelaxedKernels(m) {
-  genQ4_0(m);
-  genQ5_0(m);
-  genQ45K(m, 'matvec_q4_k', 'mm_q4_k', false);
-  genQ45K(m, 'matvec_q5_k', 'mm_q5_k', true);
-  genQ6K(m);
+export function genRelaxedKernels(m, flavor = 'i16') {
+  if (flavor !== 'i16' && flavor !== 'add') throw new Error(`unknown relaxed flavor "${flavor}"`);
+  const D = dotOps(flavor);
+  genQ4_0(m, D);
+  genQ5_0(m, D);
+  genQ45K(m, D, 'matvec_q4_k', 'mm_q4_k', false);
+  genQ45K(m, D, 'matvec_q5_k', 'mm_q5_k', true);
+  genQ6K(m, D);
 }

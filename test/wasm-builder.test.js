@@ -103,6 +103,9 @@ test('SIMD bitwise + i8x16 ops', () => {
   check('i8x16.shr_u', (a) => a.map((x) => x >> 4), { shift: true });
   check('i8x16.shr_s', (a) => a.map((x) => ((x << 24) >> 24) >> 4 & 0xff), { shift: true });
   check('i8x16.shl', (a) => a.map((x) => (x << 4) & 0xff), { shift: true });
+  // 16-bit lane shifts (the relaxed kernels use them + an explicit byte mask instead of V8's costlier i8x16 shifts)
+  check('i16x8.shl', (a) => out16((o) => { const x = dv(a); for (let i = 0; i < 8; i++) o.setUint16(2 * i, (x.getUint16(2 * i, true) << 4) & 0xffff, true); }), { shift: true });
+  check('i16x8.shr_u', (a) => out16((o) => { const x = dv(a); for (let i = 0; i < 8; i++) o.setUint16(2 * i, x.getUint16(2 * i, true) >>> 4, true); }), { shift: true });
 });
 
 test('SIMD swizzle and byte compares', () => {

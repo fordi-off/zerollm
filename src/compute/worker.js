@@ -10,7 +10,7 @@ import { readTensorBytes } from '../gguf/reader.js';
 import { GGML_TYPE, GGML_TYPE_INFO } from '../gguf/types.js';
 import { f16Table, f32ToF16 } from '../util/f16.js';
 import { Act, matvec, dequantRow, rmsnorm, softmax, silu, ropeTables, applyRope, rowBytes, quantizeAct } from './ref-kernels.js';
-import { instantiateKernels, resolveDotMode } from './wasm/kernels.js';
+import { instantiateKernels, resolveDotMode, usesInt8Acts } from './wasm/kernels.js';
 import { Barrier } from './barrier.js';
 import { CTRL, CMD_EXIT, CMD_KV_EXPORT, CMD_KV_IMPORT, splitRows, splitRange, alignUp } from './layout.js';
 
@@ -131,10 +131,10 @@ function main() {
   const xqv = new Int8Array(mem.buffer, XQ, maxCols);
   const xdv = new Float32Array(mem.buffer, XD, maxCols / 32);
   const xq16v = new Int16Array(mem.buffer, XQ16, BM * maxCols);
-  // ZEROLLM_DOT=relaxed: the relaxed-SIMD batched kernels read INT8 activations (token t at byte offset t*dim), which fit in
+  // ZEROLLM_DOT=relaxed|relaxed-add: the relaxed-SIMD batched kernels read INT8 activations (token t at byte offset t*dim), which fit in
   // the same region (it is sized for int16); every other mode keeps the int16-widened layout.
   const dot = useWasm ? resolveDotMode() : 'extmul';
-  const xqBv = dot === 'relaxed' ? new Int8Array(mem.buffer, XQ16, BM * maxCols) : xq16v;
+  const xqBv = usesInt8Acts(dot) ? new Int8Array(mem.buffer, XQ16, BM * maxCols) : xq16v;
   const xdBv = new Float32Array(mem.buffer, XDB, (BM * maxCols) / 32);
   const xsv = new Float32Array(mem.buffer, XS, maxCols / 32);
   const xsBv = new Float32Array(mem.buffer, XSB, (BM * maxCols) / 32);

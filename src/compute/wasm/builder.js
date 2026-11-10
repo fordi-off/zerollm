@@ -56,7 +56,7 @@ export const SIMD = Object.freeze({
   'i8x16.neg': 0x61, 'i8x16.shl': 0x6b, 'i8x16.shr_s': 0x6c, 'i8x16.shr_u': 0x6d, 'i8x16.add': 0x6e, 'i8x16.sub': 0x71,
   'i16x8.extadd_pairwise_i8x16_s': 0x7c, 'i32x4.extadd_pairwise_i16x8_s': 0x7e,
   'i16x8.extend_low_i8x16_s': 0x87, 'i16x8.extend_high_i8x16_s': 0x88, 'i16x8.extend_low_i8x16_u': 0x89, 'i16x8.extend_high_i8x16_u': 0x8a,
-  'i16x8.add': 0x8e, 'i16x8.mul': 0x95,
+  'i16x8.shl': 0x8b, 'i16x8.shr_u': 0x8d, 'i16x8.add': 0x8e, 'i16x8.mul': 0x95,
   'i16x8.extmul_low_i8x16_s': 0x9c, 'i16x8.extmul_high_i8x16_s': 0x9d,
   'i32x4.extend_low_i16x8_u': 0xa9, 'i32x4.extend_high_i16x8_u': 0xaa, 'i32x4.shl': 0xab,
   'i32x4.add': 0xae, 'i32x4.sub': 0xb1, 'i32x4.mul': 0xb5, 'i32x4.dot_i16x8_s': 0xba,

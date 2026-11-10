@@ -1,7 +1,7 @@
 // Relaxed-SIMD kernels (ZEROLLM_DOT=relaxed): every test is SKIPPED (not failed) on a V8 without relaxed SIMD.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildKernelModule, instantiateKernels, resolveDotMode } from '../src/compute/wasm/kernels.js';
+import { buildKernelModule, instantiateKernels, resolveDotMode, usesInt8Acts } from '../src/compute/wasm/kernels.js';
 import { probeWasmFeatures } from '../src/compute/wasm/features.js';
 import { quantizeAct, matvec, Act } from '../src/compute/ref-kernels.js';
 import { quantizeQ8_0, quantizeQ4_0 } from '../src/compute/quant.js';
@@ -23,6 +23,8 @@ const FORMATS = [
   { label: 'Q6_K', type: GGML_TYPE.Q6_K, elems: 256, bytes: 210, useXs: true, dec: 'matvec_q6_k', mm: 'mm_q6_k', scaleOffs: [208], mk: (n, rand) => randomQuantBlocks(GGML_TYPE.Q6_K, n, rand) },
 ];
 const RELAXED_FORMATS = FORMATS.filter((f) => f.label !== 'Q8_0');
+/** the two relaxed flavors: i16x8.relaxed_dot + widening add (`relaxed`), i32x4.relaxed_dot_add per 16 weights (`relaxed-add`) */
+const MODES = ['relaxed', 'relaxed-add'];
 
 const al = (v) => Math.ceil(v / 64) * 64;
 
@@ -39,7 +41,7 @@ function runKernels(dot, fmt, rows, nb, wbytes, xq, xd) {
   const k = instantiateKernels(mem, { dot });
   new Uint8Array(mem.buffer, wOff, wbytes.length).set(wbytes);
   const sums = xq.map((q) => Float32Array.from({ length: abl }, (_, b) => { let s = 0; for (let i = 0; i < 32; i++) s += q[b * 32 + i]; return s; }));
-  const xqBv = dot === 'relaxed' ? new Int8Array(mem.buffer, xqB, ntok * cols) : new Int16Array(mem.buffer, xqB, ntok * cols);
+  const xqBv = usesInt8Acts(dot) ? new Int8Array(mem.buffer, xqB, ntok * cols) : new Int16Array(mem.buffer, xqB, ntok * cols);
   xq.forEach((q, t) => xqBv.set(q, t * cols));
   new Float32Array(mem.buffer, xdB, ntok * abl).set(xd.flatMap((d) => [...d]));
   new Float32Array(mem.buffer, xsB, ntok * abl).set(sums.flatMap((s) => [...s]));
@@ -78,12 +80,14 @@ function quantizedTokens(cols, ntok, rand) {
 }
 
 // ------------------------------------------------------------------------------------------------------- the module
-test('relaxed kernel module validates and exports the same kernel names as the default module', T, () => {
-  const rx = new WebAssembly.Module(buildKernelModule({ dot: 'relaxed' }));
-  const base = new WebAssembly.Module(buildKernelModule());
-  const names = (m) => WebAssembly.Module.exports(m).map((e) => e.name).sort();
-  assert.deepEqual(names(rx), names(base));
-});
+for (const mode of MODES) {
+  test(`${mode}: kernel module validates and exports the same kernel names as the default module`, T, () => {
+    const rx = new WebAssembly.Module(buildKernelModule({ dot: mode }));
+    const base = new WebAssembly.Module(buildKernelModule());
+    const names = (m) => WebAssembly.Module.exports(m).map((e) => e.name).sort();
+    assert.deepEqual(names(rx), names(base));
+  });
+}
 
 test('resolveDotMode: ZEROLLM_DOT wins, ZEROLLM_KDOT still works, default is extmul, relaxed only when supported', () => {
   assert.equal(resolveDotMode({}), 'extmul');
@@ -92,8 +96,9 @@ test('resolveDotMode: ZEROLLM_DOT wins, ZEROLLM_KDOT still works, default is ext
   assert.equal(resolveDotMode({ ZEROLLM_DOT: 'wide' }), 'wide');
   assert.equal(resolveDotMode({ ZEROLLM_DOT: 'EXTMUL', ZEROLLM_KDOT: 'wide' }), 'extmul');
   assert.equal(resolveDotMode({ ZEROLLM_DOT: 'relaxed' }), RELAXED ? 'relaxed' : 'extmul');
-  assert.equal(resolveDotMode({ ZEROLLM_DOT: 'auto' }), RELAXED ? 'relaxed' : 'extmul');
-  assert.equal(resolveDotMode({ ZEROLLM_DOT: 'auto', ZEROLLM_KDOT: 'wide' }), RELAXED ? 'relaxed' : 'extmul');
+  assert.equal(resolveDotMode({ ZEROLLM_DOT: 'relaxed-add' }), RELAXED ? 'relaxed-add' : 'extmul');
+  assert.equal(resolveDotMode({ ZEROLLM_DOT: 'relaxed', ZEROLLM_KDOT: 'wide' }), RELAXED ? 'relaxed' : 'extmul');
+  assert.equal(resolveDotMode({ ZEROLLM_DOT: 'bogus', ZEROLLM_KDOT: 'wide' }), 'wide'); // unknown value: warned about, ignored
 });
 
 test('instantiateKernels() without an explicit dot never returns relaxed kernels, even if ZEROLLM_DOT=relaxed (embedding workers stage int16)', () => {
@@ -111,15 +116,15 @@ test('instantiateKernels() without an explicit dot never returns relaxed kernels
 });
 
 // ------------------------------------------------------------------------------ random data, engine-style activations
-for (const fmt of FORMATS) {
-  test(`${fmt.label}: relaxed decode kernel matches the JS reference and the default kernel; relaxed batched is BIT-IDENTICAL to relaxed decode`, T, () => {
+for (const mode of MODES) for (const fmt of FORMATS) {
+  test(`${mode} ${fmt.label}: decode kernel matches the JS reference and the default kernel; batched is BIT-IDENTICAL to decode`, T, () => {
     const rand = mulberry32(2024);
     const shapes = [[1, 1, 1], [2, 1, 4], [3, 2, 5], [5, 1, 7], [4, 3, 8], [7, 2, 13], [2, 1, 16], [1, 2, 3], [8, 2, 4]];
     for (const [rows, nb, ntok] of shapes) {
       const cols = nb * fmt.elems;
       const wbytes = fmt.mk(rows * nb, rand);
       const { xq, xd } = quantizedTokens(cols, ntok, rand);
-      const rx = runKernels('relaxed', fmt, rows, nb, wbytes, xq, xd);
+      const rx = runKernels(mode, fmt, rows, nb, wbytes, xq, xd);
       const base = runKernels('extmul', fmt, rows, nb, wbytes, xq, xd);
       const want = reference(fmt, rows, nb, wbytes, xq, xd);
       const rms = rmsOf(want);
@@ -158,8 +163,8 @@ const rawTokens = (cols, ntok, rand, pick) => {
   };
 };
 
-for (const fmt of FORMATS) {
-  test(`${fmt.label}: exact-float regime on raw int8 activations (random, -128/127 extremes) is bit-identical to the default kernels and the reference`, T, () => {
+for (const mode of MODES) for (const fmt of FORMATS) {
+  test(`${mode} ${fmt.label}: exact-float regime on raw int8 activations (random, -128/127 extremes) is bit-identical to the default kernels and the reference`, T, () => {
     const rand = mulberry32(77);
     for (const [rows, nb, ntok] of [[3, 1, 5], [4, 2, 4], [5, 1, 9]]) {
       const cols = nb * fmt.elems;
@@ -170,7 +175,7 @@ for (const fmt of FORMATS) {
       ]) {
         const wbytes = pow2Scales(fmt, fmt.mk(rows * nb, rand), rand);
         const { xq, xd } = rawTokens(cols, ntok, rand, pick);
-        const rx = runKernels('relaxed', fmt, rows, nb, wbytes, xq, xd);
+        const rx = runKernels(mode, fmt, rows, nb, wbytes, xq, xd);
         const base = runKernels('extmul', fmt, rows, nb, wbytes, xq, xd);
         const want = reference(fmt, rows, nb, wbytes, xq, xd);
         for (let i = 0; i < want.length; i++) {
@@ -198,15 +203,15 @@ function extremeWeights(fmt, rows, nb, fill, rand) {
   return out;
 }
 
-for (const fmt of RELAXED_FORMATS) {
-  test(`${fmt.label}: worst-case values (all activations -128 or +127, every weight quant at its minimum / maximum): no saturation, no sign problem`, T, () => {
+for (const mode of MODES) for (const fmt of RELAXED_FORMATS) {
+  test(`${mode} ${fmt.label}: worst-case values (all activations -128 or +127, every weight quant at its minimum / maximum): no saturation, no sign problem`, T, () => {
     const rand = mulberry32(5);
     for (const fill of [0xff, 0x00, 0x0f, 0xf0, 0x55, 0xaa]) {
       for (const act of [-128, 127]) {
         const rows = 5; const nb = 1; const ntok = 6; const cols = nb * fmt.elems;
         const wbytes = extremeWeights(fmt, rows, nb, fill, rand);
         const { xq, xd } = rawTokens(cols, ntok, rand, () => act);
-        const rx = runKernels('relaxed', fmt, rows, nb, wbytes, xq, xd);
+        const rx = runKernels(mode, fmt, rows, nb, wbytes, xq, xd);
         const want = reference(fmt, rows, nb, wbytes, xq, xd);
         const base = runKernels('extmul', fmt, rows, nb, wbytes, xq, xd);
         for (let i = 0; i < want.length; i++) {
@@ -221,15 +226,17 @@ for (const fmt of RELAXED_FORMATS) {
   });
 }
 
-test('Q8_0: the int8-activation batched kernel handles the full signed weight range and -128 activations (it widens in-kernel)', T, () => {
-  const fmt = FORMATS[0]; const rand = mulberry32(8);
-  const rows = 4; const nb = 3; const ntok = 7; const cols = nb * 32;
-  for (const w of [0x80, 0x7f, 0xff]) {
-    const wbytes = new Uint8Array(rows * nb * 34).fill(w); const dv = new DataView(wbytes.buffer);
-    for (let b = 0; b < rows * nb; b++) dv.setUint16(b * 34, f32ToF16(2 ** -5), true);
-    const { xq, xd } = rawTokens(cols, ntok, rand, () => (rand() < 0.5 ? -128 : 127));
-    const rx = runKernels('relaxed', fmt, rows, nb, wbytes, xq, xd);
-    const want = reference(fmt, rows, nb, wbytes, xq, xd);
-    for (let i = 0; i < want.length; i++) { assert.equal(rx.batch[i], want[i]); assert.equal(rx.decode[i], want[i]); }
-  }
-});
+for (const mode of MODES) {
+  test(`${mode} Q8_0: the int8-activation batched kernel handles the full signed weight range and -128 activations (it widens in-kernel)`, T, () => {
+    const fmt = FORMATS[0]; const rand = mulberry32(8);
+    const rows = 4; const nb = 3; const ntok = 7; const cols = nb * 32;
+    for (const w of [0x80, 0x7f, 0xff]) {
+      const wbytes = new Uint8Array(rows * nb * 34).fill(w); const dv = new DataView(wbytes.buffer);
+      for (let b = 0; b < rows * nb; b++) dv.setUint16(b * 34, f32ToF16(2 ** -5), true);
+      const { xq, xd } = rawTokens(cols, ntok, rand, () => (rand() < 0.5 ? -128 : 127));
+      const rx = runKernels(mode, fmt, rows, nb, wbytes, xq, xd);
+      const want = reference(fmt, rows, nb, wbytes, xq, xd);
+      for (let i = 0; i < want.length; i++) { assert.equal(rx.batch[i], want[i]); assert.equal(rx.decode[i], want[i]); }
+    }
+  });
+}

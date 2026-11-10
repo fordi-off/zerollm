@@ -221,19 +221,15 @@ export function q50Init(st) {
   f.v128Const([1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128]).set(st.mask);
 }
 
-/**
- * n0 / n1 = the block's two 16-element halves of (q5 - 16) as int8 vectors, from the weight block at ptr `p`.
- * unsigned: leave q5 itself (0..31) instead, for the relaxed-SIMD dot (its weight operand must be 0..127); the caller
- * then subtracts 16 * sum(x) once per block.
- */
-export function q50Unpack(st, p, n0, n1, unsigned = false) {
+/** n0 / n1 = the block's two 16-element halves of (q5 - 16) as int8 vectors, from the weight block at ptr `p` */
+function q50Unpack(st, p, n0, n1) {
   const f = st.f;
   f.get(p).op('v128.load', { offset: 6 }).set(st.raw);
   f.get(p).op('i32.load', { offset: 2 }).op('i32x4.splat').set(st.qv);
   // 0x10 in every byte lane whose qh bit is set: swizzle the right qh byte into place, isolate the bit, compare
   const hbits = (idx) => f.get(st.qv).get(idx).op('i8x16.swizzle').get(st.mask).op('v128.and').get(st.mask).op('i8x16.eq').get(st.c10).op('v128.and');
-  f.get(st.raw).get(st.c0f).op('v128.and'); hbits(st.idx0); f.op('v128.or'); if (!unsigned) f.get(st.c16).op('i8x16.sub'); f.set(n0);
-  f.get(st.raw).i32(4).op('i8x16.shr_u'); hbits(st.idx1); f.op('v128.or'); if (!unsigned) f.get(st.c16).op('i8x16.sub'); f.set(n1);
+  f.get(st.raw).get(st.c0f).op('v128.and'); hbits(st.idx0); f.op('v128.or').get(st.c16).op('i8x16.sub').set(n0);
+  f.get(st.raw).i32(4).op('i8x16.shr_u'); hbits(st.idx1); f.op('v128.or').get(st.c16).op('i8x16.sub').set(n1);
 }
 
 function genQ5_0(m) {
@@ -324,7 +320,7 @@ export function q45kRowSetup(st, j, five) {
 export function byteOf(f, word, k) { f.get(word); if (k) f.i32(8 * k).op('i32.shr_u'); f.i32(0xff).op('i32.and'); }
 
 /** Leave the 16 nibbles (plus the 5th bit plane for Q5_K) of sub-block s, bytes at `off` of block ptr p, in local `dst`. */
-export function q45kNibbles(st, p, off, s, five, hq, dst) {
+function q45kNibbles(st, p, off, s, five, hq, dst) {
   const f = st.f;
   f.get(p).op('v128.load', { offset: off }).set(dst);
   if (s & 1) f.get(dst).i32(4).op('i8x16.shr_u'); else f.get(dst).get(st.c0f).op('v128.and');
@@ -416,24 +412,21 @@ function genQ45K(m, decodeName, batchName, five, opts) {
 }
 
 // ---------------------------------------------------------------------------------------------------------- Q6_K
-export function q6kInit(st) {
+function q6kInit(st) {
   const f = st.f; const v = () => f.local(T.v128); const fl = () => f.local(T.f32);
   Object.assign(st, { t: v(), q: v(), c0f: v(), c03: v(), c20: v(), dj: [fl(), fl()], coef: fl(), dxs: fl() });
   f.v128Const(splat(0x0f)).set(st.c0f); f.v128Const(splat(0x03)).set(st.c03); f.v128Const(splat(0x20)).set(st.c20);
 }
 
-/**
- * the 16 weights of group (half, k, g) of row pointer p, as (q - 32) int8, left in local st.q.
- * unsigned: leave q (0..63) instead (relaxed-SIMD dot; the caller subtracts 32 * sum(x of the group)).
- */
-export function q6kGroup(st, p, half, k, g, unsigned = false) {
+/** the 16 weights of group (half, k, g) of row pointer p, as (q - 32) int8, left in local st.q */
+function q6kGroup(st, p, half, k, g) {
   const f = st.f;
   f.get(p).op('v128.load', { offset: 64 * half + 16 * g + (k & 1) * 32 }); // low 4 bits
   if (k < 2) f.get(st.c0f).op('v128.and'); else f.i32(4).op('i8x16.shr_u');
   f.get(p).op('v128.load', { offset: 128 + 32 * half + 16 * g });          // 2 high bits
   if (k === 3) f.i32(6).op('i8x16.shr_u');
   else { if (k > 0) f.i32(2 * k).op('i8x16.shr_u'); f.get(st.c03).op('v128.and'); }
-  f.i32(4).op('i8x16.shl').op('v128.or'); if (!unsigned) f.get(st.c20).op('i8x16.sub'); f.set(st.q);
+  f.i32(4).op('i8x16.shl').op('v128.or').get(st.c20).op('i8x16.sub').set(st.q);
 }
 
 function genQ6K(m, opts) {
