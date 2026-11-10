@@ -1,17 +1,21 @@
 // Relaxed-SIMD variants of the Q4_0 / Q5_0 / Q4_K / Q5_K / Q6_K kernels (decode AND batched), selected with
-// ZEROLLM_DOT=relaxed (see kernels.js). They export the SAME names and signatures as the default kernels
+// ZEROLLM_DOT=relaxed or relaxed-add (see kernels.js). They export the SAME names and signatures as the default kernels
 // (matvec_q4_k, mm_q4_k, ...), so a module is built with either set and the worker needs no per-kernel changes.
 //
 // Dot product: `i32x4.relaxed_dot_i8x16_i7x16_add_s(x, w, acc)` multiplies 16 signed int8 activations x with 16 weights w
 // that must lie in 0..127 and adds four adjacent products to each i32 lane of acc: one instruction per 16 weights, no
 // widening of either operand (the default kernels widen to int16 and use i32x4.dot_i16x8_s, 8 products per instruction).
+// Two flavors build the same kernels from different instructions (see dotOps): `relaxed-add` uses the instruction above
+// directly; `relaxed` uses `i16x8.relaxed_dot_i8x16_i7x16_s` (pairs summed in int16) + one widening add per 32 weights,
+// because V8 on x64 without AVX-VNNI lowers the first to 6 instructions and the second to 1 (+1 for the widening).
+// Both give bit-identical results (the i32 lanes hold the same four adjacent products), and each is measured on its own.
 //
 // Weight ranges. The i7 operand has to be unsigned, so every format is fed its *unsigned* quants and the signed offset is
 // folded into the accumulator, exactly, in the integer domain:
 //   Q4_K / Q5_K   nibbles 0..15 / 0..31 are already unsigned (the min term uses the block sums xs, as before)
 //   Q6_K          q (0..63) with  sum((q-32)*x) = sum(q*x) - 32*sum(x)   -> the dot accumulator starts at -32*sum(x of the group)
 //   Q4_0 / Q5_0   q (0..15) / q5 (0..31) with offsets 8 / 16 -> accumulator starts at -8 (-16) * sum(x of the block)
-// sum(x) for a group is computed with one more relaxed dot against a vector of ones and is shared by all rows of the tile
+// sum(x) for a group is computed in-kernel (a dot against ones, or pairwise adds) and shared by all rows of the tile
 // (no new parameters: Q6_K needs 16-element sums, which the activation staging does not provide).
 //
 // Exactness. Every product is x (-128..127) * w (0..127); the pair sums stay within int16 (127*127*2 = 32258,
@@ -21,9 +25,9 @@
 // order only (the integer partial sums are identical); the relaxed batched kernels are bit-identical to the relaxed
 // decode kernels, because float operations are performed in the same order in both.
 //
-// Unpacking. V8 lowers an i8x16 shift by a constant to a 16-bit shift plus a byte mask that it REBUILDS at every use
-// (mov imm32, movd, pshufd, pand: 5 instructions). Here byte shifts are written as i16x8 shifts followed by an explicit
-// `v128.and` with a mask kept in a local (2 instructions), and Q6_K's "(qh >> 2k & 3) << 4" is a single shift plus one mask.
+// Unpacking. Byte shifts are written as i16x8 shifts followed by an explicit `v128.and` with a mask kept in a local
+// (V8 emulates an i8x16 shift by a constant the same way, but with a mask it rebuilds at the use; TurboFan hoists that out
+// of loops, so this measured as no change), and Q6_K's "(qh >> 2k & 3) << 4" is a single shift plus one mask.
 //
 // Activations: int8 everywhere. The batched kernels read int8 activations (token t at byte offset t*cols), NOT the
 // int16-widened layout of the default batched kernels; worker.js stages them accordingly when this mode is active.

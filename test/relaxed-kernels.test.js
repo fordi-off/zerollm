@@ -139,6 +139,20 @@ for (const mode of MODES) for (const fmt of FORMATS) {
   });
 }
 
+for (const fmt of RELAXED_FORMATS) {
+  test(`${fmt.label}: the two relaxed flavors give BIT-IDENTICAL results (same i32 lane grouping, same float order)`, T, () => {
+    const rand = mulberry32(31);
+    for (const [rows, nb, ntok] of [[3, 2, 5], [8, 1, 16]]) {
+      const wbytes = fmt.mk(rows * nb, rand);
+      const { xq, xd } = quantizedTokens(nb * fmt.elems, ntok, rand);
+      const a = runKernels('relaxed', fmt, rows, nb, wbytes, xq, xd);
+      const b = runKernels('relaxed-add', fmt, rows, nb, wbytes, xq, xd);
+      assert.deepEqual([...a.decode], [...b.decode]);
+      assert.deepEqual([...a.batch], [...b.batch]);
+    }
+  });
+}
+
 // --------------------------------------------- exact-float regime: power-of-two scales make every float operation exact, so
 // the relaxed kernels (whose i32 lanes group the products differently) must agree BIT FOR BIT with the default kernels and
 // with the JS reference, on raw int8 activations that include -128 (which the engine's quantizer never produces).
