@@ -1,7 +1,7 @@
 import os from 'node:os';
 import { readGGUF } from '../gguf/reader.js';
 import { typeName } from '../gguf/types.js';
-import { modelConfig, estimateRam, UnsupportedArchError, SUPPORTED_TENSOR_TYPES, REFERENCE_ONLY_REASON, RECURRENT_CHECKPOINTS } from '../model/config.js';
+import { modelConfig, estimateRam, UnsupportedArchError, SUPPORTED_TENSOR_TYPES, RECURRENT_CHECKPOINTS } from '../model/config.js';
 import { parseArgs, num } from '../util/args.js';
 import { defaultThreads } from './common.js';
 import { formatBytes, formatCount, printTable, section } from '../util/log.js';
@@ -71,7 +71,8 @@ export async function run(argv) {
       ['Full attention layers', attn.length > 10 ? `${attn.slice(0, 4).join(', ')}, ... , ${attn[attn.length - 1]}` : attn.join(', ')],
       ['Attention', `${cfg.nHead} heads x ${cfg.headDim} (+ per-head output gate), ${cfg.nHeadKv} KV heads, rotary on ${cfg.nRot} of ${cfg.headDim} dims${cfg.ropeSections ? `, M-RoPE sections [${cfg.ropeSections.join(', ')}]` : ''}`],
       ['Gated DeltaNet', `${s.nKHeads} key heads x ${s.headKDim}, ${s.nVHeads} value heads x ${s.headVDim}, conv kernel ${s.convKernel} over ${s.convDim} channels`],
-      ['Support', REFERENCE_ONLY_REASON.replace(/^qwen35 /, `${cfg.arch} `)],
+      ['Value -> key head', `value head h reads key head h % ${s.nKHeads} (llama.cpp tiled layout; UNVERIFIED on real files)`],
+      ['Support', 'worker pool + WASM SIMD kernels; --threads 1 --kernels js is the single-thread reference path'],
     ]);
   }
 
@@ -131,7 +132,7 @@ export async function run(argv) {
     ['Scratch + runtime', formatBytes(e32.scratch + e32.runtime)],
     ['Total with f32 KV', formatBytes(e32.total)],
     ['Total with f16 KV', formatBytes(e16.total)],
-    ...(cfg?.referenceOnly ? [] : [['Busiest worker memory (f32 KV)', `${formatBytes(e32.perWorker)}  (wasm32 limit 4 GB)`]]),
+    ['Busiest worker memory (f32 KV)', `${formatBytes(e32.perWorker)}  (wasm32 limit 4 GB)`],
     ['Free RAM now', formatBytes(os.freemem())],
   ]);
   if (e32.total > os.freemem() * 0.9) {

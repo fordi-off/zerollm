@@ -2,7 +2,10 @@
 // (no postMessage per token), and exposes the same interface as RefModel so generate() works unchanged.
 import os from 'node:os';
 import { Worker } from 'node:worker_threads';
-import { modelConfig } from '../model/config.js';
+import { modelConfig, assertSupportedTensorTypes, recurrentStateBytes } from '../model/config.js';
+import { checkTensors, findBoundaryIds } from '../model/forward-qwen35.js';
+import { RecurrentState } from '../model/recurrent-state.js';
+import { StateCheckpoints } from '../model/state-checkpoints.js';
 import { CTRL, CMD_TOKEN, CMD_EXIT, CMD_KV_EXPORT, CMD_KV_IMPORT, MAX_BATCH, DEFAULT_LOGITS_BATCH, allocShared } from './layout.js';
 import { probeWasmFeatures } from './wasm/features.js';
 
@@ -21,8 +24,10 @@ export function defaultSpin(workers, logical = os.availableParallelism?.() ?? os
 export class PoolModel {
   /**
    * @param {import('../gguf/reader.js').GGUFFile} g
-   * @param {{ctx?: number, workers?: number, spin?: number, kernels?: 'auto'|'wasm'|'js', maxBatch?: number, logitsBatch?: number, kv?: 'f32'|'f16', onProgress?: (done: number, total: number) => void}} [opts]
+   * @param {{ctx?: number, workers?: number, spin?: number, kernels?: 'auto'|'wasm'|'js', maxBatch?: number, logitsBatch?: number, kv?: 'f32'|'f16',
+   *          maxCheckpoints?: number, checkpointEvery?: number, boundaryIds?: number[], onProgress?: (done: number, total: number) => void}} [opts]
    *   logitsBatch: most positions one pass can return logits for (`forwardBatch(.., {logits: 'all'})`); default min(maxBatch, 16), 1 = off
+   *   maxCheckpoints / checkpointEvery / boundaryIds: hybrid (Gated DeltaNet) models only, see src/model/state-checkpoints.js
    * @returns {Promise<PoolModel>}
    */
   static async create(g, opts = {}) {
@@ -35,7 +40,10 @@ export class PoolModel {
   get pos() { return this.tokens.length; }
 
   async #init(g, opts) {
-    const cfg = this.cfg = modelConfig(g);
+    const cfg = this.cfg = modelConfig(g); // throws UnsupportedArchError for an architecture this engine does not know
+    // fail early and clearly (before any worker starts) on a file the pool cannot run
+    assertSupportedTensorTypes(g);
+    if (cfg.hybrid) checkTensors(g, cfg);
     this.ctx = Math.min(opts.ctx ?? 2048, cfg.nCtxTrain);
     this.n = Math.max(1, opts.workers ?? 1);
     /** busy-wait iterations before a worker sleeps at a barrier / waits for a command (0 = sleep immediately) */
@@ -48,6 +56,7 @@ export class PoolModel {
     this.kernels = want === 'auto' ? (probeWasmFeatures().simd ? 'wasm' : 'js') : want;
     this.tokens = [];
     this.failed = null;
+    this.prevNoLogits = false;
     this.closed = false;
     this.issued = 0;
     /** largest prompt batch one pass may carry (weights are read once per batch) */
@@ -59,13 +68,18 @@ export class PoolModel {
     this.ctrl = new Int32Array(sh.ctrl);
     this.x = new Float32Array(sh.x);
     this.logits = new Float32Array(sh.logits);
+    if (cfg.hybrid) {
+      /** the live recurrent state: the workers update it (each its own heads), the main thread snapshots / restores it while they are idle */
+      this.state = new RecurrentState(cfg, { conv: new Float32Array(sh.conv), ssm: new Float32Array(sh.ssm) });
+      this.ck = new StateCheckpoints(cfg, { maxCheckpoints: opts.maxCheckpoints, checkpointEvery: opts.checkpointEvery, boundaryIds: opts.boundaryIds ?? findBoundaryIds(g) });
+    }
 
     // everything a worker needs to know about tensors (small, structured-cloneable)
     const tensors = {};
     let totalBytes = 0;
     for (const t of g.tensors) {
       tensors[t.name] = { name: t.name, type: t.type, dims: t.dims, absOffset: t.absOffset, nBytes: t.nBytes, nElements: t.nElements };
-      if (t.dims.length === 2) totalBytes += t.nBytes ?? 0;
+      if (t.dims.length === 2 && !t.name.endsWith('ssm_conv1d.weight')) totalBytes += t.nBytes ?? 0; // (the conv taps are a small private vector in every worker)
     }
 
     const url = new URL('./worker.js', import.meta.url);
@@ -139,16 +153,49 @@ export class PoolModel {
     const lg = opts.logits;
     const want = lg === false || lg === 'none' ? 0 : lg === 'all' ? 2 : 1;
     if (want === 2 && B > this.logitsBatch) throw new Error(`logits for all positions of a batch of ${B} tokens (this pool supports ${this.logitsBatch}; raise the logitsBatch option)`);
-    const { ctrl } = this;
-    for (let i = 0; i < B; i++) Atomics.store(ctrl, CTRL.TOKENS + i, tokens[i]);
-    Atomics.store(ctrl, CTRL.BATCH, B);
-    Atomics.store(ctrl, CTRL.POS, pos);
-    Atomics.store(ctrl, CTRL.WANT_LOGITS, want);
-    await this.#issue(CMD_TOKEN);
-    for (let i = 0; i < B; i++) this.tokens.push(tokens[i]);
+    if (this.cfg.hybrid) await this.#hybridBatch(tokens, want);
+    else await this.#pass(tokens, want);
     if (want === 2) return this.logits.subarray(0, B * this.cfg.vocabSize);
     return want ? this.logits.subarray(0, this.cfg.vocabSize) : null;
   }
+
+  /** One command: the workers run `tokens` at the next positions; afterwards the tokens are part of the sequence. */
+  async #pass(tokens, want) {
+    const { ctrl } = this;
+    const B = tokens.length;
+    for (let i = 0; i < B; i++) Atomics.store(ctrl, CTRL.TOKENS + i, tokens[i]);
+    Atomics.store(ctrl, CTRL.BATCH, B);
+    Atomics.store(ctrl, CTRL.POS, this.tokens.length);
+    Atomics.store(ctrl, CTRL.WANT_LOGITS, want);
+    await this.#issue(CMD_TOKEN);
+    for (let i = 0; i < B; i++) this.tokens.push(tokens[i]);
+  }
+
+  /**
+   * forwardBatch for hybrid models. The checkpoint policy (src/model/state-checkpoints.js) wants a snapshot of the recurrent
+   * state BEFORE certain tokens; inside a batch the state of a position is never materialised (the recurrences run token by
+   * token inside the workers), so the batch is split there: segments run as separate passes with a snapshot in between.
+   * Splits happen before chat-turn boundary tokens, periodic positions and (the one that matters) the last token of a prompt,
+   * which is how a regenerate / a follow-up turn can resume with nothing to replay. Batches that return logits for every
+   * position (speculative verification) are never split: only the state before the first token can be snapshotted.
+   */
+  async #hybridBatch(tokens, want) {
+    const B = tokens.length;
+    const pos = this.tokens.length;
+    const ck = this.ck;
+    if (ck.wantsBefore(pos, tokens[0], want === 2 || (want === 1 && B === 1), this.prevNoLogits)) this.#checkpoint();
+    const cuts = [0];
+    if (want !== 2) for (let i = 1; i < B; i++) if (ck.wantsBefore(pos + i, tokens[i], want === 1 && i === B - 1, true)) cuts.push(i);
+    cuts.push(B);
+    for (let c = 0; c + 1 < cuts.length; c++) {
+      if (c > 0) this.#checkpoint();
+      const last = c + 2 === cuts.length;
+      await this.#pass(tokens.slice(cuts[c], cuts[c + 1]), last ? want : 0);
+    }
+    this.prevNoLogits = want === 0;
+  }
+
+  #checkpoint() { this.ck.save(this.tokens.length, this.state); }
 
   /** Send a command to all workers and wait until every one of them has finished it. */
   async #issue(cmd) {
@@ -190,12 +237,66 @@ export class PoolModel {
     await this.#issue(CMD_KV_IMPORT);
   }
 
-  /** After the KV regions were filled from a prefix cache: declare that the model now holds exactly `ids`. */
-  restorePrefix(ids) { this.tokens = Array.from(ids); }
+  /**
+   * After the KV regions (and, for a hybrid model, the recurrent state) were filled from a prefix cache: declare that the
+   * model now holds exactly `ids`.
+   */
+  restorePrefix(ids) {
+    this.tokens = Array.from(ids);
+    if (this.cfg.hybrid) { this.ck.clear(); this.prevNoLogits = false; this.#checkpoint(); } // the end of the cached prefix is a natural place to come back to
+  }
 
-  /** Roll the KV cache back to `n` positions (the cache itself is positional, so this is just bookkeeping). */
-  truncate(n) { if (n < this.tokens.length) this.tokens.length = n; }
-  reset() { this.tokens.length = 0; }
+  /** Bytes of recurrent state per snapshot / live state (0 for models without any). */
+  get stateBytes() { return recurrentStateBytes(this.cfg); }
+
+  /** Positions of the stored recurrent-state checkpoints (hybrid models; ascending). */
+  get checkpointPositions() { return this.ck ? this.ck.positions : []; }
+
+  /** What truncate(n) would do: the snapshot position it restores from and how many tokens it replays. */
+  truncatePlan(n) { return this.ck ? this.ck.plan(n, this.tokens.length) : { from: Math.min(n, this.tokens.length), replay: 0 }; }
+
+  /** A copy of the live recurrent state {conv, ssm} (hybrid models; the workers must be idle). Used by the prefix cache. */
+  async getRecurrentState() { return { conv: this.state.conv.slice(), ssm: this.state.ssm.slice() }; }
+
+  /** Replace the live recurrent state (hybrid models). */
+  async setRecurrentState({ conv, ssm }) { this.state.conv.set(conv); this.state.ssm.set(ssm); }
+
+  /**
+   * Hybrid models: remember the recurrent state at the current position in the single rollback slot, so that a later
+   * truncate() to a position at or after it only replays the tokens in between (speculative decoding marks the state before
+   * each verification pass). No-op for models whose cache is positional.
+   */
+  markRollback() { if (this.cfg.hybrid) this.ck.mark(this.tokens.length, this.state); }
+
+  /**
+   * Roll back to `n` positions (e.g. to reuse a shared prefix or to drop rejected speculative tokens). A KV cache is
+   * positional, so for ordinary models this is bookkeeping. A hybrid model restores the nearest recurrent-state snapshot at or
+   * before `n` and replays the tokens in between (batched, as many passes as needed); the returned promise resolves to the
+   * number of tokens replayed. Do not call forward while a truncate is pending.
+   * @returns {Promise<number>}
+   */
+  async truncate(n) {
+    if (n >= this.tokens.length) return 0;
+    if (n < 0) n = 0;
+    if (!this.cfg.hybrid) { this.tokens.length = n; return 0; }
+    if (this.failed) throw this.failed;
+    if (this.closed) throw new Error('model is closed');
+    const { from, replay } = this.ck.plan(n, this.tokens.length);
+    const tail = this.tokens.slice(from, n);
+    this.ck.dropAfter(n);
+    this.ck.restore(this.state, from);
+    this.tokens.length = from;
+    this.prevNoLogits = false;
+    for (let i = 0; i < tail.length; i += this.maxBatch) await this.#hybridBatch(tail.slice(i, i + this.maxBatch), 0);
+    if (replay > 0) this.#checkpoint(); // n is where the next prompt continues (and where a regenerate comes back to): keep it
+    this.prevNoLogits = false;
+    return replay;
+  }
+
+  reset() {
+    this.tokens.length = 0;
+    if (this.cfg.hybrid) { this.state.clear(); this.ck.clear(); this.prevNoLogits = false; }
+  }
 
   /** Stop all workers. Safe to call more than once. */
   async close() {

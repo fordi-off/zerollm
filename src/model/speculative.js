@@ -117,9 +117,9 @@ export async function* generateSpeculative(target, draft, promptIds, opts = {}) 
   // ---- prefill: everything but the last prompt token (that one is the first "pending" token), on BOTH models
   const body = promptIds.slice(0, n0 - 1);
   const reuse = Math.min(commonPrefix(target.tokens, promptIds), n0 - 1);
-  target.truncate(reuse);
+  await target.truncate(reuse);
   const dReuse = Math.min(commonPrefix(draft.tokens, body), body.length);
-  draft.truncate(dReuse);
+  await draft.truncate(dReuse);
   stats.promptTokens = n0;
   stats.cachedTokens = reuse;
   stats.generated = 0;
@@ -163,8 +163,9 @@ export async function* generateSpeculative(target, draft, promptIds, opts = {}) 
       const drafted = []; const qd = [];
       if (kk > 0) {
         const td = performance.now();
-        draft.truncate(Math.min(commonPrefix(draft.tokens, seq), seq.length - 1));
+        await draft.truncate(Math.min(commonPrefix(draft.tokens, seq), seq.length - 1));
         let dl = await feedLogits(draft, seq, draft.pos);
+        draft.markRollback?.(); // hybrid draft: a snapshot here makes the next cycle's rollback a short replay
         for (let j = 0; j < kk; j++) {
           const h = histOf(seq.concat(drafted), seq.length + j);
           let x;
@@ -181,6 +182,7 @@ export async function* generateSpeculative(target, draft, promptIds, opts = {}) 
       // -- target: ONE pass over [pending, x_1 .. x_kk]; row j = distribution after x_j (row 0: after the pending token)
       const tv = performance.now();
       const batch = [pending, ...drafted];
+      target.markRollback?.(); // hybrid target: snapshot the recurrent state before the pass; a partial acceptance replays only the accepted tokens
       const rows = await forwardRows(target, batch);
       const tAfter = performance.now();
       spec.verifyMs += tAfter - tv;
@@ -221,15 +223,15 @@ export async function* generateSpeculative(target, draft, promptIds, opts = {}) 
         if (generated >= max) { done = true; break; }
         if (idx >= target.ctx) { stats.stopReason = 'context'; done = true; break; }
       }
-      target.truncate(Math.min(commonPrefix(target.tokens, seq), seq.length - 1));
+      await target.truncate(Math.min(commonPrefix(target.tokens, seq), seq.length - 1));
       spec.otherMs += performance.now() - tAfter;
       if (done) break outer;
       await yieldToEventLoop();
     }
   } finally {
     // whatever happens (stop, abort, the consumer walking away): both caches keep only tokens that are really in the text
-    target.truncate(commonPrefix(target.tokens, seq));
-    draft.truncate(commonPrefix(draft.tokens, seq));
+    await target.truncate(commonPrefix(target.tokens, seq));
+    await draft.truncate(commonPrefix(draft.tokens, seq));
     stats.decodeMs = performance.now() - tDecode;
     spec.acceptRate = spec.drafted ? spec.accepted / spec.drafted : 0;
     spec.tokensPerCycle = spec.cycles ? generated / spec.cycles : 0;

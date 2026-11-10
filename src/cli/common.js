@@ -1,7 +1,7 @@
 // Shared CLI plumbing for run / chat / bench: engine loading, sampler flags, streaming output.
 import os from 'node:os';
 import { readGGUF } from '../gguf/reader.js';
-import { modelConfig, estimateRam, assertSupportedTensorTypes, REFERENCE_ONLY_REASON } from '../model/config.js';
+import { modelConfig, estimateRam, assertSupportedTensorTypes } from '../model/config.js';
 import { RefModel } from '../model/forward.js';
 import { PoolModel } from '../compute/pool.js';
 import path from 'node:path';
@@ -129,7 +129,6 @@ export async function loadEngine(modelPath, flags) {
   const ctx = num(flags.ctx, 2048);
   const threads = threadsFromFlags(flags);
   const kv = kvFromFlags(flags);
-  if (cfg.referenceOnly && !(threads === 1 && kernelsFromFlags(flags) === 'js' && kv === 'f32')) throw new Error(`${REFERENCE_ONLY_REASON}; got --threads ${threads} --kernels ${kernelsFromFlags(flags)} --kv ${kv}`);
   const est = estimateRam(g, cfg, { ctx, threads, kvBytes: kv === 'f16' ? 2 : 4 });
   const free = os.freemem();
   // speculative decoding: validate the draft model first (nothing is loaded yet) and count its memory too
@@ -200,7 +199,7 @@ export function templateOptions(eng, flags) {
  * @param {number[]} promptIds full prompt   @param {{role: string, content: string}[]} systemMessages usually [] or one system message
  */
 export async function usePrefixCache(eng, flags, systemMessages, promptIds, tmplOpts, signal) {
-  if (flags.cache === false || eng.kind === 'raw' || eng.model.pos !== 0 || eng.cfg.hybrid) return 'off'; // the KV prefix cache cannot hold recurrent state
+  if (flags.cache === false || eng.kind === 'raw' || eng.model.pos !== 0) return 'off';
   const prefix = encodeChat(eng.tok, eng.kind, systemMessages, { ...tmplOpts, generationPrompt: false });
   if (prefix.length < MIN_CACHED_PREFIX || prefix.length >= promptIds.length || prefix.some((t, i) => t !== promptIds[i])) return 'skip';
   const dir = typeof flags['cache-dir'] === 'string' ? flags['cache-dir'] : path.join(path.dirname(eng.g.path), '.zerollm-cache');
@@ -225,10 +224,10 @@ export function installAbort(signal, rl = null) {
 }
 
 /**
- * Generate and stream a reply to stdout.
+ * Generate and stream a reply to stdout. `opening`: text printed (and returned) in front of the first generated token.
  * @returns {Promise<{text: string, stats: any}>}
  */
-export async function streamReply(eng, promptIds, { sample, maxTokens, stops = [], signal, out = process.stdout, err = process.stderr, progress = err.isTTY, stats = {} }) {
+export async function streamReply(eng, promptIds, { sample, maxTokens, stops = [], signal, out = process.stdout, err = process.stderr, progress = err.isTTY, stats = {}, opening = '' }) {
   const dec = eng.tok.streamDecoder();
   const filter = new StopFilter(stops);
   let text = '';
@@ -237,10 +236,12 @@ export async function streamReply(eng, promptIds, { sample, maxTokens, stops = [
   let progressShown = false;
   const clearProgress = () => { if (progressShown) { err.write('\r\x1b[K'); progressShown = false; } };
   const emit = (s) => { if (s) { clearProgress(); out.write(s); text += s; } };
+  let opened = opening === '';
   for await (const id of tokenGenerator(eng, promptIds, {
     maxTokens, sample, stopIds: eng.stopIds, signal, stats,
     onPrefillProgress: progress ? (d, n) => { if (n > 8) { err.write(`\rprefill ${d}/${n}`); progressShown = true; } } : undefined,
   })) {
+    if (!opened) { opened = true; emit(opening); } // Qwen3.5 thinking: the prompt already ended with `<think>`; show it in front of the reasoning
     emit(filter.push(dec.push(id)));
     if (filter.stopped) { signal.aborted = true; stats.stopReason = 'stop-string'; }
   }

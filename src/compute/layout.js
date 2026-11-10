@@ -10,7 +10,7 @@ export const CTRL = Object.freeze({
   ERROR: 5,     // worker id + 1 of the first failing worker
   CMD: 6,       // 0 = run tokens, 1 = exit
   BATCH: 7,     // number of tokens in this command (1 = decode)
-  KV_LAYER: 8,  // KV export/import: layer
+  KV_LAYER: 8,  // KV export/import: layer (attention-layer number: only attention layers have a KV cache)
   KV_ISV: 9,    //                   0 = K, 1 = V
   KV_N: 10,     //                   number of positions
   BAR_COUNT: 16,
@@ -48,17 +48,45 @@ export const alignUp = (v, a) => Math.ceil(v / a) * a;
 export const DEFAULT_LOGITS_BATCH = 16;
 
 /**
+ * How a hybrid model's Gated DeltaNet layers are sharded: worker `w` owns the value heads [vh0, vh1) (their delta-rule
+ * matrices, their slice of the conv window, their gate / beta / alpha rows) and computes the q/k conv + L2 norm of the key
+ * heads [kk0, kk1). The two ranges are independent: a value head reads its key head's (already normalised) q and k from
+ * shared memory, whoever computed it, so the value-head -> key-head mapping (keyHeadOfValueHead in ref-deltanet.js) does
+ * not influence the sharding.
+ * @param {{nKHeads: number, nVHeads: number}} ssm @param {number} n workers @param {number} w
+ */
+export function recurrentShards(ssm, n, w) {
+  const [kk0, kk1] = splitRange(ssm.nKHeads, n, w);
+  const [vh0, vh1] = splitRange(ssm.nVHeads, n, w);
+  return { kk0, kk1, vh0, vh1 };
+}
+
+/**
  * Allocate the SharedArrayBuffers a pool needs. `logitsBatch` = how many positions' logits one pass can return
  * (`logits: 'all'`); the shared logits buffer holds that many vocabulary-sized rows.
+ * Hybrid (Gated DeltaNet) models additionally get the live recurrent state, `conv` and `ssm` (layout of RecurrentState:
+ * per recurrent layer [channel][kernel-1] and [vHead][vDim][kDim], f32), updated by the workers and snapshotted by the main
+ * thread, and wider `q` (attention q rows come as [query | gate] per head; the conv output of a recurrent layer) and `att`
+ * (the gated-norm output of the recurrent heads) buffers.
  */
 export function allocShared(cfg, ctx, maxBatch = 1, logitsBatch = 1) {
   const qDim = cfg.nHead * cfg.headDim;
   const kvDim = cfg.nHeadKv * cfg.headDim;
   const f32 = (n) => new SharedArrayBuffer(Math.max(1, n) * 4);
-  return {
+  const qRows = cfg.attnOutputGate ? 2 * qDim : qDim;
+  const sh = {
     ctrl: new SharedArrayBuffer(CTRL.SIZE * 4),
-    x: f32(cfg.nEmbd * maxBatch), q: f32(qDim * maxBatch), k: f32(kvDim * maxBatch), v: f32(kvDim * maxBatch), att: f32(qDim * maxBatch),
+    x: f32(cfg.nEmbd * maxBatch), q: f32(Math.max(qRows, cfg.ssm?.convDim ?? 0) * maxBatch), k: f32(kvDim * maxBatch), v: f32(kvDim * maxBatch),
+    att: f32(Math.max(qDim, cfg.ssm?.innerSize ?? 0) * maxBatch),
     hb: f32(cfg.nFF * maxBatch), logits: f32(cfg.vocabSize * Math.max(1, logitsBatch)),
     kvStage: f32(ctx * kvDim), // staging area for KV export/import (the caches themselves are private to each worker)
+    conv: null, ssm: null,
   };
+  if (cfg.hybrid) {
+    const nRec = cfg.layerIsRecurrent.filter(Boolean).length;
+    const s = cfg.ssm;
+    sh.conv = f32(nRec * (s.convKernel - 1) * s.convDim);
+    sh.ssm = f32(nRec * s.nVHeads * s.headVDim * s.headKDim);
+  }
+  return sh;
 }

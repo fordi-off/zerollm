@@ -2,18 +2,10 @@
 
 import { GGML_TYPE, typeName } from '../gguf/types.js';
 
-/** Architectures that run on every path (reference, worker pool, WASM SIMD kernels). */
-export const SUPPORTED_ARCHS = ['llama', 'qwen2', 'qwen3'];
+/** Architectures that run on every path (reference, worker pool, WASM SIMD kernels). qwen35 is the hybrid Gated DeltaNet + gated attention family. */
+export const SUPPORTED_ARCHS = ['llama', 'qwen2', 'qwen3', 'qwen35'];
 
-/**
- * Architectures that currently run on the single-thread reference path only (`--threads 1 --kernels js`).
- * modelConfig() parses them, but inspectModel().supported stays false and the worker pool refuses them.
- */
-export const REFERENCE_ONLY_ARCHS = ['qwen35'];
-
-export const REFERENCE_ONLY_REASON = 'qwen35 currently runs only on the reference path (use --kernels js --threads 1)';
-
-/** How many recurrent-state checkpoints the reference path keeps for truncate() (see forward-qwen35.js). */
+/** How many recurrent-state checkpoints a hybrid model keeps for truncate() (see state-checkpoints.js). */
 export const RECURRENT_CHECKPOINTS = 6;
 
 /** Tensor types the engine can compute with (reference + SIMD kernels). */
@@ -57,7 +49,6 @@ export function assertSupportedTensorTypes(g) {
  * @property {boolean} hasRopeFreqs   rope_freqs.weight tensor present (Llama 3.1)
  * @property {number} nAttnLayers     layers that own a KV cache (= nLayer except for hybrid models)
  * @property {boolean} hybrid         mixes full-attention layers with recurrent (Gated DeltaNet) layers (qwen35)
- * @property {boolean} referenceOnly  runs on the reference path only (see REFERENCE_ONLY_ARCHS)
  * @property {boolean[]} layerIsRecurrent  per layer: true = recurrent layer (no KV cache, has conv + delta-rule state)
  * @property {boolean} attnOutputGate attn_q projects 2*headDim per head: [query | output gate] (qwen35)
  * @property {number[]|null} ropeSections M-RoPE sections from metadata (informational: text-only input reduces to plain NEOX rotary)
@@ -82,9 +73,8 @@ export class UnsupportedArchError extends Error {}
 export function modelConfig(g) {
   const arch = g.get('general.architecture');
   if (typeof arch !== 'string') throw new Error('GGUF has no general.architecture');
-  const referenceOnly = REFERENCE_ONLY_ARCHS.includes(arch);
-  if (!SUPPORTED_ARCHS.includes(arch) && !referenceOnly) {
-    throw new UnsupportedArchError(`architecture "${arch}" is not supported (supported: ${SUPPORTED_ARCHS.join(', ')}; reference path only: ${REFERENCE_ONLY_ARCHS.join(', ')})`);
+  if (!SUPPORTED_ARCHS.includes(arch)) {
+    throw new UnsupportedArchError(`architecture "${arch}" is not supported (supported: ${SUPPORTED_ARCHS.join(', ')})`);
   }
   const need = (k) => {
     const v = g.get(`${arch}.${k}`);
@@ -125,7 +115,6 @@ export function modelConfig(g) {
     hasRopeFreqs: g.tensor('rope_freqs.weight') !== undefined,
     nAttnLayers: hybrid ? hybrid.layerIsRecurrent.filter((r) => !r).length : nLayer,
     hybrid: hybrid !== null,
-    referenceOnly,
     layerIsRecurrent: hybrid ? hybrid.layerIsRecurrent : Array.from({ length: nLayer }, () => false),
     attnOutputGate: hybrid !== null,
     ropeSections: hybrid ? hybrid.ropeSections : null,
@@ -190,8 +179,8 @@ export function kvBytesPerToken(c, bytesPerValue = 4) {
  *  kv       KV cache for `ctx` tokens at `kvBytes` per value (4 = f32, 2 = f16)
  *  scratch  per-worker activation / kernel buffers
  *  runtime  node + V8 + one isolate per worker
- *  recurrent  hybrid models: the live recurrent state (f32) of the one sequence the reference path holds
- *  checkpoints  hybrid models: room for RECURRENT_CHECKPOINTS state snapshots (truncate() support, see forward-qwen35.js)
+ *  recurrent  hybrid models: the live recurrent state (f32) of the one sequence (shared memory on the pool)
+ *  checkpoints  hybrid models: room for RECURRENT_CHECKPOINTS state snapshots (truncate() support, see state-checkpoints.js)
  *  perWorker  the busiest worker's WebAssembly.Memory (must stay under the 4 GB wasm32 limit)
  * @param {import('../gguf/reader.js').GGUFFile} g
  * @param {ModelConfig|null} cfg
