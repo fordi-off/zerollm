@@ -61,6 +61,7 @@ function reference(fmt, rows, nb, wbytes, xq, xd) {
   const out = new Float32Array(xq.length * rows);
   xq.forEach((q, t) => {
     const a = new Act(new Float32Array(cols)); a.q = q; a.d = xd[t];
+    a.s = Int32Array.from({ length: cols / 32 }, (_, b) => { let sum = 0; for (let i = 0; i < 32; i++) sum += q[b * 32 + i]; return sum; }); // block sums the K-quant min correction reads
     out.set(matvec({ type: fmt.type, rows, cols, data: Uint8Array.from(wbytes) }, a, new Float32Array(rows)), t * rows);
   });
   return out;
