@@ -27,7 +27,7 @@ Run `npm run app -- --data <folder containing models/>` (or `node app/main.js`).
 - [ ] Download the smallest model (Llama 3.2 1B): progress, speed and ETA move; when finished it is selectable and chats. **Note the download speed** (and compare with a browser download of the same file) - if much slower, tell me (Node vs curl TLS throttling).
 - [ ] Cancel in the middle, then "Fortsett nedlasting" continues from the same byte count.
 - [ ] Unplug the network for a few seconds during a download: it retries and continues.
-- [ ] All catalog URLs work (each shows a size close to the listed one); report any 404.
+- [ ] All catalog URLs work (each shows a size close to the listed one); report any 404. **New: Qwen3.5 4B (Unsloth `Qwen3.5-4B-Q4_K_M.gguf`, ~2.55 GB): the link was written from the file name of the tested local copy, not fetched from the build machine; check this one first.** After the download: it appears in the model picker with the "Tenk først" switch, answers, and a second message in the same chat starts fast (state reuse).
 - [ ] KV f32/f16 selector changes the RAM estimate; delete model asks for confirmation and removes the file.
 
 ## A4 - skills

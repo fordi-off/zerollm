@@ -254,13 +254,15 @@ let warned = false;
 const warnOnce = (msg) => { if (!warned) { warned = true; process.stderr.write(`zerollm: ${msg}\n`); } };
 
 /**
- * The dot form selected by the environment: `ZEROLLM_DOT=extmul|wide|relaxed|relaxed-add`; without it `ZEROLLM_KDOT=wide`
- * still selects `wide`; the default is `extmul` (there is deliberately no `auto`: the relaxed kernels are an experiment
- * that has to be measured on the target CPU first, see docs/BENCHMARKS.md).
- * `relaxed*` on an engine without relaxed SIMD falls back to `extmul` with a warning (never an error).
+ * The dot form selected by the environment: `ZEROLLM_DOT=extmul|wide|relaxed|relaxed-add`. Without it, `ZEROLLM_KDOT=wide` still
+ * selects `wide`; otherwise the default is `relaxed-add` when this engine has WebAssembly relaxed SIMD and `extmul` when it has not.
+ * (Measured on the target laptop, 6 threads, interleaved rounds: Qwen3.5-4B Q4_K_M decode +28% / prefill +23%, Qwen3-4B Q4_K_M
+ * decode +18% / prefill +13% over extmul; docs/BENCHMARKS.md. Results differ from extmul at rounding level only.)
+ * `ZEROLLM_DOT=extmul` is the escape hatch. `relaxed*` requested on an engine without relaxed SIMD falls back to `extmul` with a
+ * warning (never an error).
  * NOTE: the relaxed modes change the layout the batched kernels read their activations in (int8 instead of int16), so they
  * only take effect for callers that ask for it explicitly: `instantiateKernels(mem, { dot: resolveDotMode() })`
- * (the decoder worker does; the embedding worker keeps the default kernels).
+ * (the decoder worker does; the embedding worker keeps the int16 `extmul` kernels).
  * @param {NodeJS.ProcessEnv} [env]
  * @returns {'extmul'|'wide'|'relaxed'|'relaxed-add'}
  */
@@ -273,7 +275,9 @@ export function resolveDotMode(env = process.env) {
   }
   if (v === 'extmul' || v === 'wide') return v;
   if (v) warnOnce(`ZEROLLM_DOT=${env.ZEROLLM_DOT} is not one of extmul|wide|relaxed|relaxed-add; ignored`);
-  return env.ZEROLLM_KDOT === 'wide' ? 'wide' : 'extmul';
+  if (env.ZEROLLM_KDOT === 'wide') return 'wide';
+  if (env.ZEROLLM_KDOT === 'extmul') return 'extmul';
+  return probeWasmFeatures().relaxedSimd ? 'relaxed-add' : 'extmul';
 }
 
 /**

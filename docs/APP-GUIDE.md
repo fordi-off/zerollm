@@ -46,7 +46,7 @@ Innstillinger → **Diagnose** viser system, funksjoner, modeller og siste loggf
 3. Windows shortcut without a .bat: right-click desktop → New → Shortcut → target `"C:\Program Files\nodejs\node.exe" app\main.js`, then set *Start in* to the `zerollm` folder.
 
 ### First run
-With no model you get a "Download a model" card. Recommended for Norwegian: NB Llama 3.1 8B (~5 GB, ~6–7 GB free RAM). Smaller PC: Llama 3.2 3B/1B or Qwen3 4B. Supported architectures: llama (3.x), qwen2, qwen3.
+With no model you get a "Download a model" card. Recommended for Norwegian: NB Llama 3.1 8B (~5 GB, ~6–7 GB free RAM). Smaller PC: Llama 3.2 3B/1B or Qwen3 4B. Qwen3.5 4B (~2.6 GB, ~3.5 GB free RAM) is in the list too: a newer model with a "Tenk først" switch like Qwen3; it reads long prompts slowly (about 5 tokens/s on a laptop), so prefer short messages and files with it. Supported architectures: llama (3.x), qwen2, qwen3, qwen35 (Qwen3.5).
 
 ### Use
 Enter sends, Shift+Enter newline, Esc stops, Alt+N new chat, Alt+B sidebar, `/` opens commands. Slash commands apply to one reply; an attached text file (paperclip or drag-and-drop) goes into the message whole and stays in the model's memory for the rest of the chat; chats are stored in Skibeti37's format; long chats are summarized automatically.

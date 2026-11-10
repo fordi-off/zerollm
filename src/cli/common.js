@@ -7,7 +7,7 @@ import { PoolModel } from '../compute/pool.js';
 import path from 'node:path';
 import { generate, prefillTokens } from '../model/generate.js';
 import { generateSpeculative, vocabMismatch, defaultDraftThreads, DEFAULT_DRAFT_K, verifyLimit } from '../model/speculative.js';
-import { PrefixCache, modelFingerprint } from '../model/prefix-cache.js';
+import { PrefixCache, modelFingerprint, kernelFlavour } from '../model/prefix-cache.js';
 import { encodeChat } from '../tokenizer/chat-templates.js';
 import { Tokenizer } from '../tokenizer/bpe.js';
 import { detectTemplate, stopTokenIds, TEMPLATE_KINDS } from '../tokenizer/chat-templates.js';
@@ -203,7 +203,7 @@ export async function usePrefixCache(eng, flags, systemMessages, promptIds, tmpl
   const prefix = encodeChat(eng.tok, eng.kind, systemMessages, { ...tmplOpts, generationPrompt: false });
   if (prefix.length < MIN_CACHED_PREFIX || prefix.length >= promptIds.length || prefix.some((t, i) => t !== promptIds[i])) return 'skip';
   const dir = typeof flags['cache-dir'] === 'string' ? flags['cache-dir'] : path.join(path.dirname(eng.g.path), '.zerollm-cache');
-  const cache = new PrefixCache(dir, modelFingerprint(eng.g.path, `${eng.model.kernels === 'wasm' ? 'wasm' : 'js'}/kv-${eng.model.kv ?? 'f32'}`));
+  const cache = new PrefixCache(dir, modelFingerprint(eng.g.path, kernelFlavour(eng.model)));
   if (await cache.load(eng.model, prefix)) return 'hit';
   const r = await prefillTokens(eng.model, prefix, { wantLogits: false, signal });
   if (r.aborted) return 'skip';

@@ -1,4 +1,4 @@
-// Models offered for download. Only architectures zerollm runs (llama, qwen2, qwen3); everything is a plain
+// Models offered for download. Only architectures zerollm runs (llama, qwen2, qwen3, qwen35); everything is a plain
 // Q4_K_M/Q8_0 GGUF. `sizeBytes` is approximate (the real size comes from the server and is verified after the download).
 // `ramGB` is the rough RAM need at a 8192 context with an f16 KV cache (the model list shows the exact estimate once the file is there).
 const HF = 'https://huggingface.co';
@@ -8,6 +8,11 @@ export const CATALOG = [
     id: 'nb-llama-3.1-8b', filename: 'nb-llama-3.1-8b-instruct-q4_k_m.gguf', displayName: 'NB Llama 3.1 8B (norsk)',
     sizeBytes: 4_920_000_000, ramGB: 6.5, recommended: true, languages: 'no',
     url: `${HF}/NbAiLab/nb-llama-3.1-8B-Instruct-Q4_K_M-GGUF/resolve/main/nb-llama-3.1-8b-instruct-q4_k_m.gguf`,
+  },
+  {
+    id: 'qwen3.5-4b', filename: 'Qwen3.5-4B-Q4_K_M.gguf', displayName: 'Qwen3.5 4B',
+    sizeBytes: 2_550_000_000, ramGB: 3.5, languages: 'multi',
+    url: `${HF}/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf`,
   },
   {
     id: 'qwen3-8b', filename: 'Qwen_Qwen3-8B-Q4_K_M.gguf', displayName: 'Qwen3 8B',

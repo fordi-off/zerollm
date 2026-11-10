@@ -71,7 +71,14 @@ for (const [name, opts] of FILES) {
     }
   });
 
-  test(`qwen35 pool, WASM SIMD kernels: tracks the reference at rounding level and does not depend on the worker count (${name})`, async () => {
+  // extmul keeps the float summation order of the reference (1e-4); the default relaxed-add groups the same exact integer sums differently,
+  // and a float difference of ~1e-7 can flip an int8 activation rounding a few layers later: a fraction of a percent on random weights.
+  for (const [dot, tol] of [['extmul', 1e-4], [undefined, 2e-2]]) test(`qwen35 pool, WASM SIMD kernels (${dot ?? 'default dot form'}): tracks the reference and does not depend on the worker count (${name})`, async () => {
+    const was = process.env.ZEROLLM_DOT;
+    if (dot === undefined) delete process.env.ZEROLLM_DOT; else process.env.ZEROLLM_DOT = dot;
+    try { await simdTracksReference(opts, tol); } finally { if (was === undefined) delete process.env.ZEROLLM_DOT; else process.env.ZEROLLM_DOT = was; }
+  });
+  async function simdTracksReference(opts, tol) {
     const { g } = tinyQwen35File(opts);
     const ref = new RefModel(g, { ctx: 64 });
     const want = TOKS.map((t) => Float32Array.from(ref.forward(t)));
@@ -85,14 +92,15 @@ for (const [name, opts] of FILES) {
           const l = Float32Array.from(await pool.forward(TOKS[i]));
           got.push(l);
           const top = Math.max(...want[i].map(Math.abs));
-          assert.ok(maxAbs(l, want[i]) <= 1e-4 * top, `workers=${workers} pos=${i}: ${maxAbs(l, want[i])} vs top ${top}`);
-          assert.equal(argmax(l), argmax(want[i]), `argmax at ${i}`);
+          assert.ok(maxAbs(l, want[i]) <= tol * top, `workers=${workers} pos=${i}: ${maxAbs(l, want[i])} vs top ${top}`);
+          // the pool's best token must be (within tol) a best token of the reference too: random tiny models have near-tied logits
+          assert.ok(want[i][argmax(l)] >= Math.max(...want[i]) - tol * top, `argmax at ${i}: ${argmax(l)} vs ${argmax(want[i])}`);
         }
         if (first) got.forEach((l, i) => assert.deepEqual([...l], [...first[i]], `workers=${workers} pos=${i} differs from workers=1`));
         else first = got;
       } finally { await pool.close(); }
     }
-  });
+  }
 }
 
 test('qwen35 pool with 6 and 7 workers (the target laptop has 6; key / value / KV heads split unevenly, some workers own few): same as the reference', async () => {

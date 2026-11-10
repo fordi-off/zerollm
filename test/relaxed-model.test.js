@@ -25,12 +25,14 @@ async function createPool(g, dot, opts) {
 for (const mode of ['relaxed', 'relaxed-add']) for (const quant of ['q4_k_m', 'q5_k', 'q5_0', 'q4_0', 'q8_0']) {
   test(`${quant}: ZEROLLM_DOT=${mode} pool tracks the default pool; batched prefill is bit-identical to token-by-token; independent of worker count`, { skip: SKIP }, async () => {
     const { g } = tinyFile({ arch: 'qwen3', quant, seed: 9, ...DIMS });
-    const base = await createPool(g, undefined, { workers: 2 });
+    const base = await createPool(g, 'extmul', { workers: 2 });
+    const dflt = await createPool(g, undefined, { workers: 1 });
     const rx1 = await createPool(g, mode, { workers: 1 });
     const rx3 = await createPool(g, mode, { workers: 3 });
     const rxB = await createPool(g, mode, { workers: 2, maxBatch: 16 });
     try {
-      assert.ok(base.workerInfo.every((i) => i.dot === 'extmul'), 'default pool uses the default kernels');
+      assert.ok(base.workerInfo.every((i) => i.dot === 'extmul'), 'ZEROLLM_DOT=extmul is the escape hatch');
+      assert.ok(dflt.workerInfo.every((i) => i.dot === 'relaxed-add'), 'with no ZEROLLM_DOT the default is relaxed-add (relaxed SIMD present)');
       for (const p of [rx1, rx3, rxB]) assert.ok(p.workerInfo.every((i) => i.dot === mode), `ZEROLLM_DOT=${mode} reaches every worker`);
 
       let exact = 0;
@@ -57,6 +59,6 @@ for (const mode of ['relaxed', 'relaxed-add']) for (const quant of ['q4_k_m', 'q
       await rxB.forwardBatch(TOKS.slice(5, 6), { logits: false });
       const last = await rxB.forwardBatch(TOKS.slice(6));
       assert.deepEqual([...last], [...seq[TOKS.length - 1]], 'batched prefill vs token-by-token');
-    } finally { await Promise.all([base.close(), rx1.close(), rx3.close(), rxB.close()]); }
+    } finally { await Promise.all([base.close(), dflt.close(), rx1.close(), rx3.close(), rxB.close()]); }
   });
 }

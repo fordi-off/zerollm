@@ -10,12 +10,22 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { resolveDotMode } from '../compute/wasm/kernels.js';
 
 const MAGIC = 'ZLLMKV01';
 const MAGIC_HYBRID = 'ZLLMKV02';
 
 /** Number of layers that own a KV cache (every layer, except for hybrid models). */
 const kvLayers = (cfg) => cfg.nAttnLayers ?? cfg.nLayer;
+
+/**
+ * The kernel flavour that computes a model's state, as it goes into the cache key: JS or WASM (with the integer dot form, because
+ * the relaxed dot forms round differently from extmul, so a state saved with one is not bit-identical to the other's) and the KV precision.
+ * @param {{kernels?: string, kv?: string}} model
+ */
+export function kernelFlavour(model) {
+  return `${model.kernels === 'wasm' ? `wasm-${resolveDotMode()}` : 'js'}/kv-${model.kv ?? 'f32'}`;
+}
 
 /** Identity of a model file + the kernel flavour that computed the state. */
 export function modelFingerprint(modelPath, kernels) {

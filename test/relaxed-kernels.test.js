@@ -90,8 +90,9 @@ for (const mode of MODES) {
   });
 }
 
-test('resolveDotMode: ZEROLLM_DOT wins, ZEROLLM_KDOT still works, default is extmul, relaxed only when supported', () => {
-  assert.equal(resolveDotMode({}), 'extmul');
+test('resolveDotMode: ZEROLLM_DOT wins, ZEROLLM_KDOT still works, default is relaxed-add when supported (else extmul), ZEROLLM_DOT=extmul opts out', () => {
+  assert.equal(resolveDotMode({}), RELAXED ? 'relaxed-add' : 'extmul');
+  assert.equal(resolveDotMode({ ZEROLLM_DOT: 'extmul' }), 'extmul');
   assert.equal(resolveDotMode({ ZEROLLM_KDOT: 'wide' }), 'wide');
   assert.equal(resolveDotMode({ ZEROLLM_KDOT: 'extmul' }), 'extmul');
   assert.equal(resolveDotMode({ ZEROLLM_DOT: 'wide' }), 'wide');
@@ -100,6 +101,7 @@ test('resolveDotMode: ZEROLLM_DOT wins, ZEROLLM_KDOT still works, default is ext
   assert.equal(resolveDotMode({ ZEROLLM_DOT: 'relaxed-add' }), RELAXED ? 'relaxed-add' : 'extmul');
   assert.equal(resolveDotMode({ ZEROLLM_DOT: 'relaxed', ZEROLLM_KDOT: 'wide' }), RELAXED ? 'relaxed' : 'extmul');
   assert.equal(resolveDotMode({ ZEROLLM_DOT: 'bogus', ZEROLLM_KDOT: 'wide' }), 'wide'); // unknown value: warned about, ignored
+  assert.equal(resolveDotMode({ ZEROLLM_DOT: 'bogus' }), RELAXED ? 'relaxed-add' : 'extmul');
 });
 
 test('instantiateKernels() without an explicit dot never returns relaxed kernels, even if ZEROLLM_DOT=relaxed (embedding workers stage int16)', () => {

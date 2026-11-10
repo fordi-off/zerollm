@@ -24,7 +24,7 @@ import { StopFilter } from './sampling/stop.js';
 import { generate as generateTokens, prefillTokens } from './model/generate.js';
 import { generateSpeculative, verifyLimit, vocabMismatch, vocabFingerprint, defaultDraftThreads, DEFAULT_DRAFT_K } from './model/speculative.js';
 import { PoolModel } from './compute/pool.js';
-import { PrefixCache, modelFingerprint } from './model/prefix-cache.js';
+import { PrefixCache, modelFingerprint, kernelFlavour } from './model/prefix-cache.js';
 
 export { SUPPORTED_ARCHS, SUPPORTED_TENSOR_TYPES };
 
@@ -317,7 +317,7 @@ export class Engine extends PromptTools {
    */
   async primePrefix(prefixIds, { dir, minTokens = 32, signal, onProgress } = {}) {
     if (this.closed || this.model.pos !== 0 || prefixIds.length < minTokens || prefixIds.length >= this.ctx) return 'off';
-    const cache = new PrefixCache(dir, modelFingerprint(this.path, `${this.model.kernels === 'wasm' ? 'wasm' : 'js'}/kv-${this.model.kv ?? 'f32'}`));
+    const cache = new PrefixCache(dir, modelFingerprint(this.path, kernelFlavour(this.model)));
     if (await cache.load(this.model, prefixIds)) return 'hit';
     const r = await prefillTokens(this.model, prefixIds, { wantLogits: false, signal, onProgress });
     if (r.aborted) return 'aborted';
