@@ -71,7 +71,7 @@ Laptop speed varies about +-15% from run to run; more models, the spin experimen
 
 ## Tools (`tools/`)
 
-`make-tiny-gguf.js` / `make-tiny-embed-gguf.js` (synthetic models so tests need no downloads), `kbench.mjs` and `abbench.mjs` (kernel and A/B benchmarks), `embed-bench.mjs`, `think-eval.mjs` (do Qwen3's plain and thinking modes get a set of maths questions right? run on a real model), `ollama-reference.mjs`, and `ui-smoke.mjs` (drives the app in headless Chromium and writes screenshots; needs Playwright installed globally, it is not a dependency of the project).
+`make-tiny-gguf.js` / `make-tiny-embed-gguf.js` (synthetic models so tests need no downloads), `kbench.mjs` (per-kernel speed of the extmul / wide / relaxed-SIMD integer dot forms, decode and batched), `dotbench.mjs` (interleaved model-level A/B of `ZEROLLM_DOT=extmul|relaxed|relaxed-add`, the opt-in relaxed-SIMD kernels, see `docs/BENCHMARKS.md`) and `abbench.mjs` (A/B of a CLI flag), `embed-bench.mjs`, `think-eval.mjs` (do Qwen3's plain and thinking modes get a set of maths questions right? run on a real model), `ollama-reference.mjs`, and `ui-smoke.mjs` (drives the app in headless Chromium and writes screenshots; needs Playwright installed globally, it is not a dependency of the project).
 
 ## Docs
 
