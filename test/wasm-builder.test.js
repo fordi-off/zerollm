@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ModuleBuilder, T, uleb, sleb, SIMD, OPS } from '../src/compute/wasm/builder.js';
 import { mulberry32 } from '../src/util/rng.js';
+import { probeWasmFeatures } from '../src/compute/wasm/features.js';
 
 const instantiate = (bytes, pages = 1) => {
   assert.ok(WebAssembly.validate(bytes), 'module must validate');
@@ -220,4 +221,78 @@ test('relaxed-simd dot opcode encodes and validates when the engine supports it'
   // validity depends on the Node/V8 version; just make sure our encoding equals the doctor probe's
   const probe = WebAssembly.validate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 8, 1, 96, 3, 123, 123, 123, 1, 123, 3, 2, 1, 0, 10, 13, 1, 11, 0, 32, 0, 32, 1, 32, 2, 253, 147, 2, 11]));
   assert.equal(WebAssembly.validate(bytes), probe);
+});
+
+// ------------------------------------------------------------------ relaxed SIMD dot (skipped on a V8 without it)
+const RELAXED = probeWasmFeatures().relaxedSimd;
+const RELAXED_SKIP = RELAXED ? false : 'WebAssembly relaxed SIMD is not available in this V8';
+
+test('relaxed-simd dot: the sub-opcode is emitted as 0xFD 0x93 0x02 (0x113 LEB128) and the module validates iff the engine has relaxed SIMD', () => {
+  const m = new ModuleBuilder();
+  m.func('d', [T.v128, T.v128, T.v128], [T.v128]).get(0).get(1).get(2).op('i32x4.relaxed_dot_i8x16_i7x16_add_s');
+  const bytes = m.build();
+  const at = bytes.findIndex((b, i) => b === 0xfd && bytes[i + 1] === 0x93 && bytes[i + 2] === 0x02);
+  assert.ok(at > 0, 'bytes 0xFD 0x93 0x02 present');
+  assert.equal(WebAssembly.validate(bytes), RELAXED);
+  assert.equal(SIMD['i32x4.relaxed_dot_i8x16_i7x16_add_s'], 0x113);
+  assert.equal(SIMD['i16x8.relaxed_dot_i8x16_i7x16_s'], 0x112);
+});
+
+/** module exporting t(a, b, c, out): out = op(load(a), load(b), load(c)) for the 3-operand relaxed dot, or op(a, b) for the i16x8 form */
+function relaxedKernel(name, ternary) {
+  const m = new ModuleBuilder().withImportedMemory(1);
+  const f = m.func('t', [T.i32, T.i32, T.i32, T.i32], []);
+  f.get(3).get(0).op('v128.load').get(1).op('v128.load');
+  if (ternary) f.get(2).op('v128.load');
+  f.op(name).op('v128.store');
+  return instantiate(m.build());
+}
+const s8 = (x) => (x << 24) >> 24;
+/** JS model: i32 lane j = c[j] + sum_{k<4} a_signed[4j+k] * b[4j+k] (b must be 0..127) */
+const dotAdd = (a, b, c) => Array.from({ length: 4 }, (_, j) => c[j] + [0, 1, 2, 3].reduce((s, k) => s + s8(a[4 * j + k]) * b[4 * j + k], 0));
+
+function runRelaxed(inst, mem, a, b, c) {
+  const u8 = new Uint8Array(mem.buffer); const i32 = new Int32Array(mem.buffer);
+  u8.set(a, 0); u8.set(b, 16); i32.set(c, 8); // c at byte 32
+  inst.exports.t(0, 16, 32, 48);
+  return [...i32.subarray(12, 16)];
+}
+
+test('relaxed-simd i32x4 dot-accumulate: random int8 x i7 operands match the JS model (operand 1 signed, operand 2 in 0..127)', { skip: RELAXED_SKIP }, () => {
+  const { inst, mem } = relaxedKernel('i32x4.relaxed_dot_i8x16_i7x16_add_s', true);
+  for (let trial = 0; trial < 200; trial++) {
+    const a = randBytes(16); const b = Uint8Array.from(randBytes(16), (x) => x & 0x7f);
+    // keep the accumulate away from i32 wrap-around so the JS model needs no modular arithmetic
+    const c = Array.from({ length: 4 }, () => (Math.floor(rand() * 2 ** 30) * (rand() < 0.5 ? -1 : 1)) | 0);
+    assert.deepEqual(runRelaxed(inst, mem, a, b, c), dotAdd(a, b, c), `trial ${trial}`);
+  }
+});
+
+test('relaxed-simd i32x4 dot-accumulate: worst-case operands never saturate or change sign (-128/127 activations, weights 0..127)', { skip: RELAXED_SKIP }, () => {
+  const { inst, mem } = relaxedKernel('i32x4.relaxed_dot_i8x16_i7x16_add_s', true);
+  const fill = (v) => new Uint8Array(16).fill(v & 0xff);
+  const zero = [0, 0, 0, 0];
+  for (const a of [-128, 127, -127, -1, 0, 1]) {
+    for (const b of [0, 1, 63, 64, 126, 127]) {
+      assert.deepEqual(runRelaxed(inst, mem, fill(a), fill(b), zero), Array(4).fill((4 * a * b) | 0), `a=${a} b=${b}`);
+    }
+  }
+  // alternating extremes inside a lane
+  const alt = Uint8Array.from({ length: 16 }, (_, i) => (i % 2 ? 127 : 0x80));
+  assert.deepEqual(runRelaxed(inst, mem, alt, fill(127), zero), dotAdd(alt, fill(127), zero));
+  // the largest pair sums an int16 must hold exactly (what a pmaddubsw lowering needs): 2*127*-128 = -32512, 2*127*127 = 32258
+  assert.deepEqual(runRelaxed(inst, mem, fill(-128), fill(127), zero), [-65024, -65024, -65024, -65024]);
+  assert.deepEqual(runRelaxed(inst, mem, fill(127), fill(127), zero), [64516, 64516, 64516, 64516]);
+  // the accumulator is added once, with its own sign
+  assert.deepEqual(runRelaxed(inst, mem, fill(-128), fill(127), [-5, 5, 2 ** 30, -(2 ** 30)]), [-65029, -65019, 2 ** 30 - 65024, -(2 ** 30) - 65024]);
+});
+
+test('relaxed-simd i16x8 dot (0x112): adjacent products summed per int16 lane', { skip: RELAXED_SKIP }, () => {
+  const { inst, mem } = relaxedKernel('i16x8.relaxed_dot_i8x16_i7x16_s', false);
+  const u8 = new Uint8Array(mem.buffer); const view = new DataView(mem.buffer);
+  for (let trial = 0; trial < 100; trial++) {
+    const a = randBytes(16); const b = Uint8Array.from(randBytes(16), (x) => x & 0x7f);
+    u8.set(a, 0); u8.set(b, 16); inst.exports.t(0, 16, 32, 48);
+    for (let j = 0; j < 8; j++) assert.equal(view.getInt16(48 + 2 * j, true), s8(a[2 * j]) * b[2 * j] + s8(a[2 * j + 1]) * b[2 * j + 1], `trial ${trial} lane ${j}`);
+  }
 });

@@ -19,7 +19,9 @@
 // widened activation vectors are reused 4x and four independent accumulators hide latency.
 import { ModuleBuilder, T } from './builder.js';
 import { genKQuantKernels } from './kquant-kernels.js';
+import { genRelaxedKernels } from './relaxed-kernels.js';
 import { genAttnKernels } from './attn-kernels.js';
+import { probeWasmFeatures } from './features.js';
 
 export const Q8_0_BLOCK = 34;
 export const Q4_0_BLOCK = 18;
@@ -119,8 +121,10 @@ function genMatvec(m, name, kind) {
  * Every float operation is performed in exactly the same order as in matvec_*, so the results are bit-identical to
  * the single-vector kernels (integer lane sums are exact; scale/accumulate order is unchanged).
  * @param {'q8'|'q4'} kind
+ * @param {boolean} [act8] activations are stored as int8 (32 bytes per block and token, the layout of the relaxed-SIMD
+ *   kernels) instead of pre-widened int16 (64 bytes); the kernel then widens them itself once per token and block.
  */
-function genMatmul(m, name, kind) {
+function genMatmul(m, name, kind, act8 = false) {
   const blockBytes = kind === 'q8' ? Q8_0_BLOCK : Q4_0_BLOCK;
   const f = m.func(name, [T.i32, T.i32, T.i32, T.i32, T.i32, T.i32, T.i32], []);
   const [W, XQ, XD, Y, ROWS, NB, NTOK] = [0, 1, 2, 3, 4, 5, 6];
@@ -139,7 +143,7 @@ function genMatmul(m, name, kind) {
   f.v128Const(new Array(16).fill(0x0f)).set(c0f);
   f.v128Const(new Array(16).fill(8)).set(c08);
   f.get(NB).i32(blockBytes).op('i32.mul').set(rb);
-  f.get(NB).i32(64).op('i32.mul').set(xs);
+  f.get(NB).i32(act8 ? 32 : 64).op('i32.mul').set(xs);
   f.get(NB).i32(4).op('i32.mul').set(ds);
   f.i32(0).set(r);
 
@@ -188,7 +192,10 @@ function genMatmul(m, name, kind) {
               f.loop((blk) => {
                 for (let j = 0; j < R; j++) loadRow(j);
                 for (let q = 0; q < TT; q++) {
-                  for (let c = 0; c < 4; c++) f.get(xp[q]).op('v128.load', { offset: 16 * c }).set(x[c]);
+                  if (act8) {
+                    f.get(xp[q]).op('v128.load').tee(t).op('i16x8.extend_low_i8x16_s').set(x[0]); f.get(t).op('i16x8.extend_high_i8x16_s').set(x[1]);
+                    f.get(xp[q]).op('v128.load', { offset: 16 }).tee(t).op('i16x8.extend_low_i8x16_s').set(x[2]); f.get(t).op('i16x8.extend_high_i8x16_s').set(x[3]);
+                  } else for (let c = 0; c < 4; c++) f.get(xp[q]).op('v128.load', { offset: 16 * c }).set(x[c]);
                   for (let j = 0; j < R; j++) {
                     f.get(ws[j]).get(dp[q]).op('f32.load').op('f32.mul').set(sc);
                     f.get(wv[j][0]).get(x[0]).op('i32x4.dot_i16x8_s');
@@ -198,7 +205,7 @@ function genMatmul(m, name, kind) {
                     f.op('i32x4.add');
                     f.op('f32x4.convert_i32x4_s').get(sc).op('f32x4.splat').op('f32x4.mul').get(acc[j][q]).op('f32x4.add').set(acc[j][q]);
                   }
-                  f.get(xp[q]).i32(64).op('i32.add').set(xp[q]);
+                  f.get(xp[q]).i32(act8 ? 32 : 64).op('i32.add').set(xp[q]);
                   f.get(dp[q]).i32(4).op('i32.add').set(dp[q]);
                 }
                 for (let j = 0; j < R; j++) f.get(wp[j]).i32(blockBytes).op('i32.add').set(wp[j]);
@@ -230,17 +237,55 @@ function genMatmul(m, name, kind) {
   rowGroups(1);
 }
 
+/** Integer-dot forms: `extmul` (default) and `wide` differ only in the K-quant DECODE kernels; `relaxed` also replaces every batched kernel. */
+export const DOT_MODES = Object.freeze(['extmul', 'wide', 'relaxed']);
+
+let warned = false;
+const warnOnce = (msg) => { if (!warned) { warned = true; process.stderr.write(`zerollm: ${msg}\n`); } };
+
 /**
- * @param {{kdot?: 'extmul'|'wide'}} [opts] kdot: dot form of the K-quant decode kernels (default: env ZEROLLM_KDOT or 'extmul')
+ * The dot form selected by the environment: `ZEROLLM_DOT=extmul|wide|relaxed|auto` (auto = relaxed when the engine
+ * supports relaxed SIMD, else extmul); without it `ZEROLLM_KDOT=wide` still selects `wide`; the default is `extmul`.
+ * `relaxed` on an engine without relaxed SIMD falls back to `extmul` with a warning (never an error).
+ * NOTE: `relaxed` changes the layout the batched kernels read their activations in (int8 instead of int16), so it only
+ * takes effect for callers that ask for it explicitly: `instantiateKernels(mem, { dot: resolveDotMode() })`
+ * (the decoder worker does; the embedding worker keeps the default kernels).
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {'extmul'|'wide'|'relaxed'}
+ */
+export function resolveDotMode(env = process.env) {
+  const v = (env.ZEROLLM_DOT ?? '').trim().toLowerCase();
+  if (v === 'relaxed' || v === 'auto') {
+    if (probeWasmFeatures().relaxedSimd) return 'relaxed';
+    if (v === 'relaxed') warnOnce('ZEROLLM_DOT=relaxed requested but this Node/V8 has no WebAssembly relaxed SIMD; using the default (extmul) kernels');
+    return 'extmul';
+  }
+  if (v === 'extmul' || v === 'wide') return v;
+  if (v) warnOnce(`ZEROLLM_DOT=${env.ZEROLLM_DOT} is not one of extmul|wide|relaxed|auto; ignored`);
+  return env.ZEROLLM_KDOT === 'wide' ? 'wide' : 'extmul';
+}
+
+/**
+ * @param {{dot?: 'extmul'|'wide'|'relaxed', kdot?: 'extmul'|'wide'}} [opts] dot: integer dot form (kdot is the older name of the
+ *   same option, minus `relaxed`); default 'extmul'. `extmul` / `wide` choose the dot form of the K-quant decode kernels;
+ *   `relaxed` builds the relaxed-SIMD kernels for Q4_0/Q5_0/Q4_K/Q5_K/Q6_K (decode + batched) and an int8-activation
+ *   Q8_0 batched kernel: in that module EVERY batched kernel reads int8 activations (token t at byte offset t*cols).
  * @returns {Uint8Array} the kernel module bytes
  */
 export function buildKernelModule(opts = {}) {
+  const dot = opts.dot ?? opts.kdot ?? 'extmul';
+  if (!DOT_MODES.includes(dot)) throw new Error(`unknown dot mode "${dot}" (expected ${DOT_MODES.join('|')})`);
   const m = new ModuleBuilder().withImportedMemory(1);
-  genMatvec(m, 'matvec_q8_0', 'q8');
-  genMatvec(m, 'matvec_q4_0', 'q4');
-  genMatmul(m, 'mm_q8_0', 'q8');
-  genMatmul(m, 'mm_q4_0', 'q4');
-  genKQuantKernels(m, opts);
+  genMatvec(m, 'matvec_q8_0', 'q8'); // Q8_0 weights are signed int8 (not i7): the decode kernel stays as it is in every mode
+  if (dot === 'relaxed') {
+    genMatmul(m, 'mm_q8_0', 'q8', true);
+    genRelaxedKernels(m);
+  } else {
+    genMatvec(m, 'matvec_q4_0', 'q4');
+    genMatmul(m, 'mm_q8_0', 'q8');
+    genMatmul(m, 'mm_q4_0', 'q4');
+    genKQuantKernels(m, { kdot: dot });
+  }
   genAttnKernels(m);
   return m.build();
 }
@@ -248,9 +293,15 @@ export function buildKernelModule(opts = {}) {
 /** compiled modules by variant (compiled once per thread) */
 const compiled = new Map();
 
-/** Compile once per thread and variant, instantiate against a worker's private memory. */
+/**
+ * Compile once per thread and variant, instantiate against a worker's private memory.
+ * @param {WebAssembly.Memory} memory
+ * @param {{dot?: 'extmul'|'wide'|'relaxed', kdot?: 'extmul'|'wide'}} [opts] without `dot`, the environment decides between
+ *   extmul and wide only (ZEROLLM_DOT / ZEROLLM_KDOT); `relaxed` must be asked for explicitly (see resolveDotMode).
+ */
 export function instantiateKernels(memory, opts = {}) {
-  const kdot = opts.kdot ?? (process.env.ZEROLLM_KDOT === 'wide' ? 'wide' : 'extmul');
-  if (!compiled.has(kdot)) compiled.set(kdot, new WebAssembly.Module(buildKernelModule({ kdot })));
-  return new WebAssembly.Instance(compiled.get(kdot), { env: { mem: memory } }).exports;
+  let dot = opts.dot ?? opts.kdot;
+  if (!dot) { dot = resolveDotMode(); if (dot === 'relaxed') dot = 'extmul'; }
+  if (!compiled.has(dot)) compiled.set(dot, new WebAssembly.Module(buildKernelModule({ dot })));
+  return new WebAssembly.Instance(compiled.get(dot), { env: { mem: memory } }).exports;
 }

@@ -62,7 +62,11 @@ export const SIMD = Object.freeze({
   'i32x4.add': 0xae, 'i32x4.sub': 0xb1, 'i32x4.mul': 0xb5, 'i32x4.dot_i16x8_s': 0xba,
   'f32x4.add': 0xe4, 'f32x4.sub': 0xe5, 'f32x4.mul': 0xe6, 'f32x4.div': 0xe7,
   'f32x4.convert_i32x4_s': 0xfa,
-  // relaxed SIMD (optional fast path, feature-gated)
+  // relaxed SIMD (optional fast path, feature-gated; ZEROLLM_DOT=relaxed). Operand 1 is the SIGNED int8 vector, operand 2
+  // must be in 0..127 (i7: out-of-range values are implementation-defined, V8/x64 reads them as unsigned bytes), the _add_
+  // form accumulates four adjacent products per i32 lane into operand 3. Exact (no saturation) for an i7 operand 2:
+  // 127 * 127 * 2 and 127 * -128 * 2 both fit an int16, which is what V8's pmaddubsw+pmaddwd lowering needs.
+  'i16x8.relaxed_dot_i8x16_i7x16_s': 0x112,
   'i32x4.relaxed_dot_i8x16_i7x16_add_s': 0x113,
 });
 const LANE_OPS = new Set(['i32x4.extract_lane', 'f32x4.extract_lane']);
