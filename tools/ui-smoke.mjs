@@ -158,6 +158,41 @@ try {
   await page.screenshot({ path: path.join(out, 'flow-3-after-delete.png') });
   await ctx.close(); await flowApp.close();
 
+  // ---- automatic chat titles: the sidebar entry is renamed live; a later page save does not bring the old name back
+  // (the synthetic model only writes noise, so the title generation is replaced by a fixed answer; everything else is the real path)
+  {
+    const titleApp = await startTestApp({ ctx: 4096, titleRun: async () => { await new Promise((r) => setTimeout(r, 1000)); return '«Hovedstaden i Norge».'; } }); // (slow enough to see the placeholder first)
+    const c3 = await browser.newContext({ viewport: { width: 1200, height: 800 } }); const pg = await c3.newPage();
+    pg.on('pageerror', (e) => errors.push(`titles: ${e.message}`)); pg.on('console', (m) => { if (m.type() === 'error') errors.push(`titles: ${m.text()}`); });
+    await pg.goto(titleApp.app.url); await pg.waitForSelector('#model-name');
+    await pg.fill('#input', 'Hva er hovedstaden i Norge, og hvor mange bor der?'); await pg.press('#input', 'Enter');
+    await pg.waitForSelector('.chat-item:text("Hva er hovedstaden")', { timeout: 30000 }); // the placeholder (first 45 characters) first ...
+    await pg.screenshot({ path: path.join(out, 'titles-0-placeholder.png') });
+    await pg.waitForSelector('.chat-item:text-is("Hovedstaden i Norge")', { timeout: 30000 }).catch(() => errors.push('CHECK FAILED: the automatic title never reached the sidebar'));
+    check((await pg.locator('.chat-row .chat-item').first().textContent()) === 'Hovedstaden i Norge', 'sidebar shows the automatic title (quotes and final dot removed)');
+    check(await pg.evaluate(() => window.__zc.S.chatName) === 'Hovedstaden i Norge', 'the open chat knows its new name');
+    await pg.screenshot({ path: path.join(out, 'titles-1-live.png') });
+    const metas3 = await pg.locator('.msg.assistant .meta').count();
+    await pg.fill('#input', 'Og Sverige?'); await pg.press('#input', 'Enter'); // the page saves again, with the name it holds
+    await pg.waitForFunction((k) => document.querySelectorAll('.msg.assistant .meta').length > k, metas3, { timeout: 30000 });
+    await pg.waitForTimeout(300);
+    check((await pg.locator('.chat-row .chat-item').first().textContent()) === 'Hovedstaden i Norge', 'a later save does not bring the placeholder back');
+    await pg.reload(); await pg.waitForSelector('.chat-row');
+    check((await pg.locator('.chat-row .chat-item').first().textContent()) === 'Hovedstaden i Norge', 'the title survives a reload');
+    // the user's own name wins over the automatic one
+    await pg.locator('.chat-row').first().hover(); await pg.locator('.chat-row').first().locator('.chat-act').first().click();
+    await pg.fill('.chat-rename', 'Mitt eget navn'); await pg.press('.chat-rename', 'Enter');
+    await pg.waitForSelector('.chat-item:text("Mitt eget navn")');
+    // settings: the switch is in Ytelse, on by default
+    await pg.click('#btn-settings'); await pg.click('.tabs [data-tab="performance"]');
+    const box = pg.locator('#tab-performance .row', { hasText: 'Automatiske samtaletitler' }).locator('input[type=checkbox]');
+    check(await box.isChecked(), 'the title switch is on by default');
+    await pg.screenshot({ path: path.join(out, 'titles-2-settings.png') });
+    await box.uncheck(); await pg.waitForTimeout(150);
+    check((await titleApp.call('state')).settings.autoTitles === false, 'the switch is saved');
+    await c3.close(); await titleApp.close();
+  }
+
   // ---- first run: no model -> download card -> download -> chat
   const body = makeTinyModel({ arch: 'llama', quant: 'q8_0', seed: 3, ctx: 512 }).buffer;
   const fileServer = http.createServer((req, res) => {
