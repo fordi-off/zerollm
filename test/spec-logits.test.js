@@ -14,24 +14,26 @@ for (const kernels of ['js', 'wasm']) {
   for (const [arch, quant] of CASES) {
     test(`logits:'all' returns every position's logits, bit-identical to token-by-token forward (${kernels}, ${arch} ${quant}, 1-3 workers)`, async () => {
       const { g } = tinyFile({ arch, quant, seed: 11 });
-      const toks = tokens(21, 3);
+      const toks = tokens(24, 3);
       const seq = await PoolModel.create(g, { ctx: 64, workers: 2, kernels });
       const want = [];
       for (const t of toks) want.push(Float32Array.from(await seq.forward(t)));
       await seq.close();
       for (const workers of [1, 3]) {
-        const pool = await PoolModel.create(g, { ctx: 64, workers, kernels, maxBatch: 16 });
-        try {
-          const V = pool.cfg.vocabSize;
-          let i = 0;
-          for (const sz of [1, 5, 2, 8, 1, 4]) { // 21 tokens, odd batch sizes, one single-token 'all' batch
-            const got = await pool.forwardBatch(toks.slice(i, i + sz), { logits: 'all' });
-            assert.equal(got.length, sz * V, 'one vocabulary-sized row per batch token');
-            for (let b = 0; b < sz; b++) assert.deepEqual([...got.subarray(b * V, (b + 1) * V)], [...want[i + b]], `${workers} workers, pos ${i + b}`);
-            i += sz;
-          }
-          assert.equal(pool.pos, 21);
-        } finally { await pool.close(); }
+        for (const sizes of [[3, 5, 6, 7, 1, 2], [9, 3, 1, 5, 4, 2]]) { // every remainder of the 4-token kernel tile (2, 3 and lone-token tiles), a single-token 'all' batch
+          const pool = await PoolModel.create(g, { ctx: 64, workers, kernels, maxBatch: 16 });
+          try {
+            const V = pool.cfg.vocabSize;
+            let i = 0;
+            for (const sz of sizes) {
+              const got = await pool.forwardBatch(toks.slice(i, i + sz), { logits: 'all' });
+              assert.equal(got.length, sz * V, 'one vocabulary-sized row per batch token');
+              for (let b = 0; b < sz; b++) assert.deepEqual([...got.subarray(b * V, (b + 1) * V)], [...want[i + b]], `${workers} workers, sizes ${sizes}, pos ${i + b}`);
+              i += sz;
+            }
+            assert.equal(pool.pos, 24);
+          } finally { await pool.close(); }
+        }
       }
     });
   }

@@ -70,7 +70,7 @@ for (const [label, type, blockElems, single, batch] of [
 ]) {
   test(`${label} batched kernel is BIT-IDENTICAL to the decode kernel for every row/token tile shape`, () => {
     const rand = mulberry32(91);
-    const shapes = [[1, 1, 1], [2, 1, 4], [3, 2, 5], [5, 1, 7], [4, 3, 8], [7, 2, 13], [2, 1, 16], [1, 2, 3]];
+    const shapes = [[1, 1, 1], [2, 1, 4], [3, 2, 5], [5, 1, 7], [4, 3, 8], [7, 2, 13], [2, 1, 16], [1, 2, 3], [2, 1, 2], [3, 2, 6], [5, 1, 10], [1, 1, 11], [2, 2, 9]]; // token counts 2, 6, 10 exercise the 2-token remainder tile, 3, 7, 11 the 3-token one
     for (const [rows, nb, ntok] of shapes) {
       const cols = nb * blockElems; const abl = cols / 32;
       const wbytes = randomQuantBlocks(type, rows * nb, rand);

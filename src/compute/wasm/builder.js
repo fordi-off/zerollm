@@ -27,8 +27,10 @@ export function sleb(n) {
 const f32Bytes = (x) => Array.from(new Uint8Array(new Float32Array([x]).buffer));
 const f64Bytes = (x) => Array.from(new Uint8Array(new Float64Array([x]).buffer));
 const str = (s) => { const b = Array.from(new TextEncoder().encode(s)); return [...uleb(b.length), ...b]; };
-const vec = (items) => [...uleb(items.length), ...items.flat()];
-const section = (id, body) => [id, ...uleb(body.length), ...body];
+/** Concatenate byte arrays. (Spreading a big array into a call overflows the stack once a function body has ~100k bytes.) */
+const cat = (...parts) => { const out = []; for (const p of parts) for (let i = 0; i < p.length; i++) out.push(p[i]); return out; };
+const vec = (items) => cat(uleb(items.length), items.flat());
+const section = (id, body) => cat([id], uleb(body.length), body);
 
 /** Plain (single-byte) opcodes. */
 export const OPS = Object.freeze({
@@ -136,8 +138,8 @@ export class FuncBuilder {
       if (last && last[1] === t) last[0]++; else groups.push([1, t]);
     }
     const decl = [...uleb(groups.length), ...groups.flatMap(([n, t]) => [...uleb(n), t])];
-    const body = [...decl, ...this.code, 0x0b];
-    return [...uleb(body.length), ...body];
+    const body = cat(decl, this.code, [0x0b]);
+    return cat(uleb(body.length), body);
   }
 }
 
@@ -164,14 +166,14 @@ export class ModuleBuilder {
 
   build() {
     const typeIdx = this.funcs.map(({ f }) => this.#typeIndex(f.params, f.results));
-    const out = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
-    out.push(...section(1, vec(this.types.map((t) => [0x60, ...vec(t.params.map((p) => [p])), ...vec(t.results.map((r) => [r]))]))));
-    if (this.importMemory !== null) out.push(...section(2, vec([[...str('env'), ...str('mem'), 0x02, 0x00, ...uleb(this.importMemory)]])));
-    out.push(...section(3, vec(typeIdx.map((i) => uleb(i)))));
+    let out = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+    out = cat(out, section(1, vec(this.types.map((t) => [0x60, ...vec(t.params.map((p) => [p])), ...vec(t.results.map((r) => [r]))]))));
+    if (this.importMemory !== null) out = cat(out, section(2, vec([[...str('env'), ...str('mem'), 0x02, 0x00, ...uleb(this.importMemory)]])));
+    out = cat(out, section(3, vec(typeIdx.map((i) => uleb(i)))));
     const exps = this.funcs.map((fn, i) => ({ fn, i })).filter(({ fn }) => fn.exported)
       .map(({ fn, i }) => [...str(fn.name), 0x00, ...uleb(i)]);
-    out.push(...section(7, vec(exps)));
-    out.push(...section(10, vec(this.funcs.map(({ f }) => f.finish()))));
+    out = cat(out, section(7, vec(exps)));
+    out = cat(out, section(10, vec(this.funcs.map(({ f }) => f.finish()))));
     return new Uint8Array(out);
   }
 }
