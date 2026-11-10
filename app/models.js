@@ -1,7 +1,7 @@
 // Discover the .gguf files in models/ and describe them (what the engine can run, how much RAM it needs).
 import fs from 'node:fs';
 import path from 'node:path';
-import { inspectModel, estimateModelRam } from '../src/index.js';
+import { inspectModel, estimateModelRam, thinkingMode } from '../src/index.js';
 
 const cache = new Map(); // "path|size|mtime" -> inspection result
 
@@ -43,6 +43,7 @@ export function listModels(paths, cfg, opts = {}) {
       supported: info.supported,
       reason: info.reason,
       arch: info.arch,
+      thinking: thinkingMode(info.arch) !== null, // has a reasoning switch ("Tenk først")
       params: info.params,
       quant: info.quant,
       ctxTrain: info.ctxTrain ?? null,

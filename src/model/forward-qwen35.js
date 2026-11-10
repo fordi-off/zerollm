@@ -13,42 +13,15 @@
 // summarises the whole prefix. So the model keeps a bounded set of CHECKPOINTS (copies of the recurrent state at chosen
 // positions) and truncate(n) restores the nearest checkpoint <= n and replays the tokens in between (documented below).
 import fs from 'node:fs';
-import { modelConfig, recurrentStateBytes, RECURRENT_CHECKPOINTS } from './config.js';
+import { modelConfig, recurrentStateBytes } from './config.js';
+import { RecurrentState } from './recurrent-state.js';
+import { StateCheckpoints } from './state-checkpoints.js';
 import { KVCache } from './kvcache.js';
 import { loadWeight, loadVector } from './loader.js';
 import { Act, matvec, dequantRow, rmsnorm, softmax, silu, ropeTables, applyRope } from '../compute/ref-kernels.js';
-import { convStep, l2normHeads, deltaRuleHead, gatedRmsNormHead, sigmoid, softplus } from '../compute/ref-deltanet.js';
+import { convStep, l2normHeads, deltaRuleHead, gatedRmsNormHead, sigmoid, softplus, keyHeadOfValueHead } from '../compute/ref-deltanet.js';
 
-/**
- * All recurrent state of one sequence: for each recurrent layer (numbered 0.. in layer order) the conv window and the
- * delta-rule matrices, in two flat f32 arrays so a snapshot is two `set()` calls and the size is explicit.
- */
-export class RecurrentState {
-  /** @param {import('./config.js').ModelConfig} cfg */
-  constructor(cfg) {
-    const s = cfg.ssm;
-    this.nLayers = cfg.layerIsRecurrent.filter(Boolean).length;
-    /** floats per layer */
-    this.convSize = (s.convKernel - 1) * s.convDim;
-    this.ssmSize = s.nVHeads * s.headVDim * s.headKDim;
-    this.conv = new Float32Array(this.nLayers * this.convSize);
-    this.ssm = new Float32Array(this.nLayers * this.ssmSize);
-  }
-
-  /** Total bytes (matches recurrentStateBytes(cfg)). */
-  get bytes() { return (this.conv.length + this.ssm.length) * 4; }
-
-  /** Conv window of recurrent layer #i: [channel][kernel-1], oldest first. */
-  convOf(i) { return this.conv.subarray(i * this.convSize, (i + 1) * this.convSize); }
-
-  /** Delta-rule matrices of recurrent layer #i: [vHead][vDim][kDim]. */
-  ssmOf(i) { return this.ssm.subarray(i * this.ssmSize, (i + 1) * this.ssmSize); }
-
-  clear() { this.conv.fill(0); this.ssm.fill(0); }
-
-  /** @param {RecurrentState} o */
-  copyFrom(o) { this.conv.set(o.conv); this.ssm.set(o.ssm); }
-}
+export { RecurrentState };
 
 /** Scratch buffers of one forward pass (sizes are fixed by the config). */
 function makeScratch(cfg) {
@@ -78,7 +51,7 @@ export function ssmLayerStep(cfg, L, h, convState, ssmState, sc, out) {
   l2normHeads(sc.qkv, 0, nKHeads, dk, cfg.rmsEps, 1 / Math.sqrt(dk)); // q: L2-normalise, then scale by 1/sqrt(dk)
   l2normHeads(sc.qkv, keyDim, nKHeads, dk, cfg.rmsEps);               // k: L2-normalise
   for (let hv = 0; hv < nVHeads; hv++) {
-    const kh = hv % nKHeads; // tiled head layout (llama.cpp converter): value head hv reads key head hv % nKHeads
+    const kh = keyHeadOfValueHead(hv, nKHeads, nVHeads); // tiled head layout (llama.cpp converter): hv % nKHeads; see ref-deltanet.js
     const beta = sigmoid(sc.beta[hv]);
     const g = softplus(sc.alpha[hv] + L.dtBias[hv]) * L.ssmA[hv]; // ssmA = -exp(A_log) (done by the converter): g <= 0
     deltaRuleHead(ssmState, hv * dv * dk, sc.qkv, kh * dk, sc.qkv, keyDim + kh * dk, sc.qkv, 2 * keyDim + hv * dv, sc.core, hv * dv, dk, dv, Math.exp(g), beta);
@@ -158,14 +131,14 @@ export function expectedTensors(cfg) {
 }
 
 /** Throw ONE error naming every missing tensor / wrong shape (instead of failing on the first lookup half way through loading). */
-function checkTensors(g, cfg) {
+export function checkTensors(g, cfg) {
   const problems = [];
   for (const [name, dims] of expectedTensors(cfg)) {
     const t = g.tensor(name);
     if (!t) problems.push(`missing ${name}`);
     else if (t.dims.length !== dims.length || t.dims.some((d, i) => d !== dims[i])) problems.push(`${name} has dims [${t.dims}], expected [${dims}]`);
   }
-  if (problems.length) throw new Error(`this ${cfg.arch} file does not match the layout the reference path expects: ${problems.slice(0, 8).join('; ')}${problems.length > 8 ? `; ... (${problems.length} problems)` : ''}`);
+  if (problems.length) throw new Error(`this ${cfg.arch} file does not match the layout the engine expects: ${problems.slice(0, 8).join('; ')}${problems.length > 8 ? `; ... (${problems.length} problems)` : ''}`);
 }
 
 /**
@@ -235,11 +208,8 @@ export class Qwen35Model {
     this.kernels = 'js';
     this.kv = 'f32';
     this.rope = ropeTables(cfg, this.ctx, null);
-    this.maxCheckpoints = opts.maxCheckpoints ?? RECURRENT_CHECKPOINTS;
-    this.checkpointEvery = opts.checkpointEvery ?? 0;
-    this.boundaryIds = new Set(opts.boundaryIds ?? findBoundaryIds(g));
-    /** @type {Array<{pos: number, state: RecurrentState}>} sorted by pos */
-    this.checkpoints = [];
+    /** the checkpoint store + policy (src/model/state-checkpoints.js, shared with the worker pool) */
+    this.ck = new StateCheckpoints(cfg, { maxCheckpoints: opts.maxCheckpoints, checkpointEvery: opts.checkpointEvery, boundaryIds: opts.boundaryIds ?? findBoundaryIds(g) });
     this.prevNoLogits = false;
 
     this.x = new Float32Array(cfg.nEmbd);
@@ -263,40 +233,49 @@ export class Qwen35Model {
   get stateBytes() { return recurrentStateBytes(this.cfg); }
 
   /** Positions of the stored checkpoints (ascending). */
-  get checkpointPositions() { return this.checkpoints.map((c) => c.pos); }
+  get checkpointPositions() { return this.ck.positions; }
 
-  /** The on-disk prefix cache stores KV state only; a hybrid model also needs the recurrent state. */
-  async kvGet() { throw new Error('the KV prefix cache does not support Qwen3.5 (recurrent layers): its state is not a KV prefix'); }
-  async kvSet() { throw new Error('the KV prefix cache does not support Qwen3.5 (recurrent layers): its state is not a KV prefix'); }
-  restorePrefix() { throw new Error('the KV prefix cache does not support Qwen3.5 (recurrent layers): its state is not a KV prefix'); }
+  get maxCheckpoints() { return this.ck.max; }
+
+  get checkpointEvery() { return this.ck.every; }
+
+  /** Token ids that get a snapshot before them (<|im_start|>). */
+  get boundaryIds() { return this.ck.boundaryIds; }
+
+  // ---- the on-disk prefix cache (src/model/prefix-cache.js): KV of the attention layers + the recurrent state at the prefix end.
+  // Layer numbers are ATTENTION-layer numbers (0 .. nAttnLayers - 1).
+
+  /** The first n positions of attention layer #layer's K (isV = 0) or V (isV = 1) cache: an [n][kvDim] f32 view. */
+  async kvGet(layer, isV, n) { return (isV ? this.cache.v : this.cache.k)[layer].subarray(0, n * this.cfg.nHeadKv * this.cfg.headDim); }
+
+  /** Write n positions of attention layer #layer's K or V cache (data: [n][kvDim] f32). */
+  async kvSet(layer, isV, n, data) { (isV ? this.cache.v : this.cache.k)[layer].set(data.subarray(0, n * this.cfg.nHeadKv * this.cfg.headDim)); }
+
+  /** A copy of the live recurrent state: {conv, ssm} f32 arrays (async like the pool's). */
+  async getRecurrentState() { return { conv: this.state.conv.slice(), ssm: this.state.ssm.slice() }; }
+
+  /** Replace the live recurrent state. */
+  async setRecurrentState({ conv, ssm }) { this.state.conv.set(conv); this.state.ssm.set(ssm); }
+
+  /** After the KV regions and the recurrent state were filled from a prefix cache: declare that the model now holds exactly `ids`. */
+  restorePrefix(ids) {
+    this.tokens = Array.from(ids); this.cache.length = ids.length; this.ck.clear(); this.prevNoLogits = false;
+    this.checkpoint(); // the end of the cached prefix is a natural place to come back to
+  }
 
   /** Forget everything (start a new conversation). */
-  reset() { this.cache.reset(); this.tokens.length = 0; this.state.clear(); this.checkpoints.length = 0; this.prevNoLogits = false; }
+  reset() { this.cache.reset(); this.tokens.length = 0; this.state.clear(); this.ck.clear(); this.prevNoLogits = false; }
 
   close() { /* nothing to release */ }
 
   /** Take a snapshot of the current state at the current position (no-op at position 0 or if one exists). */
-  checkpoint() {
-    const pos = this.pos;
-    if (pos === 0 || this.maxCheckpoints <= 0 || this.checkpoints.some((c) => c.pos === pos)) return;
-    let snap;
-    if (this.checkpoints.length >= this.maxCheckpoints) snap = this.checkpoints.shift().state; // drop the smallest position, reuse its buffers
-    else snap = new RecurrentState(this.cfg);
-    snap.copyFrom(this.state);
-    this.checkpoints.push({ pos, state: snap });
-    this.checkpoints.sort((a, b) => a.pos - b.pos);
-  }
+  checkpoint() { this.ck.save(this.pos, this.state); }
 
   /**
    * What truncate(n) would do: the checkpoint it restores from and how many tokens it replays.
    * @returns {{from: number, replay: number}}
    */
-  truncatePlan(n) {
-    if (n >= this.pos) return { from: this.pos, replay: 0 };
-    let from = 0;
-    for (const c of this.checkpoints) if (c.pos <= n && c.pos > from) from = c.pos;
-    return { from, replay: n - from };
-  }
+  truncatePlan(n) { return this.ck.plan(n, this.pos); }
 
   /**
    * Roll back to `n` positions (e.g. to reuse a shared prefix). Restores the nearest checkpoint <= n and replays the
@@ -307,9 +286,8 @@ export class Qwen35Model {
     if (n < 0) n = 0;
     const { from, replay } = this.truncatePlan(n);
     const tail = this.tokens.slice(from, n);
-    this.checkpoints = this.checkpoints.filter((c) => c.pos <= n);
-    if (from === 0) this.state.clear();
-    else this.state.copyFrom(this.checkpoints.find((c) => c.pos === from).state);
+    this.ck.dropAfter(n);
+    this.ck.restore(this.state, from);
     this.cache.length = from; this.tokens.length = from;
     this.prevNoLogits = false;
     for (const t of tail) this.forward(t, { logits: false });
@@ -331,7 +309,7 @@ export class Qwen35Model {
     if (!(token >= 0 && token < cfg.vocabSize)) throw new Error(`token id ${token} out of range`);
     const wantLogits = opts.logits !== false;
     // checkpoint policy (see the class comment)
-    if (pos > 0 && ((wantLogits && this.prevNoLogits) || this.boundaryIds.has(token) || (this.checkpointEvery > 0 && pos % this.checkpointEvery === 0))) this.checkpoint();
+    if (this.ck.wantsBefore(pos, token, wantLogits, this.prevNoLogits)) this.checkpoint();
     this.prevNoLogits = !wantLogits;
 
     const { nEmbd, rmsEps } = cfg;

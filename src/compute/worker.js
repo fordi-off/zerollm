@@ -2,6 +2,12 @@
 // Each worker owns a contiguous row slice of every weight matrix, stored in its own private WebAssembly.Memory
 // (so the 4 GB wasm32 limit applies per worker, not to the whole model).
 //
+// Hybrid models (qwen35: Gated DeltaNet + gated attention) use the same phases. A recurrent layer is sharded by VALUE HEAD:
+// a worker owns the delta-rule matrices and the conv window of its value heads (they live in SharedArrayBuffers, so the main
+// thread can snapshot them for truncate()), computes the q/k rows of its share of the KEY heads (conv + L2 norm included),
+// and after a barrier reads whatever q/k its value heads need from shared memory. Within a batch the conv and the delta rule
+// run token by token (they are recurrences); the matmuls around them are batched like everywhere else.
+//
 // A command carries B tokens at consecutive positions. B = 1 is normal decoding (single-vector SIMD kernels);
 // B > 1 is batched prefill: every weight tile is read once for all B tokens (matmul kernels).
 import fs from 'node:fs';
@@ -12,13 +18,14 @@ import { f16Table, f32ToF16 } from '../util/f16.js';
 import { Act, matvec, dequantRow, rmsnorm, softmax, silu, ropeTables, applyRope, rowBytes, quantizeAct } from './ref-kernels.js';
 import { instantiateKernels, resolveDotMode, usesInt8Acts } from './wasm/kernels.js';
 import { Barrier } from './barrier.js';
-import { CTRL, CMD_EXIT, CMD_KV_EXPORT, CMD_KV_IMPORT, splitRows, splitRange, alignUp } from './layout.js';
+import { convStep, l2normHeads, deltaRuleHead, gatedRmsNormHead, sigmoid, softplus, keyHeadOfValueHead } from './ref-deltanet.js';
+import { CTRL, CMD_EXIT, CMD_KV_EXPORT, CMD_KV_IMPORT, splitRows, splitRange, recurrentShards, alignUp } from './layout.js';
 
 const { id, n, cfg, tensors, path, ctx, shared, spin, kernels, maxBatch, logitsBatch, kvType } = workerData;
 const kvF16 = kvType === 'f16';
 // opt-in profile of worker 0 (ZEROLLM_PROFILE=1): where does a token's time go?
 const prof = process.env.ZEROLLM_PROFILE === '1' && id === 0;
-const PT = { kernel: 0, quant: 0, attn: 0, barrier: 0, total: 0, tokens: 0, batches: 0 };
+const PT = { kernel: 0, quant: 0, attn: 0, conv: 0, delta: 0, barrier: 0, total: 0, tokens: 0, batches: 0 };
 
 /** Fatal errors: tell the pool, then stop. */
 function fail(e) {
@@ -43,21 +50,49 @@ function main() {
   /** @type {Array<{key: string, t: any, r0: number, r1: number, off: number, bytes: number}>} */
   const plan = [];
   let total = 0;
-  const addMat = (key, name) => {
+  /** rows [r0, r1) of matrix `name` (any range: the kernels handle row counts that are not a multiple of 4) */
+  const addRows = (key, name, r0, r1) => {
     const t = tensors[name];
     if (!t) throw new Error(`worker ${id}: tensor ${name} missing from plan`);
-    const rows = t.dims[1]; const cols = t.dims[0];
-    const [r0, r1] = splitRows(rows, n, id);
+    const cols = t.dims[0];
     const bytes = (r1 - r0) * rowBytes(t.type, cols);
     plan.push({ key, t, r0, r1, off: total, bytes });
     total += alignUp(bytes, 64);
   };
+  /** my even share of the rows of matrix `name` */
+  const addMat = (key, name) => { const [r0, r1] = splitRows(tensors[name]?.dims[1] ?? 0, n, id); addRows(key, name, r0, r1); };
+  const hybrid = cfg.hybrid === true;
+  const ssm = cfg.ssm;
+  const keyDim = hybrid ? ssm.nKHeads * ssm.headKDim : 0;
+  const dk = hybrid ? ssm.headKDim : 0; const dv = hybrid ? ssm.headVDim : 0;
+  const convDim = hybrid ? ssm.convDim : 0; const inner = hybrid ? ssm.innerSize : 0;
+  const convM = hybrid ? ssm.convKernel - 1 : 0;
+  const { kk0, kk1, vh0, vh1 } = hybrid ? recurrentShards(ssm, n, id) : { kk0: 0, kk1: 0, vh0: 0, vh1: 0 };
+  const nOwnV = vh1 - vh0;
+  const nOwnK = kk1 - kk0;
+  /** recurrent layer number (index into the shared conv / ssm state) or -1; attention layer number or -1 (KV cache index) */
+  const recIdx = []; const attnIdx = [];
+  for (let l = 0, r = 0, a = 0; l < nLayer; l++) {
+    const rec = hybrid && cfg.layerIsRecurrent[l];
+    recIdx.push(rec ? r++ : -1); attnIdx.push(rec ? -1 : a++);
+  }
   addMat('embd', 'token_embd.weight');
   if (!cfg.tiedEmbeddings) addMat('output', 'output.weight');
   for (let l = 0; l < nLayer; l++) {
     const p = `blk.${l}.`;
-    addMat(`${l}.wq`, `${p}attn_q.weight`); addMat(`${l}.wk`, `${p}attn_k.weight`); addMat(`${l}.wv`, `${p}attn_v.weight`);
-    addMat(`${l}.wo`, `${p}attn_output.weight`);
+    if (recIdx[l] >= 0) {
+      // attn_qkv rows: [q: nKHeads x dk | k: nKHeads x dk | v: nVHeads x dv]. My key heads' q and k rows, my value heads' v rows.
+      addRows(`${l}.qkvQ`, `${p}attn_qkv.weight`, kk0 * dk, kk1 * dk);
+      addRows(`${l}.qkvK`, `${p}attn_qkv.weight`, keyDim + kk0 * dk, keyDim + kk1 * dk);
+      addRows(`${l}.qkvV`, `${p}attn_qkv.weight`, 2 * keyDim + vh0 * dv, 2 * keyDim + vh1 * dv);
+      addRows(`${l}.z`, `${p}attn_gate.weight`, vh0 * dv, vh1 * dv);
+      addRows(`${l}.alpha`, `${p}ssm_alpha.weight`, vh0, vh1);
+      addRows(`${l}.beta`, `${p}ssm_beta.weight`, vh0, vh1);
+      addMat(`${l}.wo`, `${p}ssm_out.weight`);
+    } else {
+      addMat(`${l}.wq`, `${p}attn_q.weight`); addMat(`${l}.wk`, `${p}attn_k.weight`); addMat(`${l}.wv`, `${p}attn_v.weight`);
+      addMat(`${l}.wo`, `${p}attn_output.weight`);
+    }
     addMat(`${l}.gate`, `${p}ffn_gate.weight`); addMat(`${l}.up`, `${p}ffn_up.weight`); addMat(`${l}.down`, `${p}ffn_down.weight`);
   }
   // This worker owns a set of KV heads (and every query head that shares them): their K/V cache is PRIVATE and lives
@@ -68,7 +103,9 @@ function main() {
   // scratch for the SIMD kernels, in the same memory as the weights
   const useWasm = kernels === 'wasm';
   const attnSimd = useWasm && headDim % 16 === 0;
-  const maxCols = Math.max(nEmbd, qDim, nFF);
+  const qRows = cfg.attnOutputGate ? 2 * qDim : qDim; // attn_q rows; hybrid models: [query | output gate] per head
+  const qStride = cfg.attnOutputGate ? 2 * headDim : headDim; // q rows per head
+  const maxCols = Math.max(nEmbd, qDim, nFF, inner);
   const maxRows = Math.max(1, ...plan.map((p) => p.r1 - p.r0));
   const maxRowsBatch = Math.max(1, ...plan.filter((p) => p.key !== 'embd' && p.key !== 'output').map((p) => p.r1 - p.r0));
   const outPlan = plan.find((p) => p.key === (cfg.tiedEmbeddings ? 'embd' : 'output'));
@@ -85,7 +122,8 @@ function main() {
   const OHP = total; total += alignUp(headDim * 4, 64);                   // attention: output head
   const kvPerLayer = 2 * nOwn * ctx * headDim;                            // floats: [k|v][owned head][pos][headDim]
   const kvShift = kvF16 ? 1 : 2;                                          // log2(bytes per cached value)
-  const KVB = total; total += alignUp((nLayer * kvPerLayer) << kvShift, 64);
+  const nKvLayers = cfg.nAttnLayers ?? nLayer;                            // hybrid models: only attention layers have a KV cache
+  const KVB = total; total += alignUp((nKvLayers * kvPerLayer) << kvShift, 64);
   const pages = Math.max(1, Math.ceil(total / 65536));
   if (pages > 65536) throw new Error(`worker ${id}: weight slice is ${(total / 2 ** 30).toFixed(2)} GB, over the 4 GB wasm32 limit; use more workers or a smaller --ctx`);
   let mem;
@@ -123,9 +161,10 @@ function main() {
       const p = `blk.${l}.`;
       const opt = (nm) => (tensors[p + nm] ? vec(p + nm) : null);
       layers.push({
-        attnNorm: vec(`${p}attn_norm.weight`), ffnNorm: vec(`${p}ffn_norm.weight`),
+        attnNorm: vec(`${p}attn_norm.weight`), ffnNorm: vec(`${p}${hybrid ? 'post_attention_norm' : 'ffn_norm'}.weight`), // qwen35: post_attention_norm is the pre-FFN norm
         bq: opt('attn_q.bias'), bk: opt('attn_k.bias'), bv: opt('attn_v.bias'),
         qNorm: opt('attn_q_norm.weight'), kNorm: opt('attn_k_norm.weight'),
+        conv: opt('ssm_conv1d.weight'), dtBias: opt('ssm_dt.bias'), ssmA: opt('ssm_a'), ssmNorm: opt('ssm_norm.weight'),
       });
     }
   } finally { fs.closeSync(fd); }
@@ -163,8 +202,8 @@ function main() {
   const sk = new Float32Array(shared.k); const sv = new Float32Array(shared.v);
   const att = new Float32Array(shared.att); const hb = new Float32Array(shared.hb);
   const logits = new Float32Array(shared.logits); const kvStage = new Float32Array(shared.kvStage);
-  const kvF32 = kvF16 ? null : new Float32Array(mem.buffer, KVB, nLayer * kvPerLayer);
-  const kvU16 = kvF16 ? new Uint16Array(mem.buffer, KVB, nLayer * kvPerLayer) : null;
+  const kvF32 = kvF16 ? null : new Float32Array(mem.buffer, KVB, nKvLayers * kvPerLayer);
+  const kvU16 = kvF16 ? new Uint16Array(mem.buffer, KVB, nKvLayers * kvPerLayer) : null;
   const h2f = kvF16 ? f16Table() : null;
   const rawBar = new Barrier(ctrl, CTRL.BAR_COUNT, CTRL.BAR_GEN, n, spin);
   const bar = prof ? { wait() { const t = performance.now(); rawBar.wait(); PT.barrier += performance.now() - t; } } : rawBar;
@@ -175,9 +214,16 @@ function main() {
   const oh = attnSimd ? new Float32Array(mem.buffer, OHP, headDim) : new Float32Array(headDim);
   const tmpA = new Float32Array(BM * Math.max(nEmbd, nFF));
   const tmpB = new Float32Array(BM * Math.max(nEmbd, nFF));
+  // recurrent layers: live state (shared; this worker only touches its own channels / heads), private per-batch scratch
+  const convAll = hybrid ? new Float32Array(shared.conv) : null;
+  const ssmAll = hybrid ? new Float32Array(shared.ssm) : null;
+  const convSize = convM * convDim; const ssmSize = hybrid ? ssm.nVHeads * dv * dk : 0;
+  const zP = new Float32Array(BM * nOwnV * dv); const betaP = new Float32Array(BM * nOwnV); const alphaP = new Float32Array(BM * nOwnV);
+  // the conv channel ranges this worker updates: my key heads' q and k channels and my value heads' v channels
+  const convRanges = hybrid ? [[kk0 * dk, kk1 * dk], [keyDim + kk0 * dk, keyDim + kk1 * dk], [2 * keyDim + vh0 * dv, 2 * keyDim + vh1 * dv]] : [];
   const tmpF = new Float32Array(maxRows); // fallback matvec output
 
-  const [qr0, qr1] = splitRows(qDim, n, id);
+  const [qr0, qr1] = splitRows(qRows, n, id);
   const [kr0, kr1] = splitRows(kvDim, n, id);
   const [er0, er1] = splitRows(nEmbd, n, id);
   const [fr0, fr1] = splitRows(nFF, n, id);
@@ -225,6 +271,141 @@ function main() {
 
   parentPort.postMessage({ type: 'ready', id, ms: performance.now() - t0, bytes: total, sliceBytes: loaded, kernels: useWasm ? 'wasm-simd' : 'js', dot });
 
+  // ---------------------------------------------------------------- token mixers: full attention and Gated DeltaNet
+  // Both leave x updated (residual added) for my rows, after a final barrier.
+
+  /** Full attention layer l (phases P1-P3). Hybrid models: attn_q rows are [query | gate] per head, the gate multiplies the attention output. */
+  function attentionMixer(l, L, B, pos0) {
+    const ai = attnIdx[l];
+    // P1: norm (redundant per worker) + my rows of q, k, v for all B tokens
+    for (let b = 0; b < B; b++) rmsnorm(xbP, x, L.attnNorm, rmsEps, nEmbd, b * nEmbd, b * nEmbd);
+    prep(xbP, B, nEmbd);
+    mm(W[`${l}.wq`], sq, qRows, qr0);
+    mm(W[`${l}.wk`], sk, kvDim, kr0);
+    mm(W[`${l}.wv`], sv, kvDim, kr0);
+    for (let b = 0; b < B; b++) {
+      if (L.bq) for (let i = qr0; i < qr1; i++) sq[b * qRows + i] += L.bq[i];
+      if (L.bk) for (let i = kr0; i < kr1; i++) sk[b * kvDim + i] += L.bk[i];
+      if (L.bv) for (let i = kr0; i < kr1; i++) sv[b * kvDim + i] += L.bv[i];
+    }
+    bar.wait();
+
+    // P2: my KV heads. For every token: k-norm + RoPE, append K and V to my PRIVATE cache, then causal attention for
+    // each query head of the group that shares this KV head (q-norm, RoPE, scores, softmax, weighted sum of V).
+    const ta = prof ? performance.now() : 0;
+    for (let b = 0; b < B; b++) {
+      const pos = pos0 + b;
+      for (let hd = kh0; hd < kh1; hd++) {
+        const hl = hd - kh0;
+        const o = b * kvDim + hd * headDim;
+        if (L.kNorm) rmsnorm(sk, sk, L.kNorm, rmsEps, headDim, o, o);
+        applyRope(sk.subarray(o, o + headDim), 1, headDim, nRot, ropeType, rope, pos);
+        const kBase = ((ai * 2) * nOwn + hl) * ctx * headDim; const vBase = ((ai * 2 + 1) * nOwn + hl) * ctx * headDim;
+        if (kvF16) {
+          for (let i = 0; i < headDim; i++) { kvU16[kBase + pos * headDim + i] = f32ToF16(sk[o + i]); kvU16[vBase + pos * headDim + i] = f32ToF16(sv[o + i]); }
+        } else {
+          kvF32.set(sk.subarray(o, o + headDim), kBase + pos * headDim);
+          kvF32.set(sv.subarray(o, o + headDim), vBase + pos * headDim);
+        }
+        for (let g = 0; g < group; g++) {
+          const qhd = hd * group + g;
+          const qo = b * qRows + qhd * qStride;
+          qh.set(sq.subarray(qo, qo + headDim));
+          if (L.qNorm) rmsnorm(qh, qh, L.qNorm, rmsEps, headDim);
+          applyRope(qh, 1, headDim, nRot, ropeType, rope, pos);
+          if (attnSimd) {
+            (kvF16 ? k.attn_scores_f16 : k.attn_scores)(QHP, KVB + (kBase << kvShift), SCP, pos + 1, headDim, scale);
+            softmax(scores, pos + 1);
+            (kvF16 ? k.attn_av_f16 : k.attn_av)(SCP, KVB + (vBase << kvShift), OHP, pos + 1, headDim);
+          } else {
+            for (let t = 0; t <= pos; t++) {
+              const ko = kBase + t * headDim;
+              let s = 0;
+              for (let i = 0; i < headDim; i++) s += qh[i] * (kvF16 ? h2f[kvU16[ko + i]] : kvF32[ko + i]);
+              scores[t] = s * scale;
+            }
+            softmax(scores, pos + 1);
+            oh.fill(0);
+            for (let t = 0; t <= pos; t++) {
+              const p = scores[t];
+              const vo = vBase + t * headDim;
+              for (let i = 0; i < headDim; i++) oh[i] += p * (kvF16 ? h2f[kvU16[vo + i]] : kvF32[vo + i]);
+            }
+          }
+          if (cfg.attnOutputGate) for (let i = 0; i < headDim; i++) oh[i] *= sigmoid(sq[qo + headDim + i]); // output gate of this head
+          att.set(oh, b * qDim + qhd * headDim);
+        }
+      }
+    }
+    if (prof) PT.attn += performance.now() - ta;
+    bar.wait();
+
+    // P3: output projection, residual add into my rows of x
+    prep(att, B, qDim);
+    mm(W[`${l}.wo`], tmpA, erN, 0);
+    for (let b = 0; b < B; b++) for (let i = 0; i < erN; i++) x[b * nEmbd + er0 + i] += tmpA[b * erN + i];
+    bar.wait();
+  }
+
+  /**
+   * Gated DeltaNet layer l (phases P1-P3); the per-token math is ssmLayerStep in model/forward-qwen35.js (the oracle), split
+   * so that it can be sharded:
+   *  P1  norm; my rows of attn_qkv (q/k of my KEY heads, v of my VALUE heads), attn_gate (z), ssm_beta / ssm_alpha of my value
+   *      heads; causal conv + SiLU over those channels, token by token (the conv window lives in shared state); L2 norm of my
+   *      key heads' q and k. The conv output goes to the shared `q` buffer: [token][convDim].
+   *  P2  (after a barrier) for each of my value heads and each token: delta-rule step against that head's key head (read from
+   *      the shared buffer, wherever it was computed), then the gated RMSNorm; the result goes to the shared `att` buffer.
+   *  P3  (after a barrier) ssm_out projection + residual, like attention.
+   */
+  function recurrentMixer(l, L, B) {
+    const ri = recIdx[l];
+    for (let b = 0; b < B; b++) rmsnorm(xbP, x, L.attnNorm, rmsEps, nEmbd, b * nEmbd, b * nEmbd);
+    prep(xbP, B, nEmbd);
+    mm(W[`${l}.qkvQ`], sq, convDim, kk0 * dk);
+    mm(W[`${l}.qkvK`], sq, convDim, keyDim + kk0 * dk);
+    mm(W[`${l}.qkvV`], sq, convDim, 2 * keyDim + vh0 * dv);
+    mm(W[`${l}.z`], zP, nOwnV * dv, 0);
+    mm(W[`${l}.beta`], betaP, nOwnV, 0);
+    mm(W[`${l}.alpha`], alphaP, nOwnV, 0);
+    const tr = prof ? performance.now() : 0;
+    const convL = convAll.subarray(ri * convSize, (ri + 1) * convSize);
+    for (const [c0, c1] of convRanges) {
+      if (c1 === c0) continue;
+      const st = convL.subarray(c0 * convM, c1 * convM); const cw = L.conv.subarray(c0 * ssm.convKernel, c1 * ssm.convKernel);
+      for (let b = 0; b < B; b++) { const xs = sq.subarray(b * convDim + c0, b * convDim + c1); convStep(st, cw, xs, xs, c1 - c0, ssm.convKernel); }
+    }
+    if (nOwnK > 0) {
+      for (let b = 0; b < B; b++) {
+        l2normHeads(sq, b * convDim + kk0 * dk, nOwnK, dk, rmsEps, 1 / Math.sqrt(dk));            // q: L2 norm, then 1/sqrt(dk)
+        l2normHeads(sq, b * convDim + keyDim + kk0 * dk, nOwnK, dk, rmsEps);                       // k: L2 norm
+      }
+    }
+    bar.wait();
+
+    const td = prof ? performance.now() : 0;
+    if (prof) PT.conv += td - tr;
+    const ssmL = ssmAll.subarray(ri * ssmSize, (ri + 1) * ssmSize);
+    for (let hv = vh0; hv < vh1; hv++) {
+      const hl = hv - vh0;
+      const kh = keyHeadOfValueHead(hv, ssm.nKHeads, ssm.nVHeads); // THE head mapping (ref-deltanet.js)
+      for (let b = 0; b < B; b++) {
+        const beta = sigmoid(betaP[b * nOwnV + hl]);
+        const g = softplus(alphaP[b * nOwnV + hl] + L.dtBias[hv]) * L.ssmA[hv]; // ssmA = -exp(A_log): g <= 0
+        const qo = b * convDim;
+        const oo = b * inner + hv * dv;
+        deltaRuleHead(ssmL, hv * dv * dk, sq, qo + kh * dk, sq, qo + keyDim + kh * dk, sq, qo + 2 * keyDim + hv * dv, att, oo, dk, dv, Math.exp(g), beta);
+        gatedRmsNormHead(att, oo, zP, b * nOwnV * dv + hl * dv, L.ssmNorm, dv, rmsEps);
+      }
+    }
+    if (prof) PT.delta += performance.now() - td;
+    bar.wait();
+
+    prep(att, B, inner);
+    mm(W[`${l}.wo`], tmpA, erN, 0);
+    for (let b = 0; b < B; b++) for (let i = 0; i < erN; i++) x[b * nEmbd + er0 + i] += tmpA[b * erN + i];
+    bar.wait();
+  }
+
   // ---------------------------------------------------------------- the SPMD program for B tokens at pos0..pos0+B-1
   function runBatch(B, pos0, wantLogits) {
     for (let b = 0; b < B; b++) {
@@ -235,72 +416,7 @@ function main() {
 
     for (let l = 0; l < nLayer; l++) {
       const L = layers[l];
-      // P1: norm (redundant per worker) + my rows of q, k, v for all B tokens
-      for (let b = 0; b < B; b++) rmsnorm(xbP, x, L.attnNorm, rmsEps, nEmbd, b * nEmbd, b * nEmbd);
-      prep(xbP, B, nEmbd);
-      mm(W[`${l}.wq`], sq, qDim, qr0);
-      mm(W[`${l}.wk`], sk, kvDim, kr0);
-      mm(W[`${l}.wv`], sv, kvDim, kr0);
-      for (let b = 0; b < B; b++) {
-        if (L.bq) for (let i = qr0; i < qr1; i++) sq[b * qDim + i] += L.bq[i];
-        if (L.bk) for (let i = kr0; i < kr1; i++) sk[b * kvDim + i] += L.bk[i];
-        if (L.bv) for (let i = kr0; i < kr1; i++) sv[b * kvDim + i] += L.bv[i];
-      }
-      bar.wait();
-
-      // P2: my KV heads. For every token: k-norm + RoPE, append K and V to my PRIVATE cache, then causal attention for
-      // each query head of the group that shares this KV head (q-norm, RoPE, scores, softmax, weighted sum of V).
-      const ta = prof ? performance.now() : 0;
-      for (let b = 0; b < B; b++) {
-        const pos = pos0 + b;
-        for (let hd = kh0; hd < kh1; hd++) {
-          const hl = hd - kh0;
-          const o = b * kvDim + hd * headDim;
-          if (L.kNorm) rmsnorm(sk, sk, L.kNorm, rmsEps, headDim, o, o);
-          applyRope(sk.subarray(o, o + headDim), 1, headDim, nRot, ropeType, rope, pos);
-          const kBase = ((l * 2) * nOwn + hl) * ctx * headDim; const vBase = ((l * 2 + 1) * nOwn + hl) * ctx * headDim;
-          if (kvF16) {
-            for (let i = 0; i < headDim; i++) { kvU16[kBase + pos * headDim + i] = f32ToF16(sk[o + i]); kvU16[vBase + pos * headDim + i] = f32ToF16(sv[o + i]); }
-          } else {
-            kvF32.set(sk.subarray(o, o + headDim), kBase + pos * headDim);
-            kvF32.set(sv.subarray(o, o + headDim), vBase + pos * headDim);
-          }
-          for (let g = 0; g < group; g++) {
-            const qhd = hd * group + g;
-            qh.set(sq.subarray(b * qDim + qhd * headDim, b * qDim + (qhd + 1) * headDim));
-            if (L.qNorm) rmsnorm(qh, qh, L.qNorm, rmsEps, headDim);
-            applyRope(qh, 1, headDim, nRot, ropeType, rope, pos);
-            if (attnSimd) {
-              (kvF16 ? k.attn_scores_f16 : k.attn_scores)(QHP, KVB + (kBase << kvShift), SCP, pos + 1, headDim, scale);
-              softmax(scores, pos + 1);
-              (kvF16 ? k.attn_av_f16 : k.attn_av)(SCP, KVB + (vBase << kvShift), OHP, pos + 1, headDim);
-            } else {
-              for (let t = 0; t <= pos; t++) {
-                const ko = kBase + t * headDim;
-                let s = 0;
-                for (let i = 0; i < headDim; i++) s += qh[i] * (kvF16 ? h2f[kvU16[ko + i]] : kvF32[ko + i]);
-                scores[t] = s * scale;
-              }
-              softmax(scores, pos + 1);
-              oh.fill(0);
-              for (let t = 0; t <= pos; t++) {
-                const p = scores[t];
-                const vo = vBase + t * headDim;
-                for (let i = 0; i < headDim; i++) oh[i] += p * (kvF16 ? h2f[kvU16[vo + i]] : kvF32[vo + i]);
-              }
-            }
-            att.set(oh, b * qDim + qhd * headDim);
-          }
-        }
-      }
-      if (prof) PT.attn += performance.now() - ta;
-      bar.wait();
-
-      // P3: output projection, residual add into my rows of x
-      prep(att, B, qDim);
-      mm(W[`${l}.wo`], tmpA, erN, 0);
-      for (let b = 0; b < B; b++) for (let i = 0; i < erN; i++) x[b * nEmbd + er0 + i] += tmpA[b * erN + i];
-      bar.wait();
+      if (recIdx[l] >= 0) recurrentMixer(l, L, B); else attentionMixer(l, L, B, pos0);
 
       // P4: FFN norm + my rows of gate/up -> SwiGLU
       for (let b = 0; b < B; b++) rmsnorm(xbP, x, L.ffnNorm, rmsEps, nEmbd, b * nEmbd, b * nEmbd);
@@ -364,7 +480,7 @@ function main() {
   }
   if (prof && PT.tokens) {
     const per = (v) => (v / PT.tokens).toFixed(2);
-    const other = PT.total - PT.kernel - PT.quant - PT.attn - PT.barrier;
-    process.stderr.write(`[profile worker 0, ms/token over ${PT.tokens} tokens in ${PT.batches} passes] total ${per(PT.total)} | matmul kernels ${per(PT.kernel)} | act quantization ${per(PT.quant)} | attention+rope ${per(PT.attn)} | barrier waits ${per(PT.barrier)} | other (norms, residuals, swiglu, copies) ${per(other)}\n`);
+    const other = PT.total - PT.kernel - PT.quant - PT.attn - PT.conv - PT.delta - PT.barrier;
+    process.stderr.write(`[profile worker 0, ms/token over ${PT.tokens} tokens in ${PT.batches} passes] total ${per(PT.total)} | matmul kernels ${per(PT.kernel)} | act quantization ${per(PT.quant)} | attention+rope ${per(PT.attn)} | conv+l2norm ${per(PT.conv)} | delta rule+gated norm ${per(PT.delta)} | barrier waits ${per(PT.barrier)} | other (norms, residuals, swiglu, copies) ${per(other)}\n`);
   }
 }

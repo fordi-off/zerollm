@@ -9,11 +9,11 @@ import { makeTinyQwen35, reorderRows } from '../tools/make-tiny-qwen35-gguf.js';
 import { naiveQwen35Logits, hfFromGguf } from './naive-qwen35.js';
 import { readGGUF } from '../src/gguf/reader.js';
 import { GGML_TYPE } from '../src/gguf/types.js';
-import { modelConfig, estimateRam, kvBytesPerToken, recurrentStateBytes, RECURRENT_CHECKPOINTS } from '../src/model/config.js';
+import { modelConfig, estimateRam, kvBytesPerToken, recurrentStateBytes, RECURRENT_CHECKPOINTS, SUPPORTED_ARCHS } from '../src/model/config.js';
 import { RefModel } from '../src/model/forward.js';
 import { Qwen35Model, RecurrentState, expectedTensors } from '../src/model/forward-qwen35.js';
 import { generate, argmax } from '../src/model/generate.js';
-import { PrefixCache } from '../src/model/prefix-cache.js';
+import { PrefixCache, modelFingerprint } from '../src/model/prefix-cache.js';
 import { Tokenizer, preTokenize } from '../src/tokenizer/bpe.js';
 import { renderSegments, encodeChat, detectTemplate, stopTokenIds } from '../src/tokenizer/chat-templates.js';
 import { loadModel, inspectModel, UnsupportedModelError } from '../src/index.js';
@@ -36,12 +36,12 @@ const TOKS = [3, 70, 5, 200, 12, 9, 255, 1, 17];
 
 // ---------------------------------------------------------------- config / info / RAM
 
-test('qwen35 config: hybrid layout, SSM shape, attention gate; kept out of the fully supported list', () => {
+test('qwen35 config: hybrid layout, SSM shape, attention gate; a fully supported architecture (worker pool + reference path)', () => {
   const { g, path: p } = tiny();
   const c = modelConfig(g);
   assert.equal(c.arch, 'qwen35');
   assert.equal(c.hybrid, true);
-  assert.equal(c.referenceOnly, true);
+  assert.ok(SUPPORTED_ARCHS.includes('qwen35'));
   assert.deepEqual(c.layerIsRecurrent, [true, false, true, false]); // (layer + 1) % interval != 0 -> recurrent
   assert.equal(c.nAttnLayers, 2);
   assert.equal(c.attnOutputGate, true);
@@ -52,8 +52,8 @@ test('qwen35 config: hybrid layout, SSM shape, attention gate; kept out of the f
   assert.deepEqual(c.ropeSections, [2, 1, 1, 0]);
   assert.deepEqual(c.ssm, { convKernel: 4, headKDim: 16, headVDim: 16, nKHeads: 2, nVHeads: 4, innerSize: 64, convDim: 128 });
   const i = inspectModel(p);
-  assert.equal(i.supported, false);
-  assert.match(i.reason, /qwen35 currently runs only on the reference path \(use --kernels js --threads 1\)/);
+  assert.equal(i.supported, true);
+  assert.equal(i.reason, null);
   assert.equal(i.arch, 'qwen35');
 });
 
@@ -117,7 +117,8 @@ test('zerollm info prints the hybrid layout and the corrected RAM estimate', () 
   assert.match(r.stdout, /KV cache, f32 \(default; 2 attention layers only\)\s+50\.0 KB/);
   assert.match(r.stdout, /Recurrent state \(1 sequence, f32\)/);
   assert.match(r.stdout, /State checkpoints \(up to 6\)/);
-  assert.match(r.stdout, /reference path/);
+  assert.match(r.stdout, /worker pool \+ WASM SIMD kernels/);
+  assert.match(r.stdout, /value head h reads key head h % 2/);
   assert.match(r.stdout, /Pre-tokenizer\s+qwen35/);
 });
 
@@ -265,13 +266,28 @@ test('generate(): regenerate and shared-prefix reuse go through truncate and giv
   assert.deepEqual(d, await collect(new RefModel(g, { ctx: 96 }), prompt3, { maxTokens: 6 }));
 });
 
-test('the KV prefix cache refuses hybrid models with a clear reason', async () => {
-  const { g } = tiny();
-  const m = new RefModel(g, { ctx: 32 });
-  const pc = new PrefixCache(dir, 'x');
-  assert.equal(await pc.load(m, [1, 2, 3]), false);
-  await assert.rejects(() => pc.save(m, [1, 2, 3]), /recurrent state of hybrid models/);
-  await assert.rejects(() => m.kvGet(0, 0, 1), /does not support Qwen3\.5/);
+test('the prefix cache stores KV of the attention layers + the recurrent state: a cached prefix continues exactly like a fresh prefill', async () => {
+  const { g, path: mp } = tiny({ quant: 'q8_0', seed: 31 });
+  const prefix = [3, 70, 5, 200, 12, 9, 255, 1];
+  const cache = new PrefixCache(path.join(dir, 'pc'), modelFingerprint(mp, 'js/kv-f32'));
+  const a = new RefModel(g, { ctx: 64 });
+  for (const t of prefix) a.forward(t, { logits: false });
+  const saved = await cache.save(a, prefix);
+  assert.equal(fs.readFileSync(saved).subarray(0, 8).toString('latin1'), 'ZLLMKV02');
+  const b = new RefModel(g, { ctx: 64 });
+  assert.equal(await cache.load(b, prefix), true);
+  assert.equal(b.pos, prefix.length);
+  assert.deepEqual(b.checkpointPositions, [prefix.length]); // the end of the prefix is a rollback point
+  for (const t of [9, 33, 120, 4]) assert.deepEqual([...b.forward(t)], [...a.forward(t)], `token ${t}`);
+  assert.equal(await cache.load(new RefModel(g, { ctx: 64 }), prefix.slice(0, 5)), false, 'a different prefix is a miss');
+  // a state can only be saved at the exact end of the prefix
+  await assert.rejects(() => cache.save(a, prefix), /exact end of the prefix/);
+  // damage -> miss, never an exception
+  const bytes = fs.readFileSync(saved); fs.writeFileSync(saved, bytes.subarray(0, bytes.length - 100));
+  assert.equal(await cache.load(new RefModel(g, { ctx: 64 }), prefix), false);
+  // a non-hybrid reader / a hybrid file from other kernels: the fingerprint keeps them apart
+  const other = new PrefixCache(path.join(dir, 'pc'), modelFingerprint(mp, 'wasm/kv-f32'));
+  assert.equal(await other.load(new RefModel(g, { ctx: 64 }), prefix), false);
 });
 
 // ---------------------------------------------------------------- tokenizer
@@ -383,18 +399,7 @@ test('loadModel(kernels js, threads 1): greedy generation end to end; regenerate
     engine.reset();
     const cold = await collect(engine.generate({ messages: [...messages, { role: 'assistant', content: a }, { role: 'user', content: 'and you?' }], maxTokens: 8, sampling: { temperature: 0 } }));
     assert.equal(c, cold);
-    assert.equal(await engine.primePrefix([1, 2, 3], { dir, minTokens: 1 }), 'off');
   } finally { await engine.close(); }
-});
-
-test('the worker pool path refuses qwen35 cleanly (loadModel / CLI); the reference path is the only way in', async () => {
-  const { path: p } = tiny();
-  for (const opts of [{}, { threads: 2 }, { threads: 1 }, { threads: 1, kernels: 'wasm' }, { threads: 1, kernels: 'js', kv: 'f16' }]) {
-    await assert.rejects(() => loadModel(p, { ctx: 64, ...opts }), (e) => e instanceof UnsupportedModelError && /reference path \(use --kernels js --threads 1\)/.test(e.message));
-  }
-  const r = cli(['run', p, '-p', 'hi', '--n', '2', '--threads', '2']);
-  assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /reference path \(use --kernels js --threads 1\)/);
 });
 
 test('CLI: run --threads 1 --kernels js --show-prompt on a qwen35 file (thinking off and on)', () => {
@@ -407,6 +412,27 @@ test('CLI: run --threads 1 --kernels js --show-prompt on a qwen35 file (thinking
   const on = cli(['run', p, '-p', 'Hei', '--n', '3', '--threads', '1', '--kernels', 'js', '--temp', '0', '--show-prompt', '--think']);
   assert.equal(on.status, 0, on.stderr);
   assert.ok(on.stderr.includes('<|im_start|>assistant\\n<think>\\n"]'));
+});
+
+test('CLI on the worker pool (the default path now): run prints the opening <think> of a thinking reply, chat reuses the state, info says so', () => {
+  const { path: p } = tiny({ quant: 'q8_0', seed: 3 });
+  const on = cli(['run', p, '-p', 'Hei', '--n', '4', '--threads', '2', '--kernels', 'js', '--temp', '0', '--think']);
+  assert.equal(on.status, 0, on.stderr);
+  assert.match(on.stderr, /2 threads, js kernels/);
+  assert.ok(on.stdout.startsWith('<think>\n'), JSON.stringify(on.stdout));
+  const off = cli(['run', p, '-p', 'Hei', '--n', '4', '--threads', '2', '--temp', '0']);
+  assert.equal(off.status, 0, off.stderr);
+  assert.match(off.stderr, /wasm-simd kernels/);
+  assert.ok(!off.stdout.startsWith('<think>'));
+  const r = cli(['chat', p, '--n', '4', '--temp', '0', '--threads', '3'], 'hei\nog du?\n/exit\n');
+  assert.equal(r.status, 0, r.stderr);
+  const cached = [...r.stderr.matchAll(/\((\d+) cached\)/g)].map((m) => Number(m[1]));
+  assert.ok(cached.length === 1 && cached[0] > 5, `second turn cached tokens: ${cached}`);
+  // greedy text of the pool with JS kernels equals the reference path's
+  const ref = cli(['run', p, '-p', 'Hei', '--n', '6', '--threads', '1', '--kernels', 'js', '--temp', '0']);
+  const pool = cli(['run', p, '-p', 'Hei', '--n', '6', '--threads', '3', '--kernels', 'js', '--temp', '0']);
+  assert.equal(ref.status, 0, ref.stderr); assert.equal(pool.status, 0, pool.stderr);
+  assert.equal(pool.stdout, ref.stdout);
 });
 
 test('CLI: chat session on a qwen35 file keeps the conversation (second turn reuses the cache)', () => {

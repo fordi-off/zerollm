@@ -242,8 +242,35 @@ Not a measurement of the real file (none available in the dev VM): `node tools/b
 | output projection (full, extrapolated) | 930-1090 |
 | **whole model, decode** | **5.5-7 s = 0.15-0.18 tok/s** |
 | **whole model, prompt reading (no logits)** | **~5 s/token = 0.18-0.2 tok/s** |
-The K-quant reference matvec was rewritten (no allocations in the loops, block sums of the quantized activation computed once): output bit-identical, FFN 146 -> 90 ms, recurrent mixer 111 -> ~70 ms (same VM). Scaling to the laptop is a guess (single-thread speed 1.5-2.5x of this VM). The real numbers go here once `docs/REAL-MODEL-CHECK.md` ("Qwen3.5 reference check") has been run.
+The K-quant reference matvec was rewritten (no allocations in the loops, block sums of the quantized activation computed once): output bit-identical, FFN 146 -> 90 ms, recurrent mixer 111 -> ~70 ms (same VM). Scaling to the laptop is a guess (single-thread speed 1.5-2.5x of this VM). The real numbers go here once `docs/REAL-MODEL-CHECK.md` ("Qwen3.5 check") has been run. The pool path (next section) replaced this as the way to run the model.
 
+
+## Qwen3.5-4B on the worker pool (SIMD kernels), dev VM 4 vCPU Xeon 2.3 GHz, Node 22: synthetic weights of the real shapes. INDICATIVE ONLY
+
+Added 2026-11-10. **Not the real file, not the target laptop**: the file is `node tools/make-synth-qwen35.js` (the exact 426 tensors, shapes and types of the real Qwen3.5-4B-Q4_K_M from `test-fixtures/qwen35-4b-tensors.txt`, random weights, 2.73 GB, no tokenizer), the program is `node tools/bench-qwen35-pool.mjs file.gguf --threads 1,2,3,4 --kernels wasm --prompt 64 --n 12` (arbitrary token ids, decoded token = argmax; timing does not depend on the weight values, all logits were finite). The VM was shared with other jobs (spread between repeated runs ~5-10%). The laptop numbers come from `docs/REAL-MODEL-CHECK.md` part B.
+
+| threads | decode tok/s | ms/token | prefill tok/s (batch 16, 64-token prompt) | RSS |
+|---|---|---|---|---|
+| 1 | 0.96 | 1045 | 1.33 | 2.75 GB |
+| 2 | 1.70 | 588 | 2.36 | 2.89 GB |
+| 3 | 2.37 | 421 | 3.49 | 2.83 GB |
+| 4 | 2.73 | 367 | 4.31 | 3.00 GB |
+
+More: 4 threads, 256-token prompt, batch 16: prefill 4.91 tok/s (batch 32: 4.61, no gain); f16 KV, 4 threads: decode 2.92 tok/s (f32: 2.73-2.79, within noise). For comparison the plain-JS reference path (estimate above, 1 thread): 0.15-0.18 tok/s, so the pool is ~6x faster on one thread and ~16x with four. Prefill is only ~1.7x decode here (the VM is compute-bound in the int8 dot, and the conv / delta rule are sequential per token), versus 2x+ for dense models on the laptop.
+
+**Where a decode token goes** (`ZEROLLM_PROFILE=1`, worker 0 of 4, ms/token, 18 passes, 1-token prompt then 16 decoded tokens; the run is dominated by decode):
+
+| total | matmul kernels | act quantization | attention + rope | conv + L2 norm | delta rule + gated norm | barrier waits | other |
+|---|---|---|---|---|---|---|---|
+| 345 | 258 (75%) | 9 (2.5%) | 0.5 | 13.5 (4%) | 21 (6%) | 49 (14%) | ~-6 (timer overlap) |
+
+(Earlier build of the profile, same setup: conv + delta rule together 45 ms of 393. Run-to-run spread ~25% on this VM.) Conclusion drawn in docs/DECISIONS.md: the delta rule and the conv are 10% of a token together, SIMD kernels for them would save a few percent at most (the 52 MB of state touched per token bounds it), so none were written. Re-check the two lines on the laptop.
+
+**Rolling back** (4 workers, f16 KV, after a 64-token prefill): the checkpoint before the last prompt token is taken automatically; `markRollback` (a 52.7 MB copy) 57 ms; `truncate(63)` (a snapshot exists) 7.8 ms; `truncate(40)` replays 40 tokens in 8.7 s (4.6 tok/s, batched replay); `truncate(0)` 7 ms (zeroing).
+
+**System-prompt cache** (32-token prefix, 4 workers, f16 KV): save 78 ms, load 117 ms, 54.8 MB per file (KV of 8 attention layers + 52.7 MB recurrent state); reading the same prefix takes ~7 s.
+
+**No regression for other architectures** (the shared worker code changed: stride of the q buffer, KV layer indexing, async truncate): `zerollm bench cheap-target.gguf --threads 4 --n 40 --prompt-tokens 48` (the 0.6B-shaped synthetic Q8_0 target of the speculative-decoding runs), 3 interleaved pairs, this branch vs the previous main: decode 13.96 / 13.69 / 13.86 vs 13.96 / 14.36 / 13.86 tok/s, prefill 38.5 / 40.8 / 38.4 vs 38.9 / 40.4 / 36.7 tok/s: the same within noise.
 
 ## Relaxed-SIMD integer dot (`ZEROLLM_DOT=relaxed|relaxed-add`), experiment: dev VM numbers + what to run on the laptop
 

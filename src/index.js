@@ -15,10 +15,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import { readGGUF } from './gguf/reader.js';
 import { typeName } from './gguf/types.js';
-import { modelConfig, estimateRam, assertSupportedTensorTypes, SUPPORTED_ARCHS, SUPPORTED_TENSOR_TYPES, UnsupportedArchError, REFERENCE_ONLY_REASON } from './model/config.js';
+import { modelConfig, estimateRam, assertSupportedTensorTypes, SUPPORTED_ARCHS, SUPPORTED_TENSOR_TYPES, UnsupportedArchError } from './model/config.js';
 import { RefModel } from './model/forward.js';
 import { Tokenizer } from './tokenizer/bpe.js';
-import { detectTemplate, encodeChat, stopTokenIds } from './tokenizer/chat-templates.js';
+import { detectTemplate, encodeChat, stopTokenIds, thinkingMode, thinkOpening } from './tokenizer/chat-templates.js';
 import { createSampler } from './sampling/sampler.js';
 import { StopFilter } from './sampling/stop.js';
 import { generate as generateTokens, prefillTokens } from './model/generate.js';
@@ -77,7 +77,6 @@ export function inspectModel(path) {
     out.cfg = cfg; out.nLayer = cfg.nLayer; out.ctxTrain = cfg.nCtxTrain;
     assertSupportedTensorTypes(g);
     if (g.get('tokenizer.ggml.model') !== 'gpt2') throw new UnsupportedModelError(`unsupported tokenizer "${g.get('tokenizer.ggml.model')}"`);
-    if (cfg.referenceOnly) throw new UnsupportedModelError(REFERENCE_ONLY_REASON);
     out.supported = true;
   } catch (e) {
     out.reason = e instanceof UnsupportedArchError ? `Architecture "${out.arch}" is not supported (supported: ${SUPPORTED_ARCHS.join(', ')})` : e.message;
@@ -113,8 +112,9 @@ export async function loadModel(path, opts = {}) {
   if (g.get('tokenizer.ggml.model') !== 'gpt2') throw new UnsupportedModelError(`unsupported tokenizer "${g.get('tokenizer.ggml.model')}"`);
   const threads = opts.threads ?? defaultThreads();
   const kv = opts.kv ?? 'f32';
-  const referencePath = opts.threads === 1 && opts.kernels === 'js' && kv === 'f32';
-  if (cfg.referenceOnly && !referencePath) throw new UnsupportedModelError(`${REFERENCE_ONLY_REASON}: pass { threads: 1, kernels: 'js' }`);
+  // { threads: 1, kernels: 'js' } (f32 KV) is the plain single-thread reference path, the oracle of the pool; hybrid models run it
+  // on request (the CLI does this for every architecture). Everything else, and every other architecture, uses the worker pool.
+  const referencePath = cfg.hybrid && opts.threads === 1 && opts.kernels === 'js' && kv === 'f32';
   const ctx = Math.min(opts.ctx ?? 2048, cfg.nCtxTrain);
   const est = estimateRam(g, cfg, { ctx, threads, kvBytes: kv === 'f16' ? 2 : 4 });
 
@@ -153,7 +153,7 @@ export async function loadModel(path, opts = {}) {
   const tok = Tokenizer.fromGGUF(g);
   const jinja = g.get('tokenizer.chat_template');
   const kind = opts.template ?? detectTemplate(cfg.arch, jinja, tok);
-  const model = cfg.referenceOnly
+  const model = referencePath
     ? new RefModel(g, { ctx, onProgress: opts.onProgress })
     : await PoolModel.create(g, { ctx, workers: threads, kernels: opts.kernels ?? 'auto', kv, maxBatch: opts.maxBatch, onProgress: opts.onProgress });
   const engine = new Engine({ path, g, cfg, tok, kind, jinja, model, ctx, threads, kv, estimate: est, loadMs: performance.now() - t0 });
@@ -180,6 +180,12 @@ export class PromptTools {
     if (this.kind === 'raw') return this.tok.encode(messages.map((m) => m.content).join('\n\n'));
     return encodeChat(this.tok, this.kind, messages, { arch: this.cfg.arch, jinja: this.jinja, think });
   }
+
+  /** 'model-opens' (Qwen3) | 'prompt-opens' (Qwen3.5) | null: does this model have a thinking switch, and who writes `<think>` (see chat-templates.js). */
+  get thinkingMode() { return thinkingMode(this.cfg.arch); }
+
+  /** Text to put in front of the generated reply of a thinking run so it reads `<think>..</think>answer` (Qwen3.5's prompt already opened the block). */
+  thinkOpening(think) { return thinkOpening(this.cfg.arch, think === true); }
 
   /** Number of prompt tokens a chat would take (exact). */
   countPromptTokens(messages, opts) { return this.promptIds(messages, opts).length; }
@@ -310,7 +316,7 @@ export class Engine extends PromptTools {
    * @param {{dir: string, minTokens?: number, signal?: {aborted: boolean}, onProgress?: (done: number, total: number) => void}} o
    */
   async primePrefix(prefixIds, { dir, minTokens = 32, signal, onProgress } = {}) {
-    if (this.closed || this.cfg.hybrid || this.model.pos !== 0 || prefixIds.length < minTokens || prefixIds.length >= this.ctx) return 'off';
+    if (this.closed || this.model.pos !== 0 || prefixIds.length < minTokens || prefixIds.length >= this.ctx) return 'off';
     const cache = new PrefixCache(dir, modelFingerprint(this.path, `${this.model.kernels === 'wasm' ? 'wasm' : 'js'}/kv-${this.model.kv ?? 'f32'}`));
     if (await cache.load(this.model, prefixIds)) return 'hit';
     const r = await prefillTokens(this.model, prefixIds, { wantLogits: false, signal, onProgress });
@@ -333,4 +339,4 @@ export class Engine extends PromptTools {
   }
 }
 
-export { PrefixCache, modelFingerprint, vocabMismatch, vocabFingerprint, defaultDraftThreads, DEFAULT_DRAFT_K };
+export { thinkingMode, thinkOpening, PrefixCache, modelFingerprint, vocabMismatch, vocabFingerprint, defaultDraftThreads, DEFAULT_DRAFT_K };

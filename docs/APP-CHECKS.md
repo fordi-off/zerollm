@@ -80,3 +80,11 @@ Run once with only the chat model installed (the chat model writes the title) an
 - [ ] Reload / close and reopen the page right after the first reply: the title is there (written by the server regardless of the page).
 - [ ] Turn "Automatiske samtaletitler" off: new chats keep the first-45-characters name. Turn it on again: the next new chat gets a title. The hint text in Settings explains the trade-off.
 - [ ] Old chats (and chats from Skibeti37) never change name by themselves.
+
+## Qwen3.5 (Qwen3.5-4B Q4_K_M in `models\`; worker pool, not run on the real weights yet)
+- [ ] The model is listed as supported (no "reference path only" note) and the "Tenk først" switch appears for it, as for Qwen3.
+- [ ] A normal question (switch off): a coherent answer, in the language of the question. app.log shows `generating: ... ctx tokens` and a `done:` line with the decode tok/s; note it (the dev-VM number with random weights is ~2.7-2.9 tok/s on 4 threads).
+- [ ] A second question in the same chat: the `done:` line shows `cached` = the whole first turn (the recurrent state is reused, nothing is re-read). Regenerate the last answer: `cached` = everything but the last prompt token.
+- [ ] Switch "Tenk først" on and ask a question: the reasoning streams into the foldable block, the answer follows after it; the stored chat holds the reasoning separately. Ask a follow-up with the switch still on and once with it off; the log shows how much was re-read (a few tokens from the previous assistant header, not the whole chat).
+- [ ] Restart the app and ask a question: app.log says `system prompt cache: hit` (a ~55 MB `.kv` file in `cache\`; the newest 4 are kept) and the first answer starts without re-reading the system prompt.
+- [ ] Edit the last user message and resend (or use another chat in the same model): works, and takes only as long as reading the changed part.

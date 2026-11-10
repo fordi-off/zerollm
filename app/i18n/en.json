@@ -117,7 +117,7 @@
   "shortcuts": "Keyboard shortcuts",
   "shortcutsText": "Enter sends · Shift+Enter new line · Esc stops the reply · Alt+N new chat · Alt+B sidebar · / opens commands",
   "thinkToggle": "Think first",
-  "thinkHint": "The model reasons before it answers. Better at maths and logic, but much slower (minutes). Qwen3 models only.",
+  "thinkHint": "The model reasons before it answers. Better at maths and logic, but much slower (minutes). Qwen3 and Qwen3.5 models only.",
   "thinkingNow": "Thinking… {time}",
   "thoughtFor": "Thought for {time}",
   "thoughtDone": "Thought",

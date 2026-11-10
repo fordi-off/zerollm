@@ -80,8 +80,8 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
       send('phase', { phase: 'preparing', model });
 
       const ctxMax = engine.ctx;
-      // Qwen3 can reason before it answers (the page's "Tenk først"); other models ignore the switch
-      const thinking = !!think && engine.cfg.arch === 'qwen3';
+      // Qwen3 / Qwen3.5 can reason before they answer (the page's "Tenk først"); other models ignore the switch
+      const thinking = !!think && engine.thinkingMode !== null;
       const reserve = replyReserve(ctxMax, thinking);
       const count = (m) => engine.countPromptTokens(m, { think: thinking });
       const withCont = (h) => (continuation ? [...h, { role: 'user', content: CONTINUATION_PROMPT }] : h);
@@ -130,7 +130,12 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
         onPrefill: (done, total) => send('progress', { done, total }),
       });
       for await (const text of gen) {
-        if (first) { first = false; send('phase', { phase: 'generating', model }); }
+        if (first) {
+          first = false; send('phase', { phase: 'generating', model });
+          // Qwen3.5's thinking prompt already ends with the opening <think>: put it in front so the stream reads <think>..</think>answer like Qwen3's
+          const opening = engine.thinkOpening(thinking);
+          if (opening) { answer += opening; send('chunk', { text: opening }); }
+        }
         answer += text;
         send('chunk', { text });
         if (answer.length - checkedAt >= 120) {
@@ -276,7 +281,7 @@ export function createApi({ paths, host, getConfig, setConfig, log, emit, catalo
       const tools = toolsFor(model);
       const { summary, summarized } = summaryState(chatId ?? null, messages.length);
       const fitted = buildMessages(messages.slice(summarized), { extraSystem: extraText(messages, summary) });
-      const thinking = think === true && tools.cfg.arch === 'qwen3';
+      const thinking = think === true && tools.thinkingMode !== null;
       const max = Math.min(contextMax(), tools.cfg.nCtxTrain);
       const lastUser = [...messages].reverse().find((m) => m.role === 'user');
       return {

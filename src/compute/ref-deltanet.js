@@ -6,7 +6,7 @@
 // Layouts (GGUF space, i.e. AFTER llama.cpp's converter reordered the value heads into "tiled" order):
 //   conv state     [channel][kernel-1]      oldest input first
 //   delta state    [vHead][vDim j][kDim i]  S_h[j][i]; the matrix S_h^T of the papers, so every inner loop is contiguous
-//   key head used by value head h:  h % nKHeads  (NOT h / (nVHeads / nKHeads))
+//   key head used by value head h:  h % nKHeads  (NOT h / (nVHeads / nKHeads))  -> keyHeadOfValueHead() below
 
 export const sigmoid = (x) => 1 / (1 + Math.exp(-x));
 
@@ -14,6 +14,20 @@ export const sigmoid = (x) => 1 / (1 + Math.exp(-x));
 export const softplus = (x) => (x > 20 ? x : Math.log1p(Math.exp(x)));
 
 const silu = (x) => x / (1 + Math.exp(-x));
+
+/**
+ * THE value-head -> key-head mapping of the Gated DeltaNet layers, in one place (the reference path AND the worker pool call
+ * this; nothing else encodes it). The Qwen3.5 checkpoint has `nKHeads` (16) key/query heads shared by `nVHeads` (32) value
+ * heads. llama.cpp's converter re-orders the value heads of the GGUF into "tiled" order, so that value head h reads key head
+ * `h % nKHeads` (ggml_repeat tiles the 16 key heads over the 32 value heads); the Hugging Face checkpoint order would be the
+ * grouped `floor(h / (nVHeads / nKHeads))`.
+ * NOT VERIFIED ON THE REAL Qwen3.5-4B FILE (only against the synthetic generator that applies the converter's reordering,
+ * see docs/DECISIONS.md and docs/REAL-MODEL-CHECK.md). If a real file turns out to be in grouped order, change THIS function.
+ * @param {number} hv value head  @param {number} nKHeads @param {number} nVHeads
+ */
+export function keyHeadOfValueHead(hv, nKHeads, nVHeads) {
+  return hv % nKHeads;
+}
 
 /**
  * One step of the depthwise causal conv1d followed by SiLU, updating the conv window in place.

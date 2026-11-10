@@ -12,7 +12,7 @@ const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls)
 
 const S = {
   models: [], model: null, settings: null, messages: [], // messages: [{role, content, ...extras from the file, node, bubble}]
-  think: (() => { try { return localStorage.getItem('zc-think') === '1'; } catch { return false; } })(), // "Tenk først" (Qwen3 only)
+  think: (() => { try { return localStorage.getItem('zc-think') === '1'; } catch { return false; } })(), // "Tenk først" (Qwen3 / Qwen3.5)
   chatId: null, chatName: null, idleWaiters: [],
   busy: false, runId: null, waiting: false, current: null, // current: {msg, bubble, status, bar}
   stickBottom: true,
@@ -34,8 +34,8 @@ const scroller = () => $('scroller');
 const nearBottom = () => scroller().scrollHeight - scroller().scrollTop - scroller().clientHeight < 80;
 function scrollToBottom(force = false) { if (force || S.stickBottom) scroller().scrollTop = scroller().scrollHeight; }
 
-// ---------- "Tenk først" (Qwen3 reasoning) ----------
-const thinkSupported = () => currentModel()?.arch === 'qwen3';
+// ---------- "Tenk først" (Qwen3 / Qwen3.5 reasoning) ----------
+const thinkSupported = () => currentModel()?.thinking === true; // decided by the server (src/tokenizer/chat-templates.js thinkingMode)
 const thinkOn = () => S.think && thinkSupported();
 function updateThinkToggle() {
   const b = $('btn-think'); b.hidden = !thinkSupported();

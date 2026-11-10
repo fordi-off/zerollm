@@ -45,7 +45,7 @@ export function commonPrefix(a, b) {
  * new part of the prompt is processed. The loop yields to the event loop after every token (prefill included), so
  * SIGINT handlers run promptly.
  *
- * @param {{forward: Function, truncate: Function, tokens: number[], pos: number, ctx: number}} model
+ * @param {{forward: Function, truncate: Function (sync or async), tokens: number[], pos: number, ctx: number}} model
  * @param {number[]} promptIds
  * @param {{maxTokens?: number, sample?: (logits: Float32Array, history: number[]) => number, stopIds?: Set<number>,
  *          signal?: {aborted: boolean}, stats?: object, onPrefillProgress?: (done: number, total: number) => void,
@@ -62,7 +62,7 @@ export async function* generate(model, promptIds, opts = {}) {
 
   // reuse cached prefix, but always recompute at least the last prompt token (we need its logits)
   const reuse = Math.min(commonPrefix(model.tokens, promptIds), promptIds.length - 1);
-  model.truncate(reuse);
+  await model.truncate(reuse); // may be async (a hybrid model restores a recurrent-state checkpoint and replays tokens)
   stats.promptTokens = promptIds.length;
   stats.cachedTokens = reuse;
   stats.generated = 0;
