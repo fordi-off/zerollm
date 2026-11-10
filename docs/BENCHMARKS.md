@@ -407,3 +407,17 @@ Worst cases, to show the cost when speculation does not pay (pair "0.6B-shaped" 
 Rule of thumb from these tables: speculation pays when the draft pass is much cheaper than a target pass (<= ~0.25) AND at least ~70% of drafted tokens are accepted; the dev VM gives 1.3-1.6x in that regime and ~1.0-1.1x with a draft that costs 0.45 of the target.
 
 **3. Default (non-speculative) path unchanged** (`zerollm bench cheap-target.gguf --threads 4 --n 40 --prompt-tokens 48`, 8 interleaved runs of the previous revision and this one, medians): prefill 38.8 vs 39.1 tok/s, decode 13.66 vs 13.53 tok/s, i.e. within noise.
+
+### Relaxed-SIMD dot forms on the target laptop, Qwen3.5-4B Q4_K_M (user-measured)
+
+Ryzen 5 7530U, Windows, Node 26. `node tools/dotbench.mjs models/Qwen3.5-4B-Q4_K_M.gguf --threads 6 --rounds 5 --pause 15` (batch 16, 64-token prompt, 16 generated, 5 interleaved rounds):
+
+| ZEROLLM_DOT | prefill tok/s median (min-max) | decode tok/s median (min-max) |
+|---|---|---|
+| extmul (default) | 8.43 (8.37-9.65) | 4.32 (4.26-4.75) |
+| relaxed | 9.40 (8.61-10.95) | 5.23 (4.34-6.04) |
+| relaxed-add | 10.41 (8.57-10.52) | 5.53 (5.26-5.99) |
+
+Decode: every `relaxed-add` round (min 5.26) beat every `extmul` round (max 4.75), about +28% at the median; `relaxed` overlaps `extmul` (+21% median, not clearly separable). Prefill: `relaxed-add` was higher than `extmul` in all five paired rounds (+23% median), but the min-max ranges overlap. Only Qwen3.5 was measured; Qwen3 4B / 8B are still to be run before any default changes.
+
+Caution when comparing with other tables: in the same session `zerollm bench ... --threads 6 --kv f16` gave 2.64 decode / 5.18 prefill for the default dot form and `run` gave 2.92 / 5.25, i.e. about 40% lower than this `dotbench` row for the same mode. Only compare numbers from the same interleaved run (the laptop's power state or background load moves everything between runs).
