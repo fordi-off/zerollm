@@ -59,7 +59,7 @@ test('qwen35 config: hybrid layout, SSM shape, attention gate; a fully supported
 
 test('the tensors the reference path reads are exactly the real Qwen3.5-4B-Q4_K_M file\'s 426 tensors (names and shapes)', () => {
   const fixture = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'test-fixtures', 'qwen35-4b-tensors.txt');
-  const real = new Map(fs.readFileSync(fixture, 'utf8').split('\n').filter((l) => l && !l.startsWith('#')).map((l) => {
+  const real = new Map(fs.readFileSync(fixture, 'utf8').split(/\r?\n/).filter((l) => l && !l.startsWith('#')).map((l) => {
     const m = /^(\S+) (\S+) \[(.*)\]$/.exec(l);
     return [m[1], m[3].split(',').map(Number)];
   }));

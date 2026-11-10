@@ -1,0 +1,2 @@
+# the tensor-list fixture is parsed line by line: keep LF on Windows checkouts too
+test-fixtures/*.txt text eol=lf

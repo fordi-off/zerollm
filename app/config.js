@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { defaultThreads } from '../src/index.js';
+import { writeFileAtomic } from './atomic-write.js';
 
 export const CONTEXT_STEPS = [2048, 4096, 8192, 16384, 32768];
 export const DEFAULT_CONTEXT = 8192; // Skibeti37 uses 16384; 8192 keeps an 8B model comfortably inside 16 GB of RAM
@@ -38,9 +39,7 @@ export function loadConfig(paths) {
 
 export function saveConfig(paths, cfg) {
   fs.mkdirSync(paths.root, { recursive: true });
-  const tmp = `${paths.configPath}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2), 'utf8');
-  fs.renameSync(tmp, paths.configPath);
+  writeFileAtomic(paths.configPath, JSON.stringify(cfg, null, 2));
 }
 
 /** Create the folders the app writes to. */

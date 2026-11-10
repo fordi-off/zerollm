@@ -45,7 +45,7 @@ export function writeSynthQwen35(o) {
     return new Uint8Array(f.buffer);
   };
   const tensors = [];
-  for (const line of fs.readFileSync(FIXTURE, 'utf8').split('\n')) {
+  for (const line of fs.readFileSync(FIXTURE, 'utf8').split(/\r?\n/)) {
     if (!line || line.startsWith('#')) continue;
     const m = /^(\S+) (\S+) \[(.*)\]$/.exec(line);
     let [, name, type, dims] = m;

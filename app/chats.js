@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { SYSTEM_PROMPT } from './chat-core.js';
+import { writeFileAtomic } from './atomic-write.js';
 
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const MAX_NAME = 120;
@@ -25,9 +26,7 @@ export function createChatStore(paths) {
   };
   const writeAtomic = (target, obj) => {
     fs.mkdirSync(path.dirname(target), { recursive: true });
-    const tmp = `${target}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(obj, null, 2), 'utf8');
-    fs.renameSync(tmp, target);
+    writeFileAtomic(target, JSON.stringify(obj, null, 2));
   };
   const cleanName = (n) => (typeof n === 'string' && n.trim() ? n.trim().slice(0, MAX_NAME) : 'Ny samtale');
 
