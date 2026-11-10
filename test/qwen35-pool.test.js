@@ -95,6 +95,28 @@ for (const [name, opts] of FILES) {
   });
 }
 
+test('qwen35 pool with 6 and 7 workers (the target laptop has 6; key / value / KV heads split unevenly, some workers own few): same as the reference', async () => {
+  const { g } = tinyQwen35File({ quant: 'q8_0', seed: 15, nK: 4, nV: 8, nHead: 8, nHeadKv: 4, nEmbd: 96, nFF: 128 });
+  const ref = new RefModel(g, { ctx: 64 });
+  const want = TOKS.map((t) => Float32Array.from(ref.forward(t)));
+  for (const workers of [6, 7]) {
+    for (const kernels of ['js', 'wasm']) {
+      const pool = await PoolModel.create(g, { ctx: 64, workers, kernels });
+      try {
+        for (let i = 0; i < TOKS.length; i++) {
+          const got = await pool.forward(TOKS[i]);
+          if (kernels === 'js') assert.deepEqual([...got], [...want[i]], `workers=${workers} pos=${i}`);
+          else assert.ok(maxAbs(got, want[i]) <= 1e-4 * Math.max(...want[i].map(Math.abs)), `wasm workers=${workers} pos=${i}`);
+        }
+        // batched prefill on the same configuration
+        pool.reset();
+        const l = await pool.forwardBatch(TOKS.slice(0, 7));
+        assert.ok(maxAbs(l, want[6]) <= 1e-4 * Math.max(...want[6].map(Math.abs)));
+      } finally { await pool.close(); }
+    }
+  }
+});
+
 test('qwen35 pool, WASM kernels on a Q4_0 file: the same up to int8-activation rounding flips (cosine > 0.99, same argmax at the first positions)', async () => {
   const { g } = tinyQwen35File({ quant: 'q4_0', seed: 5 });
   const ref = new RefModel(g, { ctx: 64 });
@@ -406,6 +428,27 @@ test('loadModel(qwen35): pool by default (SIMD kernels, f16 KV, several threads)
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   } finally { await ref.close(); await poolJs.close(); await poolSimd.close(); }
   assert.ok(modelConfig(ref.g).hybrid);
+});
+
+test('tools/make-synth-qwen35.js writes a loadable file with the real tensor set; the pool runs it (shape check of the benchmark input)', async () => {
+  const { writeSynthQwen35 } = await import('../tools/make-synth-qwen35.js');
+  const { readGGUF } = await import('../src/gguf/reader.js');
+  const { expectedTensors } = await import('../src/model/forward-qwen35.js');
+  const f = path.join(os.tmpdir(), `zerollm-synth-${process.pid}.gguf`);
+  try {
+    const r = writeSynthQwen35({ outFile: f, layers: 4, vocab: 512 });
+    assert.ok(r.tensors > 40);
+    const g = readGGUF(f);
+    const cfg = modelConfig(g);
+    assert.deepEqual([cfg.nLayer, cfg.hybrid, cfg.vocabSize, cfg.nAttnLayers], [4, true, 512, 1]);
+    assert.deepEqual(g.tensors.map((t) => t.name).sort(), expectedTensors(cfg).map(([n]) => n).sort());
+    const pool = await PoolModel.create(g, { ctx: 32, workers: 3, kernels: 'wasm' });
+    try {
+      const l = await pool.forwardBatch([1, 2, 3, 4, 5]);
+      assert.equal(l.length, 512);
+      assert.ok(l.every(Number.isFinite));
+    } finally { await pool.close(); }
+  } finally { fs.rmSync(f, { force: true }); }
 });
 
 test('splitRange sanity for hybrid shards is the one used everywhere', () => {

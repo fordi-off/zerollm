@@ -138,7 +138,7 @@ export function checkTensors(g, cfg) {
     if (!t) problems.push(`missing ${name}`);
     else if (t.dims.length !== dims.length || t.dims.some((d, i) => d !== dims[i])) problems.push(`${name} has dims [${t.dims}], expected [${dims}]`);
   }
-  if (problems.length) throw new Error(`this ${cfg.arch} file does not match the layout the reference path expects: ${problems.slice(0, 8).join('; ')}${problems.length > 8 ? `; ... (${problems.length} problems)` : ''}`);
+  if (problems.length) throw new Error(`this ${cfg.arch} file does not match the layout the engine expects: ${problems.slice(0, 8).join('; ')}${problems.length > 8 ? `; ... (${problems.length} problems)` : ''}`);
 }
 
 /**

@@ -25,7 +25,7 @@ const { id, n, cfg, tensors, path, ctx, shared, spin, kernels, maxBatch, logitsB
 const kvF16 = kvType === 'f16';
 // opt-in profile of worker 0 (ZEROLLM_PROFILE=1): where does a token's time go?
 const prof = process.env.ZEROLLM_PROFILE === '1' && id === 0;
-const PT = { kernel: 0, quant: 0, attn: 0, ssm: 0, barrier: 0, total: 0, tokens: 0, batches: 0 };
+const PT = { kernel: 0, quant: 0, attn: 0, conv: 0, delta: 0, barrier: 0, total: 0, tokens: 0, batches: 0 };
 
 /** Fatal errors: tell the pool, then stop. */
 function fail(e) {
@@ -382,6 +382,8 @@ function main() {
     }
     bar.wait();
 
+    const td = prof ? performance.now() : 0;
+    if (prof) PT.conv += td - tr;
     const ssmL = ssmAll.subarray(ri * ssmSize, (ri + 1) * ssmSize);
     for (let hv = vh0; hv < vh1; hv++) {
       const hl = hv - vh0;
@@ -395,7 +397,7 @@ function main() {
         gatedRmsNormHead(att, oo, zP, b * nOwnV * dv + hl * dv, L.ssmNorm, dv, rmsEps);
       }
     }
-    if (prof) PT.ssm += performance.now() - tr;
+    if (prof) PT.delta += performance.now() - td;
     bar.wait();
 
     prep(att, B, inner);
@@ -478,7 +480,7 @@ function main() {
   }
   if (prof && PT.tokens) {
     const per = (v) => (v / PT.tokens).toFixed(2);
-    const other = PT.total - PT.kernel - PT.quant - PT.attn - PT.ssm - PT.barrier;
-    process.stderr.write(`[profile worker 0, ms/token over ${PT.tokens} tokens in ${PT.batches} passes] total ${per(PT.total)} | matmul kernels ${per(PT.kernel)} | act quantization ${per(PT.quant)} | attention+rope ${per(PT.attn)} | conv+delta rule ${per(PT.ssm)} | barrier waits ${per(PT.barrier)} | other (norms, residuals, swiglu, copies) ${per(other)}\n`);
+    const other = PT.total - PT.kernel - PT.quant - PT.attn - PT.conv - PT.delta - PT.barrier;
+    process.stderr.write(`[profile worker 0, ms/token over ${PT.tokens} tokens in ${PT.batches} passes] total ${per(PT.total)} | matmul kernels ${per(PT.kernel)} | act quantization ${per(PT.quant)} | attention+rope ${per(PT.attn)} | conv+l2norm ${per(PT.conv)} | delta rule+gated norm ${per(PT.delta)} | barrier waits ${per(PT.barrier)} | other (norms, residuals, swiglu, copies) ${per(other)}\n`);
   }
 }

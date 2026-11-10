@@ -414,6 +414,27 @@ test('CLI: run --threads 1 --kernels js --show-prompt on a qwen35 file (thinking
   assert.ok(on.stderr.includes('<|im_start|>assistant\\n<think>\\n"]'));
 });
 
+test('CLI on the worker pool (the default path now): run prints the opening <think> of a thinking reply, chat reuses the state, info says so', () => {
+  const { path: p } = tiny({ quant: 'q8_0', seed: 3 });
+  const on = cli(['run', p, '-p', 'Hei', '--n', '4', '--threads', '2', '--kernels', 'js', '--temp', '0', '--think']);
+  assert.equal(on.status, 0, on.stderr);
+  assert.match(on.stderr, /2 threads, js kernels/);
+  assert.ok(on.stdout.startsWith('<think>\n'), JSON.stringify(on.stdout));
+  const off = cli(['run', p, '-p', 'Hei', '--n', '4', '--threads', '2', '--temp', '0']);
+  assert.equal(off.status, 0, off.stderr);
+  assert.match(off.stderr, /wasm-simd kernels/);
+  assert.ok(!off.stdout.startsWith('<think>'));
+  const r = cli(['chat', p, '--n', '4', '--temp', '0', '--threads', '3'], 'hei\nog du?\n/exit\n');
+  assert.equal(r.status, 0, r.stderr);
+  const cached = [...r.stderr.matchAll(/\((\d+) cached\)/g)].map((m) => Number(m[1]));
+  assert.ok(cached.length === 1 && cached[0] > 5, `second turn cached tokens: ${cached}`);
+  // greedy text of the pool with JS kernels equals the reference path's
+  const ref = cli(['run', p, '-p', 'Hei', '--n', '6', '--threads', '1', '--kernels', 'js', '--temp', '0']);
+  const pool = cli(['run', p, '-p', 'Hei', '--n', '6', '--threads', '3', '--kernels', 'js', '--temp', '0']);
+  assert.equal(ref.status, 0, ref.stderr); assert.equal(pool.status, 0, pool.stderr);
+  assert.equal(pool.stdout, ref.stdout);
+});
+
 test('CLI: chat session on a qwen35 file keeps the conversation (second turn reuses the cache)', () => {
   const { path: p } = tiny({ quant: 'q8_0', seed: 3 });
   const r = cli(['chat', p, '--n', '4', '--temp', '0', '--threads', '1', '--kernels', 'js'], 'hei\nog du?\n/exit\n');
