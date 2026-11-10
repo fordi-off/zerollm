@@ -21,6 +21,29 @@ export function detectTemplate(arch, jinja, tok) {
   return 'raw';
 }
 
+/**
+ * How an architecture's reasoning ("thinking") switch works:
+ *   'model-opens'  Qwen3: with thinking ON the prompt ends at the assistant header and the model writes `<think>` itself;
+ *   'prompt-opens' Qwen3.5: with thinking ON the generation prompt already ends with `<think>\n`, so the reply starts with the
+ *                  reasoning (the model only writes `</think>`); with thinking OFF both end with an empty think block;
+ *   null           no thinking mode (the switch is ignored).
+ * @param {string} arch general.architecture @returns {'model-opens'|'prompt-opens'|null}
+ */
+export function thinkingMode(arch) {
+  if (arch === 'qwen3') return 'model-opens';
+  if (arch === 'qwen35') return 'prompt-opens';
+  return null;
+}
+
+/**
+ * Text that belongs in front of the generated reply so that it always reads `<think>reasoning</think>answer` (what the app
+ * and the CLI show and what the history keeps): the opening tag the PROMPT already contains for 'prompt-opens' models, else ''.
+ * @param {string} arch @param {boolean} think
+ */
+export function thinkOpening(arch, think) {
+  return think && thinkingMode(arch) === 'prompt-opens' ? '<think>\n' : '';
+}
+
 const stripThink = (s) => s.replace(/<think>[\s\S]*?<\/think>\s*/g, '');
 
 /** Python's str.rstrip('\n') / lstrip('\n') as the Qwen3.5 Jinja template uses them. */

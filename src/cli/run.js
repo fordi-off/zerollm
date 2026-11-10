@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { parseArgs, num } from '../util/args.js';
-import { encodeChat } from '../tokenizer/chat-templates.js';
+import { encodeChat, thinkOpening } from '../tokenizer/chat-templates.js';
 import { loadEngine, samplerFromFlags, templateOptions, installAbort, streamReply, formatStats, usePrefixCache, describePrompt, SAMPLER_HELP, DRAFT_HELP, loadedLine } from './common.js';
 
 export const help = `run <model.gguf> -p "prompt" [--n 256] [--system "..."] [--ctx 2048] [--threads N] [--kernels auto|wasm|js] [--kv f32|f16] [--raw] [--think|--no-think] [--stop "str"] [--no-cache] [--cache-dir DIR] [--show-prompt] ${SAMPLER_HELP} ${DRAFT_HELP}`;
@@ -36,7 +36,7 @@ export async function run(argv) {
     stats.prefixCache = await usePrefixCache(eng, flags, sys, ids, templateOptions(eng, flags), signal);
   }
   const stops = typeof flags.stop === 'string' ? [flags.stop] : [];
-  await streamReply(eng, ids, { sample: samplerFromFlags(flags), maxTokens: num(flags.n, 256), stops, signal, stats });
+  await streamReply(eng, ids, { sample: samplerFromFlags(flags), maxTokens: num(flags.n, 256), stops, signal, stats, opening: eng.kind === 'raw' ? '' : thinkOpening(eng.cfg.arch, flags.think === true) });
   dispose();
   process.stdout.write('\n');
   process.stderr.write(`${formatStats(eng, stats)}\n`);

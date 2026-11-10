@@ -117,7 +117,7 @@
   "shortcuts": "Hurtigtaster",
   "shortcutsText": "Enter sender · Shift+Enter ny linje · Esc stopper svaret · Alt+N ny samtale · Alt+B sidepanel · / åpner kommandoer",
   "thinkToggle": "Tenk først",
-  "thinkHint": "Modellen resonnerer før den svarer. Bedre på regning og logikk, men mye tregere (flere minutter). Kun for Qwen3-modeller.",
+  "thinkHint": "Modellen resonnerer før den svarer. Bedre på regning og logikk, men mye tregere (flere minutter). Kun for Qwen3- og Qwen3.5-modeller.",
   "thinkingNow": "Tenker… {time}",
   "thoughtFor": "Tenkte i {time}",
   "thoughtDone": "Tenkte",
