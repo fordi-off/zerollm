@@ -127,5 +127,7 @@
   "docTooBigPage": "{name} er for stor (over 2 millioner tegn).",
   "docEmpty": "filen er tom",
   "preloadLabel": "Last siste modell ved oppstart",
-  "preloadHint": "Modellen lastes i bakgrunnen når appen starter, så første melding slipper å vente. Bruker minne så lenge appen er åpen."
+  "preloadHint": "Modellen lastes i bakgrunnen når appen starter, så første melding slipper å vente. Bruker minne så lenge appen er åpen.",
+  "autoTitlesLabel": "Automatiske samtaletitler",
+  "autoTitlesHint": "Gir samtalen en kort tittel i sidepanelet etter det første svaret (du kan alltid døpe den om selv). Med en egen liten modell (se «Modell for oppsummering») skjer det i bakgrunnen. Uten den skriver samtalemodellen tittelen: noen sekunder ekstra maskinarbeid rett etter svaret, som avbrytes med en gang du sender en ny melding. Neste svar blir ikke tregere av det."
 }

@@ -127,5 +127,7 @@
   "docTooBigPage": "{name} is too big (over 2 million characters).",
   "docEmpty": "the file is empty",
   "preloadLabel": "Load the last model at start-up",
-  "preloadHint": "The model loads in the background when the app starts, so the first message does not wait. Uses memory while the app is open."
+  "preloadHint": "The model loads in the background when the app starts, so the first message does not wait. Uses memory while the app is open.",
+  "autoTitlesLabel": "Automatic chat titles",
+  "autoTitlesHint": "Gives the chat a short title in the sidebar after the first reply (you can always rename it yourself). With a separate small model (see \"Summary model\") this happens in the background. Without one, the chat model writes the title: a few seconds of extra processing right after the reply, stopped the moment you send another message. The next reply does not get slower because of it."
 }

@@ -145,6 +145,8 @@ function renderPerformance(st) {
   util.addEventListener('change', async () => { await call('set_utility_model', { filename: util.value || null }); });
   const pre = el('input'); pre.type = 'checkbox'; pre.checked = st.settings.preload !== false; pre.setAttribute('aria-label', t('preloadLabel'));
   pre.addEventListener('change', async () => { await call('set_preload', { value: pre.checked }); });
+  const titles = el('input'); titles.type = 'checkbox'; titles.checked = st.settings.autoTitles !== false; titles.setAttribute('aria-label', t('autoTitlesLabel'));
+  titles.addEventListener('change', async () => { await call('set_auto_titles', { value: titles.checked }); await hooks.refreshState(); });
   const lang = el('select'); lang.setAttribute('aria-label', t('language'));
   for (const [v, n] of [['nb', 'Norsk (bokmål)'], ['en', 'English']]) { const o = el('option', '', n); o.value = v; o.selected = v === st.language; lang.append(o); }
   lang.addEventListener('change', async () => { await hooks.applyLanguage(lang.value); await render(); });
@@ -159,6 +161,7 @@ function renderPerformance(st) {
     row(t('threads'), `${t('threadsHint')} (max ${st.settings.maxThreads})`, th),
     row(t('utilityModel'), t('utilityHint'), util),
     row(t('preloadLabel'), t('preloadHint'), pre),
+    row(t('autoTitlesLabel'), t('autoTitlesHint'), titles),
     row(t('language'), '', lang),
     row(t('theme'), '', theme),
     row(t('reset'), '', reset),

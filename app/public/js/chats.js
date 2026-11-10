@@ -15,6 +15,14 @@ function group(updatedAt) {
   return days <= 0 ? 'today' : days === 1 ? 'yesterday' : 'earlier';
 }
 
+/** A chat got a new name from the server (automatic title): change it in the list without a reload. Does not disturb a rename in progress. */
+export function setChatName(id, name) {
+  const c = cache.find((x) => x.id === id);
+  if (!c) { refreshChatList(); return; } // not in the list yet (the first save may still be on its way)
+  c.name = name;
+  if (!document.querySelector('.chat-rename')) paint();
+}
+
 export async function refreshChatList() {
   try { cache = await call('list_chats'); } catch { cache = []; }
   paint();

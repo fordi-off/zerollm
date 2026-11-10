@@ -5,7 +5,7 @@ import { initSettings, openSettings, onDownloadEvent } from './settings.js';
 import { initCommandMenu, loadCommands, extractCommands, openAll } from './commands.js';
 import { splitThinking, fmtDuration } from './thinking.js';
 import { initDocuments, refreshChips, getPending, takePending, clearPending } from './documents.js';
-import { initChatList, refreshChatList, setActive } from './chats.js';
+import { initChatList, refreshChatList, setActive, setChatName } from './chats.js';
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
@@ -298,7 +298,7 @@ async function persist() {
   if (!S.chatName) S.chatName = (msgs.find((m) => m.role === 'user')?.content ?? '').replace(/\s+/g, ' ').trim().slice(0, 45) || t('newChat');
   try {
     const r = await call('save_chat', { id: S.chatId, name: S.chatName, model: S.model, messages: msgs });
-    if (!S.chatId || S.chatId === r.id) { S.chatId = r.id; setActive(r.id); }
+    if (!S.chatId || S.chatId === r.id) { S.chatId = r.id; S.chatName = r.name ?? S.chatName; setActive(r.id); } // the server may have kept a newer (automatic) title
     await refreshChatList();
   } catch (e) { toast(`${t('error')}: ${e.message}`); }
 }
@@ -376,6 +376,12 @@ const events = {
     if (d.contextMax) setMeter(Math.min(d.contextMax, d.contextUsed + (d.generated ?? 0)), d.contextMax);
     S.loaded = d.model;
     persist();
+  },
+  /** The server wrote an automatic title for a chat (also for a chat that is not the open one, and when the page was reloaded meanwhile). */
+  title(d) {
+    if (!d?.chatId || typeof d.name !== 'string') return;
+    if (d.chatId === S.chatId) S.chatName = d.name;
+    setChatName(d.chatId, d.name);
   },
   error(d) {
     if (!ours(d)) return;
