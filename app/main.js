@@ -19,7 +19,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_DATA_DIR = path.resolve(here, '..'); // the zerollm folder itself (models/, chats/ ... live next to app/), wherever the command is run from
 
 /** Start everything. Returns handles (used by the tests and by main()). */
-export async function startApp({ dataDir, port = 0, quiet = false, catalog, retryDelayMs } = {}) {
+export async function startApp({ dataDir, port = 0, quiet = false, catalog, retryDelayMs, preload = true } = {}) {
   const paths = resolvePaths(dataDir ?? DEFAULT_DATA_DIR);
   ensureDirs(paths);
   const log = createLogger(paths, { quiet });
@@ -36,6 +36,7 @@ export async function startApp({ dataDir, port = 0, quiet = false, catalog, retr
   holder.server = app;
   const actualPort = await app.listen(port);
   const url = `http://127.0.0.1:${actualPort}/?t=${token}`;
+  if (preload) api.preload().catch(() => {});
   return {
     paths, log, token, port: actualPort, url, app, api, host,
     async close() { await api.shutdown(); await app.close(); },

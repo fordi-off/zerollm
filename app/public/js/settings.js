@@ -32,7 +32,7 @@ export async function openSettings(tab) {
 async function render() {
   const st = await call('state');
   apply($('settings'));
-  renderModels(st); renderPerformance(st); await renderSkills(); await renderDocuments(st); await renderDiagnostics();
+  renderModels(st); renderPerformance(st); await renderSkills(); await renderDiagnostics();
 }
 
 const fmtSpeed = (b) => `${(b / 1e6).toFixed(1)} MB/s`;
@@ -143,6 +143,8 @@ function renderPerformance(st) {
   { const o = el('option', '', t('utilityAuto')); o.value = ''; util.append(o); }
   for (const m of st.models.filter((x) => x.supported)) { const o = el('option', '', m.displayName); o.value = m.filename; o.selected = m.filename === st.settings.utilityModel; util.append(o); }
   util.addEventListener('change', async () => { await call('set_utility_model', { filename: util.value || null }); });
+  const pre = el('input'); pre.type = 'checkbox'; pre.checked = st.settings.preload !== false; pre.setAttribute('aria-label', t('preloadLabel'));
+  pre.addEventListener('change', async () => { await call('set_preload', { value: pre.checked }); });
   const lang = el('select'); lang.setAttribute('aria-label', t('language'));
   for (const [v, n] of [['nb', 'Norsk (bokmål)'], ['en', 'English']]) { const o = el('option', '', n); o.value = v; o.selected = v === st.language; lang.append(o); }
   lang.addEventListener('change', async () => { await hooks.applyLanguage(lang.value); await render(); });
@@ -156,6 +158,7 @@ function renderPerformance(st) {
     row(t('contextWindow'), t('contextHint'), ctx),
     row(t('threads'), `${t('threadsHint')} (max ${st.settings.maxThreads})`, th),
     row(t('utilityModel'), t('utilityHint'), util),
+    row(t('preloadLabel'), t('preloadHint'), pre),
     row(t('language'), '', lang),
     row(t('theme'), '', theme),
     row(t('reset'), '', reset),
@@ -190,65 +193,6 @@ async function renderSkills() {
     catch (ex) { err.textContent = ex.message; err.hidden = false; }
   });
   box.append(form);
-}
-
-// ---- documents tab: the shared library
-const progressLabels = new Map(); // docId -> element
-const indexLabels = new Map(); // docId -> element
-export function onDocIndex(d) {
-  if (d.state === 'idle' || d.state === 'error') { if ($('settings')?.open) renderDocuments(lastState); return; }
-  const e = indexLabels.get(d.docId); if (e) e.textContent = t('indexing', { done: d.done, total: d.total });
-}
-let lastState = null;
-export function onDocProgress(d) { const e = progressLabels.get(d.docId); if (e) e.textContent = t('summarizingDoc', { done: d.done, total: d.total }); }
-
-async function renderDocuments(st) {
-  lastState = st; indexLabels.clear();
-  const box = $('tab-documents'); box.textContent = '';
-  box.append(el('p', 'hint', t('docsHint')));
-  const n = el('input'); n.type = 'number'; n.min = 1; n.max = 10; n.value = st.settings.docChunks; n.style.width = '70px'; n.setAttribute('aria-label', t('docChunksSetting'));
-  n.addEventListener('change', async () => { try { await call('set_doc_chunks', { value: Number(n.value) }); } catch { /* invalid number: ignored */ } });
-  box.append(row(t('docChunksSetting'), t('docChunksHint'), n));
-  const es = await call('embedding_status');
-  const sm = el('div', 'row'); const sl = el('div'); sl.append(el('div', 'lbl', t('searchModel')), el('div', 'hint', es.file ? t('searchModelOn', { file: es.file }) : t('searchModelOff')));
-  sm.append(sl);
-  if (es.file && es.missing > 0) { const b = el('button', 'btn primary', t('indexNow')); b.type = 'button'; b.disabled = es.indexing; b.addEventListener('click', async () => { await call('index_documents'); await renderDocuments(st); }); sm.append(b); }
-  box.append(sm);
-  const docs = await call('document_library');
-  progressLabels.clear();
-  if (docs.length === 0) { box.append(el('p', 'notice', t('noDocs'))); return; }
-  box.append(el('h3', '', t('docLibrary')));
-  const chatId = hooks.getChatId();
-  const attached = new Set(chatId ? (await call('list_documents', { chatId })).map((d) => d.id) : []);
-  for (const d of docs) {
-    const r = el('div', 'model-row'); const top = el('div', 'top');
-    top.append(el('strong', 'dl-name', d.filename));
-    const tools = el('div', 'model-tools');
-    if (chatId && !attached.has(d.id)) {
-      const add = el('button', 'btn primary', t('addToChat')); add.type = 'button';
-      add.addEventListener('click', async () => { await call('attach_document', { chatId, docId: d.id }); await hooks.refreshDocs(); await renderDocuments(st); });
-      tools.append(add);
-    }
-    const sum = el('button', 'btn', t('summarizeDoc')); sum.type = 'button'; const status = el('span', 'hint');
-    sum.addEventListener('click', async () => {
-      sum.disabled = true; progressLabels.set(d.id, status); status.textContent = t('summarizingDoc', { done: 0, total: '?' });
-      try { await call('summarize_document', { docId: d.id, model: hooks.getModel() }); } catch (e) { status.textContent = e.message; sum.disabled = false; return; }
-      await renderDocuments(st);
-    });
-    const show = el('button', 'btn', t('showText')); show.type = 'button';
-    const pv = el('div', 'doc-preview'); pv.hidden = true;
-    show.addEventListener('click', async () => { if (pv.hidden) { const p = await call('preview_document', { docId: d.id }); pv.textContent = p?.fullText.slice(0, 20000) ?? ''; } pv.hidden = !pv.hidden; });
-    const del = el('button', 'btn', t('deleteSkill')); del.type = 'button'; let armed = null;
-    del.addEventListener('click', async () => {
-      if (!armed) { del.textContent = t('docDeleteConfirm'); del.classList.add('danger'); armed = setTimeout(() => { armed = null; del.textContent = t('deleteSkill'); del.classList.remove('danger'); }, 3000); return; }
-      clearTimeout(armed); await call('delete_document', { docId: d.id }); await hooks.refreshDocs(); await renderDocuments(st);
-    });
-    tools.append(sum, show, del, status);
-    const idx = el('span', '', ''); idx.textContent = d.embedded >= d.chunks && d.chunks > 0 ? t('indexed', { done: d.embedded, total: d.chunks }) : (es.file ? t('indexed', { done: d.embedded, total: d.chunks }) : t('noIndex')); indexLabels.set(d.id, idx);
-    r.append(top, el('div', 'sub', `${t('docParts', { n: d.chunks })} · `), tools); r.querySelector('.sub').append(idx);
-    if (d.summary) r.append(el('div', 'doc-summary-text', d.summary));
-    r.append(pv); box.append(r);
-  }
 }
 
 async function renderDiagnostics() {

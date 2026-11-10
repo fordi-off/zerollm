@@ -104,21 +104,16 @@ export function chunkForSummary(chunk, maxChars = 7000) {
   return passes;
 }
 
-// --- document context. It is stored WITH the user message it was retrieved for (`context`) and rendered in front of that message
-// for the rest of the conversation, so the prompt only ever grows at the end and the model never re-reads old turns. Chunks that
-// are already somewhere earlier in the conversation are not added again.
-export const RAG_PREFIX =
-  "Answer the question using the documents below when they are relevant, in the language of the question. " +
-  "If the answer is not in them, say so instead of guessing. Do not repeat or quote the documents at length.";
+// --- attached documents. The text of a file the user attaches is stored WITH the message it was attached to (`context`: [{filename, text}])
+// and rendered in front of that message for the rest of the conversation: the prompt only ever grows at the end, so the model reads the
+// document once and keeps it in memory (its KV cache) for every follow-up question.
+export const DOC_PREFIX =
+  'The user attached the document(s) below. Use them to answer the question that follows, in the language of the question. ' +
+  'If the answer is not in them, say so instead of guessing.';
 
-const words = (text, n) => { const p = String(text).split(/\s+/); return p.slice(0, n).join(' ') + (p.length > n ? '...' : ''); };
-
-/** One user message with its stored document context in front of the question (unchanged text for messages without context). */
+/** One user message with its attached documents in front of the question (unchanged text for messages without documents). */
 export function renderWithContext(content, context) {
   if (!context?.length) return content;
   const block = context.map((e) => `<document name="${String(e.filename).replace(/"/g, "'")}">\n${e.text}\n</document>`).join('\n');
-  return `${RAG_PREFIX}\n\n<documents>\n${block}\n</documents>\n\nQuestion: ${content}`;
+  return `${DOC_PREFIX}\n\n<documents>\n${block}\n</documents>\n\nQuestion: ${content}`;
 }
-
-/** What the page shows under a reply: which excerpts it was based on. */
-export const sourcesOf = (excerpts) => (excerpts ?? []).map((e) => ({ filename: e.filename, snippet: words(e.text, 40), score: e.score }));

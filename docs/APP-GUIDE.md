@@ -28,12 +28,12 @@ Har du ingen modell, vises «Last ned en modell». Anbefalt for norsk: **NB Llam
 ### Bruk
 - **Enter** sender, **Shift+Enter** ny linje, **Esc** stopper svaret, **Alt+N** ny samtale, **Alt+B** sidepanel, **/** åpner kommandoer.
 - **Kommandoer** (`/humanize`, `/shorten`, `/simple`, `/norwegian`, `/proofread`, `/bokmal`, `/nynorsk`, `/tutor`) gjelder ett svar. Egne kommandoer legges til under Innstillinger → Kommandoer, eller som `.md`-filer i `skills`.
-- **Dokumenter**: trykk binders-knappen eller dra en tekstfil (.txt, .md, .csv …) inn i vinduet, og still spørsmål om innholdet. Under svaret vises «Kilder».
-- Samtaler lagres automatisk i `chats`; dokumenter i `documents`. Formatet er det samme som i Skibeti37, så mappene kan deles.
+- **Vedlegg**: trykk binders-knappen eller dra en tekstfil (.txt, .md, .csv …) inn i vinduet. Hele teksten sendes med neste melding, og modellen husker den resten av samtalen. Teksten må få plass i kontekstvinduet (rundt 4 900 tokens ved 8192); er den for lang får du beskjed, og du kan bruke et kortere utdrag eller øke kontekstvinduet under Ytelse.
+- Samtaler lagres automatisk i `chats` i samme format som Skibeti37.
 - Lange samtaler oppsummeres automatisk når kontekstvinduet nærmer seg fullt.
 
 ### Hastighet og minne
-Første svar etter oppstart tar tid (modellen lastes, og systemprompten leses én gang og lagres i `cache`). Å lese lange tekster er tregt på en 8B-modell (omtrent 7 tokens/sekund på en vanlig bærbar PC), så få utdrag og korte dokumenter gir raskere svar. Kontekstmåleren under meldingsfeltet viser hvor stor prompten er. Mindre modeller er raskere. Øk ikke kontekstvinduet mer enn nødvendig: det bruker mer minne.
+Første svar etter oppstart tar tid (modellen lastes, og systemprompten leses én gang og lagres i `cache`). Å lese lange tekster er tregt på en 8B-modell (omtrent 7 tokens/sekund på en vanlig bærbar PC), så korte vedlegg gir raskere første svar (selve vedlegget leses bare én gang). Modellen lastes i bakgrunnen når appen starter (kan slås av under Ytelse). Kontekstmåleren under meldingsfeltet viser hvor stor prompten er. Mindre modeller er raskere. Øk ikke kontekstvinduet mer enn nødvendig: det bruker mer minne.
 
 ### Når noe ikke virker
 Innstillinger → **Diagnose** viser system, funksjoner, modeller og siste loggfil-linjer. «Kopier rapport» gir deg alt du trenger å sende. Loggen ligger i `app.log` i datamappen.
@@ -49,10 +49,10 @@ Innstillinger → **Diagnose** viser system, funksjoner, modeller og siste loggf
 With no model you get a "Download a model" card. Recommended for Norwegian: NB Llama 3.1 8B (~5 GB, ~6–7 GB free RAM). Smaller PC: Llama 3.2 3B/1B or Qwen3 4B. Supported architectures: llama (3.x), qwen2, qwen3.
 
 ### Use
-Enter sends, Shift+Enter newline, Esc stops, Alt+N new chat, Alt+B sidebar, `/` opens commands. Slash commands apply to one reply; documents (paperclip or drag-and-drop) are searched by keywords and shown as sources; chats and documents are stored in Skibeti37's format; long chats are summarized automatically.
+Enter sends, Shift+Enter newline, Esc stops, Alt+N new chat, Alt+B sidebar, `/` opens commands. Slash commands apply to one reply; an attached text file (paperclip or drag-and-drop) goes into the message whole and stays in the model's memory for the rest of the chat; chats are stored in Skibeti37's format; long chats are summarized automatically.
 
 ### Speed
-Prompt reading is the slow part on large models (about 7 tokens/s for an 8B model on an ordinary laptop), so keep documents small and excerpts few. The first reply after a start also loads the model and caches the system prompt in `cache/`.
+Prompt reading is the slow part on large models (about 7 tokens/s for an 8B model on an ordinary laptop), so keep attachments short (the model reads an attachment only once). The first reply after a start also loads the model and caches the system prompt in `cache/`.
 
 ### Troubleshooting
 Settings → Diagnostics shows system, features, models and the log tail; "Copy report" gives everything needed for a bug report. The log is `app.log` in the data folder.
@@ -64,7 +64,6 @@ zerollm/
   src/            motoren / the engine
   models/         .gguf-filer / model files
   chats/          samtaler / conversations (+ _context_summaries/)
-  documents/      dokumentbibliotek / document library
   skills/         kommandoer / slash commands (.md)
   cache/          lagrede systemprompt-tilstander / cached system-prompt states (can be deleted)
   config.json     innstillinger / settings

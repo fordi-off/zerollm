@@ -14,7 +14,6 @@ export function resolvePaths(root) {
     root: abs,
     modelsDir: path.join(abs, 'models'),
     chatsDir: path.join(abs, 'chats'),
-    docsDir: path.join(abs, 'documents'),
     skillsDir: path.join(abs, 'skills'),
     configPath: path.join(abs, 'config.json'),
     logPath: path.join(abs, 'app.log'),
@@ -24,7 +23,7 @@ export function resolvePaths(root) {
 }
 
 export function defaultConfig() {
-  return { context_window: DEFAULT_CONTEXT, n_threads: defaultThreads(), utility_model: null, doc_chunks: 4, last_model: null, language: 'nb', models: {} };
+  return { context_window: DEFAULT_CONTEXT, n_threads: defaultThreads(), utility_model: null, preload_model: true, last_model: null, language: 'nb', models: {} };
 }
 
 /** Read config.json (creating it with defaults when missing). Unknown keys are preserved. */
@@ -46,7 +45,7 @@ export function saveConfig(paths, cfg) {
 
 /** Create the folders the app writes to. */
 export function ensureDirs(paths) {
-  for (const d of [paths.modelsDir, paths.chatsDir, paths.docsDir, paths.skillsDir]) fs.mkdirSync(d, { recursive: true });
+  for (const d of [paths.modelsDir, paths.chatsDir, paths.skillsDir]) fs.mkdirSync(d, { recursive: true });
 }
 
 /** Tiny file logger (also echoes to the console unless quiet). */

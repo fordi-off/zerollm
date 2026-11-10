@@ -1,15 +1,22 @@
-// Documents in the open conversation: attach by button or drag-and-drop, chips with on/off and remove, sources under replies.
-import { call } from './api.js';
+// Attached files. The text of each file goes into the NEXT message whole (stored with the message, see app/chat-core.js): the model reads it
+// once and keeps it in memory for every follow-up question. Attach with the paperclip or by dragging a text file into the window.
 import { t } from './i18n.js';
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
-const TEXT_EXT = /\.(txt|md|markdown|csv|tsv|json|log|html?|xml|ya?ml|srt|rst|tex)$/i;
-const MAX_BYTES = 20 * 1024 * 1024;
+const TEXT_EXT = /\.(txt|md|markdown|csv|tsv|json|log|html?|xml|ya?ml|srt|rst|tex|js|mjs|ts|py|java|c|h|cpp|cs|go|rs|sql|sh|ini|toml)$/i;
+const MAX_CHARS = 2_000_000; // hard cap in the page; whether it FITS the context window is checked against the real token count before sending
 
 let hooks = null;
+/** @type {{filename: string, text: string}[]} files waiting for the next message */
+let pending = [];
+
+export const getPending = () => pending.map((p) => ({ ...p }));
+export function takePending() { const p = pending; pending = []; refreshChips(); return p; }
+export function clearPending() { pending = []; refreshChips(); }
+
 export function initDocuments(h) {
-  hooks = h; // {getChatId, ensureChat, toast}
+  hooks = h; // {toast, onChange}
   $('btn-attach').addEventListener('click', () => $('file-input').click());
   $('file-input').addEventListener('change', async (e) => { await addFiles([...e.target.files]); e.target.value = ''; });
   let depth = 0;
@@ -21,43 +28,29 @@ export function initDocuments(h) {
 }
 
 export async function addFiles(files) {
-  if (hooks.isLocked?.()) { hooks.toast(t('indexingBlocked')); return; }
   for (const f of files) {
     if (!TEXT_EXT.test(f.name) && !(f.type || '').startsWith('text/')) { hooks.toast(`${t('unsupportedFile')}${f.name}`); continue; }
-    if (f.size > MAX_BYTES) { hooks.toast(`${f.name}: >20 MB`); continue; }
     try {
-      const chatId = await hooks.ensureChat();
-      const r = await call('add_document', { chatId, filename: f.name, content: await f.text() });
-      hooks.toast(`${t('docAdded', { name: f.name })} (${t('docParts', { n: r.chunks })})${r.notice ? ` ${r.notice}` : ''}`);
-      await refreshChips();
+      const text = await f.text();
+      if (text.includes('\u0000')) { hooks.toast(`${t('unsupportedFile')}${f.name}`); continue; }
+      if (text.length > MAX_CHARS) { hooks.toast(t('docTooBigPage', { name: f.name })); continue; }
+      if (!text.trim()) { hooks.toast(`${f.name}: ${t('docEmpty')}`); continue; }
+      pending = pending.filter((p) => p.filename !== f.name); pending.push({ filename: f.name, text });
+      hooks.toast(t('docAttached', { name: f.name }));
     } catch (e) { hooks.toast(e.message); }
   }
+  refreshChips();
 }
 
-export async function refreshChips() {
-  const box = $('doc-chips'); const chatId = hooks.getChatId();
-  let docs = []; if (chatId) { try { docs = await call('list_documents', { chatId }); } catch { docs = []; } }
-  box.textContent = ''; box.hidden = docs.length === 0;
-  for (const d of docs) {
-    const chip = el('span', `doc-chip${d.active ? '' : ' off'}`);
-    const nm = el('button', 'nm', d.filename); nm.type = 'button'; nm.title = t('toggleDoc');
-    nm.addEventListener('click', async () => { await call('toggle_document', { chatId, docId: d.id }); await refreshChips(); hooks.onChange?.(); });
+export function refreshChips() {
+  const box = $('doc-chips');
+  box.textContent = ''; box.hidden = pending.length === 0;
+  for (const d of pending) {
+    const chip = el('span', 'doc-chip');
+    const nm = el('span', 'nm', `${d.filename} · ${Math.max(1, Math.round(d.text.length / 1000))} k`);
     const x = el('button', 'x', '✕'); x.type = 'button'; x.title = t('detachDoc'); x.setAttribute('aria-label', t('detachDoc'));
-    x.addEventListener('click', async () => { await call('detach_document', { chatId, docId: d.id }); await refreshChips(); hooks.onChange?.(); });
+    x.addEventListener('click', () => { pending = pending.filter((p) => p !== d); refreshChips(); });
     chip.append(nm, x); box.append(chip);
   }
-  hooks.onChange?.();
-}
-
-/** "Kilder · n utdrag" under a reply. */
-export function renderSources(msgNode, sources) {
-  msgNode.querySelector('.doc-sources')?.remove();
-  if (!sources?.length) return;
-  const d = el('details', 'doc-sources'); d.append(el('summary', '', t('sourcesCount', { n: sources.length })));
-  for (const s of sources) {
-    const r = el('div', 'doc-source'); const b = el('b', '', s.filename); r.append(b);
-    if (typeof s.score === 'number' && s.score > 0) r.append(el('span', 'sc', s.score.toFixed(2)));
-    r.append(el('div', '', s.snippet)); d.append(r);
-  }
-  msgNode.append(d);
+  hooks?.onChange?.();
 }

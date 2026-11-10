@@ -1,10 +1,10 @@
 import { call, listen, hasToken } from './api.js';
 import { loadStrings, t, apply } from './i18n.js';
 import { renderMarkdown } from './markdown.js';
-import { initSettings, openSettings, onDownloadEvent, onDocProgress, onDocIndex } from './settings.js';
+import { initSettings, openSettings, onDownloadEvent } from './settings.js';
 import { initCommandMenu, loadCommands, extractCommands, openAll } from './commands.js';
 import { splitThinking, fmtDuration } from './thinking.js';
-import { initDocuments, refreshChips, renderSources } from './documents.js';
+import { initDocuments, refreshChips, getPending, takePending, clearPending } from './documents.js';
 import { initChatList, refreshChatList, setActive } from './chats.js';
 
 const $ = (id) => document.getElementById(id);
@@ -13,7 +13,7 @@ const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls)
 const S = {
   models: [], model: null, settings: null, messages: [], // messages: [{role, content, ...extras from the file, node, bubble}]
   think: (() => { try { return localStorage.getItem('zc-think') === '1'; } catch { return false; } })(), // "Tenk først" (Qwen3 only)
-  chatId: null, chatName: null, idleWaiters: [], indexing: null, // indexing: {filename, done, total} while a document is being indexed (chat is locked)
+  chatId: null, chatName: null, idleWaiters: [],
   busy: false, runId: null, waiting: false, current: null, // current: {msg, bubble, status, bar}
   stickBottom: true,
 };
@@ -81,7 +81,8 @@ function updateMeter() {
     if (!S.model || S.busy) return;
     const msgs = S.messages.map(apiMsg);
     const draft = extractCommands($('input').value.trim());
-    if (draft.text || draft.commands.length) msgs.push({ role: 'user', content: draft.text, ...(draft.commands.length ? { commands: draft.commands } : {}) });
+    const docs = getPending();
+    if (draft.text || draft.commands.length || docs.length) msgs.push({ role: 'user', content: draft.text, ...(draft.commands.length ? { commands: draft.commands } : {}), ...(docs.length ? { context: docs } : {}) });
     if (msgs.length === 0) { setMeter(0, S.settings?.contextWindow ?? 0); return; }
     try { const r = await call('estimate_context', { model: S.model, messages: msgs, chatId: S.chatId, think: thinkOn() }); setMeter(r.contextUsed, r.contextMax); } catch { /* model not readable */ }
   }, 350);
@@ -142,9 +143,11 @@ function schedulePaint(msg) {
 }
 function addCommandChips(msg) {
   msg.node.querySelector('.msg-cmds')?.remove();
-  if (!msg.commands?.length) return;
+  const files = [...new Set((msg.context ?? []).map((c) => c.filename))];
+  if (!msg.commands?.length && !files.length) return;
   const chips = el('div', 'msg-cmds');
-  for (const c of msg.commands) chips.append(el('span', 'cmd-chip', `/${c}`));
+  for (const f of files) chips.append(el('span', 'cmd-chip file-chip', `📎 ${f}`));
+  for (const c of msg.commands ?? []) chips.append(el('span', 'cmd-chip', `/${c}`));
   msg.bubble.after(chips);
 }
 
@@ -177,7 +180,7 @@ function startEdit(msg) {
     box.remove(); msg.bubble.hidden = false;
     for (const m of S.messages.slice(idx + 1)) m.node.remove();
     S.messages.length = idx + 1;
-    msg.content = text; delete msg.context; paintMessage(msg); addUserActions(msg);
+    msg.content = text; paintMessage(msg); addUserActions(msg);
     const reply = { role: 'assistant', content: '' }; S.messages.push(reply); buildMessageNode(reply); updateWelcome();
     await startRun();
   });
@@ -209,25 +212,9 @@ function showProgress(text, fraction) {
 }
 function hideProgress(c = S.current) { if (c?.status) { c.status.remove(); c.status = null; } }
 
-// ---------- lock while a document is indexed ----------
-function applyLock() {
-  const on = !!S.indexing;
-  $('app').classList.toggle('locked', on);
-  for (const id of ['input', 'btn-attach', 'btn-slash', 'model-btn']) $(id).disabled = on;
-  $('lock-banner').hidden = !on;
-  if (on) {
-    const { filename, done, total } = S.indexing;
-    $('lock-text').textContent = t('indexingLock', { name: filename, done, total: total || '…' });
-    $('lock-fill').style.width = total ? `${Math.round((done / total) * 100)}%` : '4%';
-    closeMenu();
-  } else $('input').focus();
-  updateSendEnabled();
-}
-
 // ---------- sending ----------
 function updateSendEnabled() {
   const btn = $('send');
-  if (S.indexing) { btn.disabled = true; btn.classList.remove('stop'); btn.textContent = '↑'; return; }
   if (S.busy) { btn.disabled = false; btn.classList.add('stop'); btn.textContent = '■'; btn.setAttribute('aria-label', t('stop')); return; }
   btn.classList.remove('stop'); btn.textContent = '↑'; btn.setAttribute('aria-label', t('send'));
   btn.disabled = !(S.model && currentModel()?.supported && $('input').value.trim());
@@ -247,16 +234,25 @@ async function startRun() {
   scrollToBottom(true); S.stickBottom = true;
   const history = S.messages.slice(0, -1).map(apiMsg);
   try { await call('send_message', { model: S.model, messages: history, chatId: S.chatId, think: thinkOn() }); }
-  catch (e) { finishRun(); setMeta(reply, e.message === 'busy' ? t('busy') : e.message === 'indexing' ? t('indexingBlocked') : `${t('error')}: ${e.message}`, 'err'); }
+  catch (e) { finishRun(); setMeta(reply, e.message === 'busy' ? t('busy') : `${t('error')}: ${e.message}`, 'err'); }
 }
 
 async function sendDraft(raw) {
   if (S.busy || !raw.trim()) return;
-  if (S.indexing) { toast(t('indexingBlocked')); return; }
   const { text, commands } = extractCommands(raw);
   if (!text) { toast(t('writeAfterCommand')); return; }
   const user = { role: 'user', content: text.trim() };
   if (commands.length) user.commands = commands;
+  const docs = getPending();
+  if (docs.length) {
+    user.context = docs;
+    // does the document (read whole) fit in the context window together with the conversation and a reply?
+    try {
+      const r = await call('estimate_context', { model: S.model, messages: [...S.messages.map(apiMsg), apiMsg(user)], chatId: S.chatId, think: thinkOn() });
+      if (r.docTokens > r.docLimit) { toast(t('docTooBig', { used: r.docTokens.toLocaleString(), max: r.docLimit.toLocaleString() })); return; }
+    } catch { /* the server checks again when it runs */ }
+    takePending();
+  }
   const reply = { role: 'assistant', content: '' };
   S.messages.push(user, reply);
   buildMessageNode(user); buildMessageNode(reply); updateWelcome();
@@ -306,16 +302,6 @@ async function persist() {
     await refreshChatList();
   } catch (e) { toast(`${t('error')}: ${e.message}`); }
 }
-/** Make sure the conversation exists as a file (documents attach to a saved chat). */
-async function ensureChat() {
-  if (S.chatId) return S.chatId;
-  const msgs = S.messages.filter((m) => m.role === 'user' || m.content || m.thinking).map(plain);
-  const name = S.chatName ?? t('newChat');
-  const r = await call('save_chat', { id: null, name, model: S.model, messages: msgs });
-  S.chatId = r.id; S.chatName = msgs.some((m) => m.role === 'user') ? S.chatName : null;
-  setActive(r.id); await refreshChatList();
-  return S.chatId;
-}
 function whenIdle() { return S.busy ? new Promise((r) => S.idleWaiters.push(r)) : Promise.resolve(); }
 async function stopAndWait() { if (S.busy) { call('stop_generation').catch(() => {}); await whenIdle(); } }
 
@@ -332,8 +318,8 @@ async function openChat(id) {
   if (data.model && S.models.some((m) => m.filename === data.model && m.supported)) { S.model = data.model; renderModelPicker(); }
   S.messages = data.messages;
   for (const m of S.messages) buildMessageNode(m);
-  for (const m of S.messages) if (m.role === 'assistant') { addActions(m, { last: m === S.messages.at(-1), truncated: false }); renderSources(m.node, m.sources); }
-  updateWelcome(); setActive(S.chatId); refreshChips(); updateMeter(); scrollToBottom(true); S.stickBottom = true;
+  for (const m of S.messages) if (m.role === 'assistant') { addActions(m, { last: m === S.messages.at(-1), truncated: false }); }
+  updateWelcome(); setActive(S.chatId); clearPending(); updateMeter(); scrollToBottom(true); S.stickBottom = true;
   document.addEventListener('keydown', (e) => {
     if ($('settings').open) return;
     if (e.key === 'Escape' && S.busy && $('cmd-menu').hidden) { call('stop_generation').catch(() => {}); }
@@ -351,12 +337,9 @@ function ours(d) {
   return d.runId === S.runId;
 }
 const events = {
-  docprogress(d) { onDocProgress(d); },
-  docindex(d) {
-    onDocIndex(d);
-    if (d.state === 'running') S.indexing = { filename: d.filename ?? '', done: d.done ?? 0, total: d.total ?? 0 };
-    else { if (d.state === 'error') toast(`${t('indexingError')}: ${d.message}`); S.indexing = null; refreshChips(); }
-    applyLock();
+  preload(d) {
+    if (d.state === 'loading') $('status').textContent = t('loadingModel');
+    else if (!S.busy) $('status').textContent = '';
   },
   download(d) { if (onDownloadEvent(d)) refreshState().catch(() => {}); },
   phase(d) {
@@ -388,9 +371,6 @@ const events = {
     else if (d.stopped) setMeta(msg, t('stopped'), 'warn');
     else if (truncated && thinkState === 'open') setMeta(msg, t('thinkCut'), 'warn');
     else if (truncated) setMeta(msg, t('cut'), 'warn');
-    msg.sources = d.sources?.length ? d.sources : undefined; if (!msg.sources) delete msg.sources;
-    { const u = S.messages[S.messages.indexOf(msg) - 1]; if (u?.role === 'user' && Array.isArray(d.context)) u.context = d.context; } // stored with the question so the prompt stays the same next turn
-    renderSources(msg.node, msg.sources);
     if (d.compressed) setMeta(msg, t('compressedNote'));
     if (d.trimmed) setMeta(msg, t('trimmed'), 'warn');
     if (d.contextMax) setMeter(Math.min(d.contextMax, d.contextUsed + (d.generated ?? 0)), d.contextMax);
@@ -447,7 +427,7 @@ function renderStarters() {
 
 async function newChat() {
   await stopAndWait();
-  S.chatId = null; S.chatName = null; resetView(); setActive(null); refreshChips();
+  S.chatId = null; S.chatName = null; resetView(); setActive(null); clearPending();
   setMeter(0, S.settings?.contextWindow ?? 0); $('input').value = ''; autoGrow(); updateSendEnabled(); $('input').focus();
 }
 
@@ -467,23 +447,23 @@ async function init() {
   window.__lang = initial.language;
   await loadStrings(initial.language);
   window.__copyLabel = t('copy');
-  initSettings({ refreshState, refreshCommands: loadCommands, getChatId: () => S.chatId, getModel: () => S.model, refreshDocs: refreshChips, applyLanguage: async (lang) => { await call('set_language', { lang }); await loadStrings(lang); refreshChatList(); window.__copyLabel = t('copy'); renderStarters(); renderModelPicker(); setMeter(0, S.settings?.contextWindow ?? 0); } });
+  initSettings({ refreshState, refreshCommands: loadCommands, applyLanguage: async (lang) => { await call('set_language', { lang }); await loadStrings(lang); refreshChatList(); window.__copyLabel = t('copy'); renderStarters(); renderModelPicker(); setMeter(0, S.settings?.contextWindow ?? 0); } });
   initChatList({ open: openChat, deleted: (id) => { if (id === S.chatId) newChat(); }, renamed: (id, name) => { if (id === S.chatId) S.chatName = name; } });
-  initDocuments({ getChatId: () => S.chatId, ensureChat, toast, isLocked: () => !!S.indexing, onChange: () => updateMeter() });
+  initDocuments({ toast, onChange: () => updateMeter() });
   wireUi(); renderStarters(); refreshChatList(); loadCommands();
   initCommandMenu({ inputEl: $('input'), menuEl: $('cmd-menu'), afterInsert: () => { autoGrow(); updateSendEnabled(); updateMeter(); } });
   $('btn-slash').addEventListener('click', () => { loadCommands().then(() => { if (!openAll()) toast(t('noCommands')); }); $('input').focus(); });
-  S.models = initial.models; S.settings = initial.settings; S.indexing = initial.indexing;
+  S.models = initial.models; S.settings = initial.settings;
   S.model = initial.models.find((m) => m.filename === initial.lastModel && m.supported)?.filename ?? initial.models.find((m) => m.supported && m.active)?.filename ?? null;
   renderModelPicker(); setMeter(0, initial.settings.contextWindow);
   listen(events, { onConnection: (ok) => { if (!ok) $('status').textContent = t('openFromShortcut'); else if (!S.busy) $('status').textContent = ''; } });
-  applyLock();
+  updateSendEnabled();
 }
 
 window.__zc = { S, buildMessageNode, paintMessage, finalizeThinking }; // handles for the browser smoke test
 window.addEventListener('unhandledrejection', (e) => {
   const m = String(e.reason?.message ?? '');
-  if (m === 'indexing') { toast(t('indexingBlocked')); e.preventDefault(); } else if (m === 'busy') { toast(t('busy')); e.preventDefault(); }
+  if (m === 'busy') { toast(t('busy')); e.preventDefault(); }
 });
 
 init().catch((e) => { document.body.textContent = `${e.message}`; });

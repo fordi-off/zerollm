@@ -43,27 +43,12 @@ Run `npm run app -- --data <folder containing models/>` (or `node app/main.js`).
 - [ ] Choose a "Modell for oppsummering" in Settings and confirm app.log says `summarizing with <that file>`; with too little free RAM it should fall back to the chat model (log line) instead of failing.
 - [ ] Editing an early message in a summarized chat does not use the stale summary.
 
-## A6 - documents
-- [ ] Attach a Norwegian .txt/.md (paperclip or drag it onto the window): a chip appears; click the name to switch it off/on, the x removes it.
-- [ ] Ask something that is in the document: the answer uses it and "Kilder · n utdrag" shows the excerpts. Ask something that is NOT in it: the model should say so.
-- [ ] **Note the wait** for the first token with 4 excerpts on the 8B model (the context meter shows the prompt size); try 2 excerpts in Innstillinger > Dokumenter. A follow-up question in the same chat should be quicker because the history is cached.
-- [ ] A big file (1-2 MB) indexes within a second or two and the app stays responsive.
-- [ ] Settings > Dokumenter: library lists the file; "Vis tekst" shows it; "Lag sammendrag" produces a summary (note how long it takes with and without a small second model); delete removes it from every chat.
-- [ ] Skibeti37's `documents/*.json` copied into this data folder show up and answer questions.
-
 ## A7 - polish
 - [ ] Starting `node app/main.js` from a different working directory still finds `models/` (data folder = the zerollm folder).
 - [ ] The Windows shortcut from docs/APP-GUIDE.md starts the app without a console window problem (a console window stays open while it runs - that is expected) and opens the window.
 - [ ] Settings > Diagnose: report is complete; "Kopier rapport" puts it on the clipboard.
 - [ ] Esc stops a reply; Alt+N / Alt+B work; `/` outside the text box jumps to it.
 - [ ] Tab through the page: every control reachable, focus ring visible; dark mode readable.
-
-## Search model (embeddings) - do this one first
-- [ ] Download `nomic-embed-text` from Settings > Models > Download models (or put `nomic-embed-text-v1.5.Q4_K_M.gguf` in `models/`).
-- [ ] **Ground truth:** `node bin/zerollm.js embed models/nomic-embed-text-v1.5.Q4_K_M.gguf --compare documents/<a document Skibeti37 made>.json --n 5` - every similarity should be about 0.99 or higher (it prints one line with accents stripped and one with accents kept; tell me both). Lower values mean a mistake in my encoder.
-- [ ] `node bin/zerollm.js embed models/nomic-embed-text-v1.5.Q4_K_M.gguf "Hva er en kommune?" "Kommunen har ansvar for skoler" "Pizza med ost"` - the first two should be clearly more similar than either is to the third.
-- [ ] `node tools/embed-bench.mjs models/nomic-embed-text-v1.5.Q4_K_M.gguf` - note chunks/second.
-- [ ] Add a document in the app: Settings > Dokumenter shows "Lager søkeindeks… n/m" then "søkeindeks m/m"; a question phrased with different words than the text still finds the right passage.
 
 ## Thinking mode (Qwen3 only)
 - [ ] Select a Qwen3 model: a "Tenk først" pill appears under the message box; with a Llama/NB model it is hidden.
@@ -72,3 +57,14 @@ Run `npm run app -- --data <folder containing models/>` (or `node app/main.js`).
 - [ ] Ask a follow-up question: it must start quickly (previous reasoning is not re-read).
 - [ ] `node tools/think-eval.mjs models/<qwen3 file>.gguf --only 3,4` (then without --only): send me the printed table and `think-eval-results.json`.
 - [ ] Non-thinking Qwen3 chats: second and later answers should start faster than before (earlier replies are no longer re-read).
+
+## Attached files (replaces the old document library and search)
+- [ ] Paperclip (or drag a .txt/.md into the window): a chip with the file name appears above the message box.
+- [ ] Ask a question about it: the answer comes from the text; the file name stays as a chip on your message. Note how long the FIRST answer takes (the whole text is read once).
+- [ ] A second question in the same chat starts quickly: the document is already in the model's memory.
+- [ ] A document that is too long for the context window is refused with a message that says how many tokens it has and the limit; a shorter excerpt works. Raising the context window (Ytelse) raises the limit.
+- [ ] Reload the page and reopen the chat: the file chip is still on the message and follow-up questions still know the document.
+
+## Load the last model at start-up (Ytelse, on by default)
+- [ ] Start the app, wait ~30 s ("Laster modellen…" shows at the top), then send a message: it must not show "Laster modellen…" again and the first word should come after only a few seconds.
+- [ ] Turn the option off in Ytelse, restart: nothing is loaded until you send a message.

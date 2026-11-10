@@ -5,7 +5,6 @@ import path from 'node:path';
 import http from 'node:http';
 import { createRequire } from 'node:module';
 import { makeTinyModel } from '../tools/make-tiny-gguf.js';
-import { makeTinyEmbedModel } from '../tools/make-tiny-embed-gguf.js';
 import { startTestApp } from '../test/app/helpers.js';
 
 const require = createRequire(import.meta.url);
@@ -104,27 +103,25 @@ try {
   await page.waitForSelector('.skill-box:has-text("/test")');
   await page.screenshot({ path: path.join(out, 'flow-5-skills.png') });
   await page.keyboard.press('Escape');
-  // documents: attach a text file, chip, question -> sources under the reply, library tab
+  // attach a text file: chip in the composer, whole text goes with the message, chip stays on the message, survives reload; too big -> refused
   await page.click('#btn-new');
-  await page.setInputFiles('#file-input', { name: 'kommune.txt', mimeType: 'text/plain', buffer: Buffer.from('Kommunen har ansvar for skoler og barnehager. '.repeat(40)) });
+  await page.setInputFiles('#file-input', { name: 'kommune.txt', mimeType: 'text/plain', buffer: Buffer.from('Kommunen har ansvar for skoler og barnehager. '.repeat(12)) }); // (the tiny test model counts one token per byte)
   await page.waitForSelector('.doc-chip');
-  check((await page.locator('.doc-chip .nm').textContent()) === 'kommune.txt', 'document chip shown');
+  check((await page.locator('.doc-chip .nm').textContent()).startsWith('kommune.txt'), 'attached file shows as a chip');
   const before2 = await page.locator('.msg.assistant .meta').count();
   await page.fill('#input', 'Hvem har ansvar for barnehager?'); await page.press('#input', 'Enter');
   await page.waitForFunction((k) => document.querySelectorAll('.msg.assistant .meta').length > k, before2, { timeout: 30000 });
-  await page.waitForSelector('.doc-sources summary');
-  await page.click('.doc-sources summary');
-  await page.screenshot({ path: path.join(out, 'flow-6-sources.png') });
-  check((await page.locator('.doc-source b').first().textContent()) === 'kommune.txt', 'source names the document');
-  await page.click('.doc-chip .nm'); await page.waitForSelector('.doc-chip.off', { timeout: 3000 }).catch(() => errors.push('CHECK FAILED: chip toggles off'));
-  await page.click('#btn-settings'); await page.click('.tabs [data-tab="documents"]');
-  await page.waitForSelector('#tab-documents .model-row');
-  await page.screenshot({ path: path.join(out, 'flow-7-doclib.png') });
-  await page.keyboard.press('Escape');
-  // reload: the chat keeps its document and the sources
+  check(await page.locator('.doc-chip').count() === 0, 'composer chip is cleared after sending');
+  check((await page.locator('.msg.user .file-chip').first().textContent()).includes('kommune.txt'), 'the file stays visible on the message');
+  await page.screenshot({ path: path.join(out, 'flow-6-attached.png') });
+  await page.setInputFiles('#file-input', { name: 'stor.txt', mimeType: 'text/plain', buffer: Buffer.from('ord og mer ord. '.repeat(6000)) });
+  await page.fill('#input', 'Oppsummer'); await page.press('#input', 'Enter');
+  await page.waitForSelector('#toast:not([hidden])', { timeout: 15000 });
+  check((await page.textContent('#toast')).includes('for stort'), 'a document that does not fit the context window is refused before sending');
+  await page.click('.doc-chip .x');
   await page.reload(); await page.waitForSelector('.chat-row');
   await page.locator('.chat-row .chat-item', { hasText: 'Hvem har ansvar' }).click();
-  await page.waitForSelector('.doc-chip'); await page.waitForSelector('.doc-sources');
+  await page.waitForSelector('.msg.user .file-chip');
   // math rendering (KaTeX) and its safety
   const math = await page.evaluate(async () => {
     const { renderMarkdown } = await import('/js/markdown.js');
@@ -189,22 +186,6 @@ try {
   }
   await dlApp.close(); fileServer.close();
 
-  // ---- indexing lock: adding a document with a search model installed locks chat + model picker until it is indexed
-  const lockApp = await startTestApp({ ctx: 4096, models: [{ name: 'tiny-llama.gguf', arch: 'llama' }, { name: 'tiny-embed.gguf', raw: makeTinyEmbedModel({ quant: 'q8_0' }).buffer }] });
-  {
-    const c3 = await browser.newContext({ viewport: { width: 1200, height: 800 } }); const pg = await c3.newPage();
-    pg.on('pageerror', (e) => errors.push(`lock: ${e.message}`)); pg.on('console', (m) => { if (m.type() === 'error') errors.push(`lock: ${m.text()}`); });
-    await pg.goto(lockApp.app.url); await pg.waitForSelector('#model-name');
-    await pg.setInputFiles('#file-input', { name: 'stor.txt', mimeType: 'text/plain', buffer: Buffer.from('hello world og kommune barnehage skole. '.repeat(3000)) });
-    await pg.waitForSelector('#lock-banner:not([hidden])', { timeout: 10000 }).catch(() => errors.push('CHECK FAILED: lock banner did not appear'));
-    check(await pg.locator('#input').isDisabled(), 'composer is disabled while indexing');
-    check(await pg.locator('#model-btn').isDisabled(), 'model picker is disabled while indexing');
-    await pg.screenshot({ path: path.join(out, 'lock-1-indexing.png') });
-    await pg.waitForSelector('#lock-banner', { state: 'hidden', timeout: 60000 }).catch(() => errors.push('CHECK FAILED: lock never released'));
-    check(!(await pg.locator('#input').isDisabled()), 'composer usable again after indexing');
-    await c3.close();
-  }
-  await lockApp.close();
 } finally { await browser.close(); await t.close(); }
 console.log(errors.length ? `console errors:\n${errors.join('\n')}` : 'no console errors');
 console.log(`screenshots in ${out}`);

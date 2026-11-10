@@ -5,14 +5,14 @@ import { makeTinyModel } from '../../tools/make-tiny-gguf.js';
 import { startApp } from '../../app/main.js';
 
 /** Start the app in a temp data folder with one synthetic model; returns helpers for calling the API and reading events. */
-export async function startTestApp({ models = [{ name: 'tiny-llama.gguf', arch: 'llama' }], port = 0, ctx = 512, dir: existingDir = null, catalog, retryDelayMs = 20 } = {}) {
+export async function startTestApp({ models = [{ name: 'tiny-llama.gguf', arch: 'llama' }], port = 0, ctx = 512, dir: existingDir = null, catalog, retryDelayMs = 20, preload = false } = {}) {
   const dir = existingDir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'zerochat-test-'));
   fs.mkdirSync(path.join(dir, 'models'), { recursive: true });
   if (!existingDir) for (const m of models) {
     if (m.raw) fs.writeFileSync(path.join(dir, 'models', m.name), m.raw);
     else fs.writeFileSync(path.join(dir, 'models', m.name), makeTinyModel({ arch: m.arch ?? 'llama', quant: 'q8_0', seed: 4, ctx }).buffer);
   }
-  const app = await startApp({ dataDir: dir, port, quiet: true, catalog, retryDelayMs });
+  const app = await startApp({ dataDir: dir, port, quiet: true, catalog, retryDelayMs, preload });
   const base = `http://127.0.0.1:${app.port}`;
   const call = async (name, params = {}, { token = app.token, headers = {} } = {}) => {
     const res = await fetch(`${base}/api/${name}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': token, ...headers }, body: JSON.stringify(params) });
