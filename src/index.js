@@ -30,7 +30,7 @@ export { SUPPORTED_ARCHS, SUPPORTED_TENSOR_TYPES };
 /**
  * @typedef {Object} DraftOptions
  * @property {string} path        draft model file (same family / tokenizer as the target, e.g. Qwen3-0.6B for Qwen3-8B)
- * @property {number} [k]         tokens drafted per verification pass (default 4; at most the target's maxBatch - 1)
+ * @property {number} [k]         tokens drafted per verification pass (default 3; at most the target's maxBatch - 1)
  * @property {number} [threads]   draft worker threads (default min(target threads, 4); draft and target never run at the same time)
  * @property {number} [ctx]       draft context (default: the target's)
  * @property {'f32'|'f16'} [kv]   draft KV precision (default: the target's)
@@ -220,7 +220,7 @@ export class Engine extends PromptTools {
    * identical to plain decoding; sampled output has exactly the target's distribution. Calling it again replaces the draft
    * (or changes k). While attached, the draft engine must not be used for anything else.
    * @param {Engine} draftEngine
-   * @param {{k?: number, own?: boolean}} [o]  k: tokens drafted per pass (default 4, at most maxBatch - 1 of this model);
+   * @param {{k?: number, own?: boolean}} [o]  k: tokens drafted per pass (default 3, at most maxBatch - 1 of this model);
    *   own: close the draft engine together with this one (loadModel's `draft` option does this)
    * @throws {UnsupportedModelError} when the vocabularies differ
    */

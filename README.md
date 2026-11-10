@@ -45,11 +45,14 @@ node bin/zerollm.js tokenize models/x.gguf "some text"  # token ids + pieces
 node bin/zerollm.js run models/x.gguf -p "Why is the sky blue?" --n 200
 node bin/zerollm.js chat models/x.gguf --system "Be brief."
 node bin/zerollm.js bench models/x.gguf --kernels js,wasm --threads 1,2,4,6,8,12   # prefill/decode tok/s
+node bin/zerollm.js run models/Qwen3-8B-Q4_K_M.gguf --draft models/Qwen3-0.6B-Q8_0.gguf -p "Why is the sky blue?"   # speculative decoding
 node bin/zerollm.js embed models/nomic-embed-text-v1.5.Q4_K_M.gguf --selftest      # embedding model sanity check
-npm test                                                # node --test (about 230 tests, no models needed)
+npm test                                                # node --test (about 275 tests, no models needed)
 ```
 
 `run` / `chat` options: `--n`, `--ctx 2048`, `--threads N` (default: logical processors / 2), `--kernels auto|wasm|js` (`--threads 1 --kernels js` = the plain single-thread reference path), `--temp 0.7` (0 = greedy), `--top-k 40`, `--top-p 0.9`, `--min-p`, `--repeat-penalty`, `--seed`, `--stop "str"`, `--batch 16` (prompt tokens per pass), `--kv f32|f16` (KV cache precision: f16 halves its memory), `--no-cache` / `--cache-dir DIR` (system-prompt KV cache, on by default for system prompts >= 32 tokens), `--think|--no-think` (Qwen3; default off), `--show-prompt`, `--raw` (no chat template), `--template qwen|llama3|raw`. Ctrl+C stops a reply cleanly. `chat` commands: `/reset`, `/system <text>`, `/think`, `/nothink`, `/exit`.
+
+**Speculative decoding** (`run`, `chat`, `bench`): `--draft <draft.gguf>` loads a small model of the same family (same tokenizer / vocabulary, e.g. Qwen3-0.6B for Qwen3-4B/8B, Llama 3.2 1B for Llama 3.1 8B; checked at start-up, a mismatch is an error). The draft proposes `--draft-k N` tokens (default 3) and the big model checks them all in one batched pass, which reads the weights once instead of N times; accepted tokens are kept, the first wrong one is corrected. `--draft-threads N` sets the draft's worker threads (default: min(`--threads`, 4); the two models never run at the same time). At `--temp 0` the text is identical to decoding without a draft; with sampling the output has exactly the same distribution (standard speculative sampling), only the random stream differs. The draft's memory counts in the RAM warning. `run`/`chat` print the acceptance rate and tokens per step; `bench --draft draft.gguf --draft-k 1,2,3` prints plain vs speculative tok/s side by side (add `--prompt-file text.txt` and a long `--n`: the built-in prompt is not representative), and `node tools/specbench.mjs target.gguf draft.gguf --chat` does paired, interleaved rounds with medians. **Whether it is faster depends on the machine and the pair of models: it has not been measured on the target laptop yet** (procedure in `docs/BENCHMARKS.md`). Library: `loadModel(path, { draft: { path, k, threads } })` or `engine.useDraft(draftEngine, { k })`; `engine.generate` then uses it and `stats.speculative` reports acceptance, draft/verify time and effective tok/s.
 
 ### As a library
 
@@ -71,7 +74,7 @@ Laptop speed varies about +-15% from run to run; more models, the spin experimen
 
 ## Tools (`tools/`)
 
-`make-tiny-gguf.js` / `make-tiny-embed-gguf.js` (synthetic models so tests need no downloads), `kbench.mjs` and `abbench.mjs` (kernel and A/B benchmarks), `embed-bench.mjs`, `think-eval.mjs` (do Qwen3's plain and thinking modes get a set of maths questions right? run on a real model), `ollama-reference.mjs`, and `ui-smoke.mjs` (drives the app in headless Chromium and writes screenshots; needs Playwright installed globally, it is not a dependency of the project).
+`make-tiny-gguf.js` / `make-tiny-embed-gguf.js` (synthetic models so tests need no downloads), `kbench.mjs` and `abbench.mjs` (kernel and A/B benchmarks), `specbench.mjs` (speculative decoding: plain vs draft model, paired rounds), `embed-bench.mjs`, `think-eval.mjs` (do Qwen3's plain and thinking modes get a set of maths questions right? run on a real model), `ollama-reference.mjs`, and `ui-smoke.mjs` (drives the app in headless Chromium and writes screenshots; needs Playwright installed globally, it is not a dependency of the project).
 
 ## Docs
 

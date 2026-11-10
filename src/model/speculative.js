@@ -242,8 +242,8 @@ export async function* generateSpeculative(target, draft, promptIds, opts = {}) 
 /** Draft threads when the caller does not say: the draft is small and runs alternately with the target, so a few threads are enough (untuned guess). */
 export function defaultDraftThreads(targetThreads) { return Math.max(1, Math.min(targetThreads, 4)); }
 
-/** Default number of drafted tokens per verification pass. */
-export const DEFAULT_DRAFT_K = 4;
+/** Default number of drafted tokens per verification pass: k + 1 = 4 tokens fill exactly one tile of the batched kernels (a 5th token needs a second pass over the weights tile, measured ~1.5x dearer on the dev VM), and on the target laptop a verified extra token costs far less than a decode step. See docs/DECISIONS.md. */
+export const DEFAULT_DRAFT_K = 3;
 
 /**
  * Fingerprint of a model's vocabulary: size, and a hash of every token string and token type in id order. Two models can

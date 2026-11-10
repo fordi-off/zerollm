@@ -19,7 +19,8 @@ export const TINY_MERGES = [
 /**
  * @param {{arch?: string, quant?: 'f32'|'q8_0'|'q4_0'|'q5_0'|'q4_k'|'q5_k'|'q6_k'|'q4_k_m', seed?: number, tied?: boolean, nEmbd?: number, nLayer?: number,
  *          nHead?: number, nHeadKv?: number, headDim?: number, nFF?: number, ctx?: number, alignment?: number, ropeFreqs?: boolean, padVocabTo?: number, outFile?: string,
- *          std?: number, embdStd?: number, perturb?: number, perturbSeed?: number}} [o]  perturb: add gaussian noise of this relative size (x std) to every float weight
+ *          std?: number, embdStd?: number, perturb?: number, perturbSeed?: number, fadeAfter?: number, fade?: number}} [o]  fadeAfter/fade: multiply the output projections of layers >= fadeAfter by `fade` (they
+ *          only nudge the residual stream), so a model with `nLayer: fadeAfter` and the same seed is a cheaper draft that mostly agrees with this one.  perturb: add gaussian noise of this relative size (x std) to every float weight
  *          (separate random stream `perturbSeed`; the model keeps its shape): a related-but-different model, e.g. a draft with partial acceptance.  std: stddev of the layer weights (default 0.05; larger = more context-dependent, peakier logits),
  *          embdStd: stddev of token_embd / output (default 0.05). Two models with the same arch share the vocabulary whatever their size/seed.
  * @returns {{ buffer: Buffer, tokens: string[], cfg: object }}
@@ -76,6 +77,8 @@ export function makeTinyModel(o = {}) {
     const f = new Float32Array(n);
     for (let i = 0; i < n; i++) f[i] = gaussian(rand) * std;
     if (o.perturb) for (let i = 0; i < n; i++) f[i] += gaussian(prand) * std * o.perturb;
+    const fadeLayer = /^blk\.(\d+)\.(attn_output|ffn_down)\.weight$/.exec(name);
+    if (o.fadeAfter !== undefined && fadeLayer && Number(fadeLayer[1]) >= o.fadeAfter) for (let i = 0; i < n; i++) f[i] *= o.fade ?? 0.1;
     if (quant === 'q8_0' && ne0 % 32 === 0) tensors.push({ name, dims: [ne0, ne1], type: GGML_TYPE.Q8_0, data: quantizeQ8_0(f) });
     else if (quant === 'q4_0' && ne0 % 32 === 0) tensors.push({ name, dims: [ne0, ne1], type: GGML_TYPE.Q4_0, data: quantizeQ4_0(f) });
     else tensors.push({ name, dims: [ne0, ne1], type: GGML_TYPE.F32, data: new Uint8Array(f.buffer) });

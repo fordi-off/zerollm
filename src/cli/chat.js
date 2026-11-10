@@ -1,9 +1,9 @@
 import readline from 'node:readline';
 import { parseArgs, num } from '../util/args.js';
 import { encodeChat } from '../tokenizer/chat-templates.js';
-import { loadEngine, samplerFromFlags, templateOptions, streamReply, formatStats, usePrefixCache, describePrompt, SAMPLER_HELP } from './common.js';
+import { loadEngine, samplerFromFlags, templateOptions, streamReply, formatStats, usePrefixCache, describePrompt, SAMPLER_HELP, DRAFT_HELP, loadedLine } from './common.js';
 
-export const help = `chat <model.gguf> [--system "..."] [--n 512] [--ctx 2048] [--threads N] [--kernels auto|wasm|js] [--kv f32|f16] [--think|--no-think] [--no-cache] [--cache-dir DIR] [--show-prompt] ${SAMPLER_HELP}`;
+export const help = `chat <model.gguf> [--system "..."] [--n 512] [--ctx 2048] [--threads N] [--kernels auto|wasm|js] [--kv f32|f16] [--think|--no-think] [--no-cache] [--cache-dir DIR] [--show-prompt] ${SAMPLER_HELP} ${DRAFT_HELP}`;
 
 const COMMANDS = '/reset  clear conversation   /system <text>  set system prompt (resets)   /think  /nothink  toggle Qwen3 thinking   /exit';
 
@@ -17,7 +17,7 @@ export async function run(argv) {
   /** @type {Array<{role: string, content: string}>} */
   let messages = [];
 
-  process.stderr.write(`[loaded ${eng.cfg.arch} ${eng.cfg.nLayer}L in ${(eng.loadMs / 1000).toFixed(1)}s, ${eng.threads} thread${eng.threads > 1 ? 's' : ''}, ${eng.kernels} kernels, template: ${eng.kind}, ctx ${eng.ctx}]\n`);
+  process.stderr.write(loadedLine(eng));
   if (eng.kind === 'raw') { await eng.close(); throw new Error('chat needs a chat template (this model has none we recognise); use `run --raw` for completion, or pass --template qwen|llama3'); }
   process.stderr.write(`${COMMANDS}\nCtrl+C stops a reply; Ctrl+C at the prompt exits.\n\n`);
 
@@ -38,8 +38,8 @@ export async function run(argv) {
     const input = line.trim();
     if (!input) { prompt(); continue; }
     if (input === '/exit' || input === '/quit') break;
-    if (input === '/reset') { messages = []; eng.model.reset(); process.stdout.write('(conversation cleared)\n'); prompt(); continue; }
-    if (input.startsWith('/system')) { system = input.slice(7).trim() || null; messages = []; eng.model.reset(); process.stdout.write('(system prompt set, conversation cleared)\n'); prompt(); continue; }
+    if (input === '/reset') { messages = []; eng.reset(); process.stdout.write('(conversation cleared)\n'); prompt(); continue; }
+    if (input.startsWith('/system')) { system = input.slice(7).trim() || null; messages = []; eng.reset(); process.stdout.write('(system prompt set, conversation cleared)\n'); prompt(); continue; }
     if (input === '/think' || input === '/nothink') { think = input === '/think'; process.stdout.write(`(thinking ${think ? 'on' : 'off'})\n`); prompt(); continue; }
 
     messages.push({ role: 'user', content: input });

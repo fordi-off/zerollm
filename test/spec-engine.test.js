@@ -279,7 +279,7 @@ test('CLI chat --draft: scripted session with /reset; every reply reports specul
   const r = cli(['chat', t.path, '--n', '8', '--temp', '0', '--threads', '2', '--draft', d.path, '--draft-threads', '1'], 'hi\nagain\n/reset\nonce more\n/exit\n');
   assert.equal(r.status, 0, r.stderr);
   assert.equal((r.stderr.match(/generated 8 tok/g) ?? []).length, 3);
-  assert.equal((r.stderr.match(/speculative k=4/g) ?? []).length, 3);
+  assert.equal((r.stderr.match(/speculative k=3/g) ?? []).length, 3);
 });
 
 test('CLI bench --draft: baseline vs speculative table with acceptance statistics; greedy output identical', () => {
