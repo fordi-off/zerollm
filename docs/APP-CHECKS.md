@@ -68,3 +68,15 @@ Run `npm run app -- --data <folder containing models/>` (or `node app/main.js`).
 ## Load the last model at start-up (Ytelse, on by default)
 - [ ] Start the app, wait ~30 s ("Laster modellen…" shows at the top), then send a message: it must not show "Laster modellen…" again and the first word should come after only a few seconds.
 - [ ] Turn the option off in Ytelse, restart: nothing is loaded until you send a message.
+
+## Automatic chat titles (Ytelse > "Automatiske samtaletitler", on by default)
+Run once with only the chat model installed (the chat model writes the title) and once with a small second model (e.g. Llama 3.2 1B) chosen as "Modell for oppsummering" (or auto-picked); app.log says `titling with <file>` / `title run (chat model): N prompt tokens, M cached, K generated, T ms`.
+- [ ] Norwegian: start a new chat in Norwegian (e.g. "Hva er forskjellen på kommune og fylkeskommune?"). A few seconds after the first reply the sidebar entry changes from the first 45 characters to a short Norwegian title (3-6 words, no quotes, no final punctuation, æøå intact). Write down 5 titles you get and whether they are in the right language and sensible.
+- [ ] English: same with an English question; the title must be English, not Norwegian.
+- [ ] A very short first message ("hei") and a long one with an attached file: the title is still sensible or the name simply stays as it was (never garbage or an error message).
+- [ ] Nothing slows the next reply: send the second message right after the title appears, and once while the title is still being written. In app.log the second reply's `done:` line should show the same `cached` as the first reply plus its own tokens (no full re-read), and the reply should start about as quickly as before. Note the `title run (chat model)` time on the 8B model.
+- [ ] Sending a message while the title is being written starts the reply promptly (the log has `title for <id> aborted`), and the chat is titled after the next save or keeps its first-message name - it must never block, and the answer must be unaffected.
+- [ ] Renaming wins: rename the chat (pencil) before the title shows up, or just after; the name you typed stays, also after the next reply and after a reload. Rename it back to something else later: still yours.
+- [ ] Reload / close and reopen the page right after the first reply: the title is there (written by the server regardless of the page).
+- [ ] Turn "Automatiske samtaletitler" off: new chats keep the first-45-characters name. Turn it on again: the next new chat gets a title. The hint text in Settings explains the trade-off.
+- [ ] Old chats (and chats from Skibeti37) never change name by themselves.

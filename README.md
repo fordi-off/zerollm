@@ -21,6 +21,7 @@ What it does:
 
 - **Chat** with streaming, markdown, code highlighting and math (KaTeX: `\( \)`, `\[ \]`, `$$ $$`, `$ x $`); stop / continue / regenerate / copy, edit-and-resend, a context meter with exact token counts, light and dark theme.
 - **Saved chats** in the same JSON format as Skibeti37 (`chats/`): list by date, rename, delete, restore the model; long chats are summarized automatically when the context window fills up.
+- **Automatic chat titles**: after the first reply a short title in the conversation's language replaces the first-message name in the sidebar, written in the background by a small second model if there is one, otherwise by the chat model without making the next reply slower; a name you type yourself always wins; switchable in Settings.
 - **Models**: model picker, a small download catalog with resumable downloads, per-model settings (display name, f16/f32 KV cache), RAM check before loading, the last used model is loaded in the background at start-up (switchable).
 - **Thinking mode** for Qwen3 models ("Tenk først"): the reasoning streams in a foldable block above the answer and is stored with the chat, but not sent back to the model.
 - **Attached files**: paperclip or drag-and-drop a text file; its whole text goes into the message, and because it then lives in the conversation the model reads it only once. The document has to fit the context window (the app says so before sending).
@@ -46,7 +47,7 @@ node bin/zerollm.js run models/x.gguf -p "Why is the sky blue?" --n 200
 node bin/zerollm.js chat models/x.gguf --system "Be brief."
 node bin/zerollm.js bench models/x.gguf --kernels js,wasm --threads 1,2,4,6,8,12   # prefill/decode tok/s
 node bin/zerollm.js embed models/nomic-embed-text-v1.5.Q4_K_M.gguf --selftest      # embedding model sanity check
-npm test                                                # node --test (about 230 tests, no models needed)
+npm test                                                # node --test (about 250 tests, no models needed)
 ```
 
 `run` / `chat` options: `--n`, `--ctx 2048`, `--threads N` (default: logical processors / 2), `--kernels auto|wasm|js` (`--threads 1 --kernels js` = the plain single-thread reference path), `--temp 0.7` (0 = greedy), `--top-k 40`, `--top-p 0.9`, `--min-p`, `--repeat-penalty`, `--seed`, `--stop "str"`, `--batch 16` (prompt tokens per pass), `--kv f32|f16` (KV cache precision: f16 halves its memory), `--no-cache` / `--cache-dir DIR` (system-prompt KV cache, on by default for system prompts >= 32 tokens), `--think|--no-think` (Qwen3; default off), `--show-prompt`, `--raw` (no chat template), `--template qwen|llama3|raw`. Ctrl+C stops a reply cleanly. `chat` commands: `/reset`, `/system <text>`, `/think`, `/nothink`, `/exit`.
