@@ -132,6 +132,43 @@ export function attnLayerStep(cfg, L, h, K, V, pos, rope, sc, att, out) {
 }
 
 /**
+ * Every tensor the reference model reads, with its GGUF dims ([ne0 = inputs, ne1 = outputs]).
+ * @param {import('./config.js').ModelConfig} cfg @returns {Array<[string, number[]]>}
+ */
+export function expectedTensors(cfg) {
+  const { nEmbd, nFF, nHead, nHeadKv, headDim: hd, vocabSize } = cfg;
+  const out = [['token_embd.weight', [nEmbd, vocabSize]], ['output_norm.weight', [nEmbd]]];
+  if (!cfg.tiedEmbeddings) out.push(['output.weight', [nEmbd, vocabSize]]);
+  for (let l = 0; l < cfg.nLayer; l++) {
+    const p = `blk.${l}.`;
+    out.push([`${p}attn_norm.weight`, [nEmbd]], [`${p}post_attention_norm.weight`, [nEmbd]],
+      [`${p}ffn_gate.weight`, [nEmbd, nFF]], [`${p}ffn_up.weight`, [nEmbd, nFF]], [`${p}ffn_down.weight`, [nFF, nEmbd]]);
+    if (cfg.layerIsRecurrent[l]) {
+      const s = cfg.ssm;
+      out.push([`${p}attn_qkv.weight`, [nEmbd, s.convDim]], [`${p}attn_gate.weight`, [nEmbd, s.innerSize]],
+        [`${p}ssm_alpha.weight`, [nEmbd, s.nVHeads]], [`${p}ssm_beta.weight`, [nEmbd, s.nVHeads]],
+        [`${p}ssm_conv1d.weight`, [s.convKernel, s.convDim]], [`${p}ssm_dt.bias`, [s.nVHeads]], [`${p}ssm_a`, [s.nVHeads]],
+        [`${p}ssm_norm.weight`, [s.headVDim]], [`${p}ssm_out.weight`, [s.innerSize, nEmbd]]);
+    } else {
+      out.push([`${p}attn_q.weight`, [nEmbd, 2 * nHead * hd]], [`${p}attn_k.weight`, [nEmbd, nHeadKv * hd]], [`${p}attn_v.weight`, [nEmbd, nHeadKv * hd]],
+        [`${p}attn_output.weight`, [nHead * hd, nEmbd]], [`${p}attn_q_norm.weight`, [hd]], [`${p}attn_k_norm.weight`, [hd]]);
+    }
+  }
+  return out;
+}
+
+/** Throw ONE error naming every missing tensor / wrong shape (instead of failing on the first lookup half way through loading). */
+function checkTensors(g, cfg) {
+  const problems = [];
+  for (const [name, dims] of expectedTensors(cfg)) {
+    const t = g.tensor(name);
+    if (!t) problems.push(`missing ${name}`);
+    else if (t.dims.length !== dims.length || t.dims.some((d, i) => d !== dims[i])) problems.push(`${name} has dims [${t.dims}], expected [${dims}]`);
+  }
+  if (problems.length) throw new Error(`this ${cfg.arch} file does not match the layout the reference path expects: ${problems.slice(0, 8).join('; ')}${problems.length > 8 ? `; ... (${problems.length} problems)` : ''}`);
+}
+
+/**
  * Qwen3.5 reference model. Same interface as RefModel (forward / prefill / truncate / reset / pos / tokens / ctx).
  *
  * Checkpoint policy (recurrent state cannot be cut back by position):
@@ -154,6 +191,7 @@ export class Qwen35Model {
     const cfg = this.cfg = modelConfig(g);
     if (!cfg.hybrid) throw new Error('Qwen35Model needs a qwen35 model');
     this.ctx = Math.min(opts.ctx ?? 2048, cfg.nCtxTrain);
+    checkTensors(g, cfg);
     const fd = fs.openSync(g.path, 'r');
     try {
       const total = g.tensors.length;

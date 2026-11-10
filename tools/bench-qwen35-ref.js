@@ -12,6 +12,7 @@ import { quantizeQ8_0 } from '../src/compute/quant.js';
 import { Act, matvec } from '../src/compute/ref-kernels.js';
 import { ropeTables } from '../src/compute/ref-kernels.js';
 import { ssmLayerStep, attnLayerStep } from '../src/model/forward-qwen35.js';
+import { deltaRuleHead, gatedRmsNormHead } from '../src/compute/ref-deltanet.js';
 import { mulberry32, gaussian } from '../src/util/rng.js';
 import { parseArgs, num } from '../src/util/args.js';
 
@@ -68,9 +69,11 @@ function time(label, fn, n = reps) {
 
 console.log(`Qwen3.5-4B-shaped random weights, plain-JS reference kernels, 1 thread, node ${process.version}\n`);
 const tSsm = time('recurrent layer: Gated DeltaNet mixer (qkv,z,a,b,conv,delta,out)', () => ssmLayerStep(cfg, rec, h, convState, ssmState, sc, proj));
-const tDelta = time('  of which: delta rule + norm only (32 heads, 128x128)', () => {
-  // the state update alone, to show how little of the layer it is
-  for (let hv = 0; hv < 32; hv++) for (let j = 0; j < 128; j++) { let s = 0; for (let i = 0; i < 128; i++) s += ssmState[hv * 16384 + j * 128 + i] * sc.qkv[i]; sc.core[hv * 128 + j] = s; }
+time('  of which: delta rule + gated norm only (32 heads of 128 x 128)', () => {
+  for (let hv = 0; hv < 32; hv++) {
+    deltaRuleHead(ssmState, hv * 16384, sc.qkv, (hv % 16) * 128, sc.qkv, 2048 + (hv % 16) * 128, sc.qkv, 4096 + hv * 128, sc.core, hv * 128, 128, 128, 0.9, 0.5);
+    gatedRmsNormHead(sc.core, hv * 128, sc.z, hv * 128, rec.ssmNorm, 128, 1e-6);
+  }
 });
 const pos = ctx - 1;
 const tAttn = time(`attention layer: gated GQA mixer at position ${pos}`, () => attnLayerStep(cfg, attn, h, K, V, pos, rope, sc, att, proj));
@@ -86,4 +89,3 @@ console.log('\nESTIMATE for the full 4B model (24 recurrent + 8 attention layers
 console.log(`  output projection (extrapolated x${(248320 / outRows).toFixed(1)}): ${tOutFull.toFixed(0)} ms`);
 console.log(`  decode, context ~${ctx}: ${perTok.toFixed(2)} s/token  =  ${(1 / perTok).toFixed(2)} tok/s   (context ~0: ${(1 / perTokShort).toFixed(2)} tok/s)`);
 console.log(`  prompt reading (no logits): ${perPrefill.toFixed(2)} s/token  =  ${(1 / perPrefill).toFixed(2)} tok/s`);
-void tDelta;

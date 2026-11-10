@@ -230,3 +230,16 @@ File nb-llama-3.1-8b-q4_k_m.gguf (4.58 GB, Q4_K x193 + Q6_K x33, 8.03B parameter
 | 1 | 30 | 10158 |
 | 2 | 59 | 5107 |
 Profile of one worker: 86 % K-quant matmul kernels, 4 % activation quantization, 6 % attention, 3 % other. (Laptop numbers pending: `node tools/embed-bench.mjs`.)
+
+## Qwen3.5-4B reference path (plain JS, 1 thread): ESTIMATE from real-shaped random layers, dev VM 4 vCPU Xeon 2.3 GHz, Node 22
+Not a measurement of the real file (none available in the dev VM): `node tools/bench-qwen35-ref.js` times one layer of each kind with random weights of the real shapes and quantization types (Q4_K/Q5_K/Q6_K/Q8_0 as in the Unsloth Q4_K_M header) and extrapolates (24 recurrent + 8 attention layers, 32 FFNs, the 248320 x 2560 Q6_K output projection from a 24832-row slice x 10).
+| component (per token) | ms (median, run to run spread ~25%) |
+|---|---|
+| Gated DeltaNet mixer (qkv, z, a, b, conv, delta rule, out) | 65-83 |
+| of which delta rule + gated norm, 32 heads of 128 x 128 | ~2 |
+| gated attention mixer, position 0 / 2047 | 43 / 70 |
+| SwiGLU FFN (gate, up, down) | 90 |
+| output projection (full, extrapolated) | 930-1090 |
+| **whole model, decode** | **5.5-7 s = 0.15-0.18 tok/s** |
+| **whole model, prompt reading (no logits)** | **~5 s/token = 0.18-0.2 tok/s** |
+The K-quant reference matvec was rewritten (no allocations in the loops, block sums of the quantized activation computed once): output bit-identical, FFN 146 -> 90 ms, recurrent mixer 111 -> ~70 ms (same VM). Scaling to the laptop is a guess (single-thread speed 1.5-2.5x of this VM). The real numbers go here once `docs/REAL-MODEL-CHECK.md` ("Qwen3.5 reference check") has been run.

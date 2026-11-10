@@ -11,7 +11,7 @@ import { readGGUF } from '../src/gguf/reader.js';
 import { GGML_TYPE } from '../src/gguf/types.js';
 import { modelConfig, estimateRam, kvBytesPerToken, recurrentStateBytes, RECURRENT_CHECKPOINTS } from '../src/model/config.js';
 import { RefModel } from '../src/model/forward.js';
-import { Qwen35Model, RecurrentState } from '../src/model/forward-qwen35.js';
+import { Qwen35Model, RecurrentState, expectedTensors } from '../src/model/forward-qwen35.js';
 import { generate, argmax } from '../src/model/generate.js';
 import { PrefixCache } from '../src/model/prefix-cache.js';
 import { Tokenizer, preTokenize } from '../src/tokenizer/bpe.js';
@@ -55,6 +55,36 @@ test('qwen35 config: hybrid layout, SSM shape, attention gate; kept out of the f
   assert.equal(i.supported, false);
   assert.match(i.reason, /qwen35 currently runs only on the reference path \(use --kernels js --threads 1\)/);
   assert.equal(i.arch, 'qwen35');
+});
+
+test('the tensors the reference path reads are exactly the real Qwen3.5-4B-Q4_K_M file\'s 426 tensors (names and shapes)', () => {
+  const fixture = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'test-fixtures', 'qwen35-4b-tensors.txt');
+  const real = new Map(fs.readFileSync(fixture, 'utf8').split('\n').filter((l) => l && !l.startsWith('#')).map((l) => {
+    const m = /^(\S+) (\S+) \[(.*)\]$/.exec(l);
+    return [m[1], m[3].split(',').map(Number)];
+  }));
+  assert.equal(real.size, 426);
+  // hyperparameters straight from the real file header
+  const cfg = {
+    arch: 'qwen35', nEmbd: 2560, nFF: 9216, nHead: 16, nHeadKv: 4, headDim: 256, vocabSize: 248320, nLayer: 32, tiedEmbeddings: true,
+    layerIsRecurrent: Array.from({ length: 32 }, (_, i) => (i + 1) % 4 !== 0),
+    ssm: { convKernel: 4, headKDim: 128, headVDim: 128, nKHeads: 16, nVHeads: 32, innerSize: 4096, convDim: 8192 },
+  };
+  const mine = new Map(expectedTensors(cfg));
+  assert.deepEqual([...mine.keys()].sort(), [...real.keys()].sort());
+  for (const [name, dims] of mine) assert.deepEqual(real.get(name), dims, name);
+  // and the synthetic generator produces the same set of names for the same layout (up to size)
+  const { g } = tiny({ nLayer: 8, interval: 4 });
+  assert.deepEqual(g.tensors.map((t) => t.name).sort(), [...new Map(expectedTensors(modelConfig(g))).keys()].sort());
+  assert.deepEqual([...g.tensors.map((t) => t.name.replace(/blk\.\d+\./, 'blk.N.'))].filter((v, i, a) => a.indexOf(v) === i).sort(),
+    [...real.keys()].map((k) => k.replace(/blk\.\d+\./, 'blk.N.')).filter((v, i, a) => a.indexOf(v) === i).sort());
+});
+
+test('a qwen35 file with a wrong tensor shape or a missing tensor gives one clear error', () => {
+  const { g } = tiny();
+  const broken = { ...g, tensor: (n) => (n === 'blk.0.ssm_a' ? undefined : n === 'blk.1.attn_k.weight' ? { dims: [64, 99] } : g.tensor(n)), tensors: g.tensors };
+  broken.get = (k, d) => g.get(k, d); broken.requireTensor = (n) => g.requireTensor(n); broken.path = g.path;
+  assert.throws(() => new Qwen35Model(broken, { ctx: 16 }), /missing blk\.0\.ssm_a; blk\.1\.attn_k\.weight has dims \[64,99\], expected \[64,32\]/);
 });
 
 test('qwen35 RAM estimate: KV cache only for attention layers + recurrent state (+ checkpoints)', () => {

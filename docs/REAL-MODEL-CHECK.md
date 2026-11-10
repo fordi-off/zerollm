@@ -159,3 +159,37 @@ A Norwegian fine-tune of Llama 3.1 uses the same architecture and tokenizer as L
 - **Prompts.** Try Norwegian system prompts and questions, e.g. `--system "Du er en hjelpsom assistent som alltid svarer på norsk."` and `-p "Hva er hovedstaden i Norge? Svar med én setning."` (expect "Oslo"); a longer system prompt (>= 32 tokens) is cached on disk after the first run.
 - **Windows console.** Node writes UTF-8 straight to the console window, so æ ø å display correctly when typed or printed interactively. Piping or redirecting in Windows PowerShell 5.1 (`... | Select-String`, `> out.txt`, `"text" | node ...`) re-encodes through the OEM/ASCII code page and can garble them; the engine is not at fault. Use `-p "..."` and the interactive `chat` for tests, or run `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8` and `$OutputEncoding = [System.Text.Encoding]::UTF8` first. PowerShell 7 does not have this problem.
 - **Quality judgement.** The engine only guarantees it computes the model faithfully (up to int8-activation rounding noise); how good the Norwegian is depends on the model and the 4-bit quantization. If a result looks bad, compare with a Q8_0 file of the same model before blaming the engine (`--kv f32`, which is the default, also removes the half-precision cache as a variable).
+
+## Qwen3.5 reference check (Qwen3.5-4B Q4_K_M, reference path only)
+
+Qwen3.5 (`qwen35`: Gated DeltaNet + gated attention hybrid) was implemented from llama.cpp's and Hugging Face's sources and is verified against an independent oracle on synthetic models and against the real file's tensor list, but it has **never run on the real weights**. It runs on the plain-JS reference path only, which is slow (see "expected speed"). Use the Unsloth file `Qwen3.5-4B-Q4_K_M.gguf` (2.5 GB) in `models\`. Needs ~3.1 GB of free RAM plus up to ~0.3 GB for state checkpoints. Close heavy apps first; plug in the charger.
+
+```
+node bin/zerollm.js info models/Qwen3.5-4B-Q4_K_M.gguf
+node bin/zerollm.js tokenize models/Qwen3.5-4B-Q4_K_M.gguf "Hva er hovedstaden i Frankrike? Åse spiser blåbærsyltetøy 2024"
+node bin/zerollm.js run models/Qwen3.5-4B-Q4_K_M.gguf -p "Hva er hovedstaden i Frankrike?" --n 30 --temp 0 --threads 1 --kernels js --show-prompt
+node bin/zerollm.js run models/Qwen3.5-4B-Q4_K_M.gguf -p "What is 2+3? Answer with one word." --n 12 --temp 0 --threads 1 --kernels js
+node bin/zerollm.js run models/Qwen3.5-4B-Q4_K_M.gguf -p "Hva er hovedstaden i Frankrike?" --n 200 --temp 0 --threads 1 --kernels js --think
+node bin/zerollm.js chat models/Qwen3.5-4B-Q4_K_M.gguf --threads 1 --kernels js --n 60 --temp 0
+```
+
+Paste back everything printed (stdout and the `[...]` lines on stderr). The first load reads 2.5 GB (a few seconds to half a minute).
+
+**Expected speed.** An ESTIMATE from timing real-shaped random layers on a 2.3 GHz Xeon VM (`node tools/bench-qwen35-ref.js`, see docs/DECISIONS.md): about 5.5-7 s per token on that VM, i.e. 0.15-0.18 tok/s for both prompt reading and decoding; a laptop core is probably faster (guess: 1.5-2.5x, so 0.25-0.4 tok/s). The ~20-token prompt of the Norwegian question therefore takes about 1 minute, and 30 generated tokens about 1-3 minutes. The first run prints `prefill ... / ...` progress. Start with `--n 12` if you do not want to wait. Please report the `[prompt ..., prefill X tok/s | generated ..., decode Y tok/s]` line: it replaces the estimate.
+
+**What to expect, step by step**
+1. `info`: architecture qwen35, 32 layers = 24 recurrent (Gated DeltaNet) + 8 full attention (3, 7, ..., 31), hidden 2560, 16 heads / 4 KV heads, head dim 256 (!= 160), rotary on 64 of 256 dims, 16 key heads x 128 / 32 value heads x 128, conv kernel 4 over 8192 channels, tied embeddings, vocab 248320, pre-tokenizer qwen35, no BOS, EOS 248046 `<|im_end|>`. RAM: KV cache f32 at ctx 2048 = 128 MB (only the 8 attention layers), recurrent state 50.3 MB, checkpoints up to 302 MB, total about 3.3 GB. "Support: reference path only".
+2. `tokenize`: Norwegian words split at word boundaries (`Hva`, `Ġer`, `Ġhovedstaden`, ...), digits one by one (`2`, `0`, `2`, `4`); letters like å/æ/ø stay inside the word pieces.
+3. `--show-prompt` must print `<|im_start|>user\nHva er hovedstaden i Frankrike?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n` (thinking is OFF by default; the model then answers directly). With `--think` the prompt ends with `<think>\n` and the model writes its reasoning, then `</think>`, then the answer (the opening tag is part of the prompt, not of the reply).
+4. A good run: a short, coherent answer that says Paris (in Norwegian for the Norwegian question), stops by itself at `<|im_end|>` (`stop: stop` in the stats line), and is identical on a second run with `--temp 0`. The `2+3` question should give "5" / "Five". In `--think` mode the reasoning should be coherent too, ending in `</think>` and an answer.
+5. `chat`: ask two related questions ("Hva er hovedstaden i Frankrike?" then "Og hva er hovedstaden i Tyskland?"). The second turn's stats line should show `(N cached)` with N = the whole first turn: the state is reused, nothing is re-read. `/reset` then re-asking turn 1 must reproduce its answer (a cold run).
+
+**How to judge failures** (the first thing to look at is the first 5-10 generated tokens with `--temp 0`)
+- Gibberish from the very first token (random multilingual fragments, `!!!!`, repeated `<unk>`-like pieces): load/layout problem or tokenizer. Check step 2; check that `info` lists exactly 24 + 8 layers; an error starting "this qwen35 file does not match the layout the reference path expects" names the tensor and shapes that differ (the loader checks all 426 tensors before reading any).
+- Starts plausibly (right language, right topic) but turns into fluent nonsense / loops after a few to a few tens of tokens: the recurrent layers. Suspects in order: (a) value-head to key-head mapping (`h % 16` in `ssmLayerStep`, versus `floor(h / 2)` for a file that was not reordered by a recent llama.cpp converter); (b) the conv tap order (`convStep`: tap 3 on the current input; reversed order would damage every recurrent layer); (c) missing/extra q scale `1/sqrt(128)` or the L2 normalisation of q/k; (d) sign/shape of the decay `g` (it must be <= 0, so the state decays) or `beta`.
+- Short questions fine, long answers degrade or the model forgets earlier text: state handling in the recurrent layers (decay), or the attention layers (partial rotary on 64 dims, the output gate `sigmoid`, per-head q/k norms). If only `chat` turn 2 is wrong while the same text as one prompt is fine, the checkpoint/truncate path is at fault (report the `cached` numbers).
+- Wrong language / ignores the question although fluent: the chat template (compare `--show-prompt` with the line in step 3) or the thinking switch.
+- Output correct but much slower than the estimate: report the stats line; the estimate is for the K-quant matvecs only.
+- If you have llama.cpp: `llama-cli -m models/Qwen3.5-4B-Q4_K_M.gguf -p "<|im_start|>user\nHva er hovedstaden i Frankrike?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n" -n 30 --temp 0 -no-cnv` and compare the first ~10 tokens with ours (float summation order may make them diverge later, not at the start).
+
+When this works, phase 2 (worker pool + SIMD kernels for the hybrid layers) is the next step; the reference path stays as its oracle.
