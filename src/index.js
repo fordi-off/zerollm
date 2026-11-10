@@ -6,6 +6,10 @@
 //   for await (const text of engine.generate({ messages, sampling: { temperature: 0.6 }, stop: ['###'], stats })) process.stdout.write(text);
 //   await engine.close();
 //
+// Speculative decoding (a small draft model of the same family proposes tokens, the big model verifies them in one batch):
+//   const engine = await loadModel('models/Qwen3-8B-Q4_K_M.gguf', { threads: 6, draft: { path: 'models/Qwen3-0.6B-Q8_0.gguf', k: 4, threads: 4 } });
+//   // engine.generate(...) now uses it transparently; stats.speculative reports acceptance, draft/verify time, effective tok/s
+//
 // Everything here is plain JS on Node built-ins (worker threads + hand-emitted WebAssembly SIMD kernels).
 import fs from 'node:fs';
 import os from 'node:os';
@@ -17,10 +21,22 @@ import { detectTemplate, encodeChat, stopTokenIds } from './tokenizer/chat-templ
 import { createSampler } from './sampling/sampler.js';
 import { StopFilter } from './sampling/stop.js';
 import { generate as generateTokens, prefillTokens } from './model/generate.js';
+import { generateSpeculative, verifyLimit, vocabMismatch, vocabFingerprint, defaultDraftThreads, DEFAULT_DRAFT_K } from './model/speculative.js';
 import { PoolModel } from './compute/pool.js';
 import { PrefixCache, modelFingerprint } from './model/prefix-cache.js';
 
 export { SUPPORTED_ARCHS, SUPPORTED_TENSOR_TYPES };
+
+/**
+ * @typedef {Object} DraftOptions
+ * @property {string} path        draft model file (same family / tokenizer as the target, e.g. Qwen3-0.6B for Qwen3-8B)
+ * @property {number} [k]         tokens drafted per verification pass (default 4; at most the target's maxBatch - 1)
+ * @property {number} [threads]   draft worker threads (default min(target threads, 4); draft and target never run at the same time)
+ * @property {number} [ctx]       draft context (default: the target's)
+ * @property {'f32'|'f16'} [kv]   draft KV precision (default: the target's)
+ * @property {'auto'|'wasm'|'js'} [kernels]
+ * @property {number} [maxBatch]
+ */
 
 /** Thrown by loadModel when the model would not fit in RAM. `needed` / `free` are in bytes. */
 export class EngineMemoryError extends Error {
@@ -81,7 +97,10 @@ export function estimateModelRam(info, { ctx = 2048, threads = defaultThreads(),
  * Load a model.
  * @param {string} path
  * @param {{ctx?: number, threads?: number, kv?: 'f32'|'f16', kernels?: 'auto'|'wasm'|'js', maxBatch?: number,
- *          template?: 'qwen'|'llama3'|'raw', ramCheck?: boolean, freeBytes?: number, onProgress?: (done: number, total: number) => void}} [opts]
+ *          template?: 'qwen'|'llama3'|'raw', ramCheck?: boolean, freeBytes?: number, onProgress?: (done: number, total: number) => void,
+ *          draft?: DraftOptions}} [opts]
+ *   draft: also load a small draft model of the same family and use it for speculative decoding (see Engine#useDraft). Its
+ *   weights count in the RAM check; UnsupportedModelError is thrown (before anything is loaded) when the vocabularies differ.
  * @returns {Promise<Engine>}
  */
 export async function loadModel(path, opts = {}) {
@@ -94,20 +113,53 @@ export async function loadModel(path, opts = {}) {
   const kv = opts.kv ?? 'f32';
   const ctx = Math.min(opts.ctx ?? 2048, cfg.nCtxTrain);
   const est = estimateRam(g, cfg, { ctx, threads, kvBytes: kv === 'f16' ? 2 : 4 });
+
+  // the draft is validated BEFORE any weights are loaded (cheap, and a wrong model is reported immediately)
+  const dopts = opts.draft ? { ...opts.draft } : null;
+  let dg = null; let dthreads = 0; let dctx = 0; let dkv = kv; let dest = null;
+  if (dopts) {
+    if (typeof dopts.path !== 'string' || !dopts.path) throw new UnsupportedModelError('draft.path is missing');
+    dg = readGGUF(dopts.path);
+    const dcfg = modelConfig(dg);
+    try { assertSupportedTensorTypes(dg); } catch (e) { throw new UnsupportedModelError(`draft model: ${e.message}`); }
+    if (dg.get('tokenizer.ggml.model') !== 'gpt2') throw new UnsupportedModelError(`draft model: unsupported tokenizer "${dg.get('tokenizer.ggml.model')}"`);
+    const bad = vocabMismatch(g, dg);
+    if (bad) throw new UnsupportedModelError(bad);
+    dthreads = dopts.threads ?? defaultDraftThreads(threads);
+    dkv = dopts.kv ?? kv;
+    dctx = Math.min(dopts.ctx ?? ctx, dcfg.nCtxTrain);
+    dest = estimateRam(dg, dcfg, { ctx: dctx, threads: dthreads, kvBytes: dkv === 'f16' ? 2 : 4 });
+  }
+
   if (opts.ramCheck !== false) {
     const free = opts.freeBytes ?? os.freemem();
     if (est.perWorker > 3.8 * 2 ** 30) {
       throw new EngineMemoryError(`the busiest worker would need ${(est.perWorker / 2 ** 30).toFixed(1)} GiB of WebAssembly memory (limit 4 GiB): use more threads, a smaller context or kv=f16`, { needed: est.total, free, reason: 'worker-limit' });
     }
-    if (est.total > free * 0.95) {
-      throw new EngineMemoryError(`needs about ${(est.total / 1e9).toFixed(1)} GB (weights + KV cache + runtime) but only ${(free / 1e9).toFixed(1)} GB is free`, { needed: est.total, free, reason: 'ram' });
+    if (dest && dest.perWorker > 3.8 * 2 ** 30) {
+      throw new EngineMemoryError(`the busiest draft worker would need ${(dest.perWorker / 2 ** 30).toFixed(1)} GiB of WebAssembly memory (limit 4 GiB): use more draft threads`, { needed: est.total + dest.total, free, reason: 'worker-limit' });
+    }
+    const needed = est.total + (dest?.total ?? 0);
+    if (needed > free * 0.95) {
+      throw new EngineMemoryError(dest
+        ? `needs about ${(needed / 1e9).toFixed(1)} GB (target ${(est.total / 1e9).toFixed(1)} GB + draft model ${(dest.total / 1e9).toFixed(1)} GB; weights + KV cache + runtime) but only ${(free / 1e9).toFixed(1)} GB is free`
+        : `needs about ${(est.total / 1e9).toFixed(1)} GB (weights + KV cache + runtime) but only ${(free / 1e9).toFixed(1)} GB is free`, { needed, free, reason: 'ram' });
     }
   }
   const tok = Tokenizer.fromGGUF(g);
   const jinja = g.get('tokenizer.chat_template');
   const kind = opts.template ?? detectTemplate(cfg.arch, jinja, tok);
   const model = await PoolModel.create(g, { ctx, workers: threads, kernels: opts.kernels ?? 'auto', kv, maxBatch: opts.maxBatch, onProgress: opts.onProgress });
-  return new Engine({ path, g, cfg, tok, kind, jinja, model, ctx, threads, kv, estimate: est, loadMs: performance.now() - t0 });
+  const engine = new Engine({ path, g, cfg, tok, kind, jinja, model, ctx, threads, kv, estimate: est, loadMs: performance.now() - t0 });
+  if (dopts) {
+    try {
+      const draftEngine = await loadModel(dopts.path, { ctx: dctx, threads: dthreads, kv: dkv, kernels: dopts.kernels ?? opts.kernels, maxBatch: dopts.maxBatch, template: 'raw', ramCheck: false });
+      engine.useDraft(draftEngine, { k: dopts.k, own: true });
+      engine.draftEstimate = dest;
+    } catch (e) { await engine.close(); throw e; }
+    engine.loadMs = performance.now() - t0;
+  }
+  return engine;
 }
 
 /** Tokenizer + chat template of a model, without its weights: exact prompt token counts for a model that is not loaded. */
@@ -147,6 +199,10 @@ export class Engine extends PromptTools {
     this.model = p.model; this.ctx = p.ctx; this.threads = p.threads; this.kv = p.kv; this.estimate = p.estimate; this.loadMs = p.loadMs;
     this.closed = false;
     this.stopIds = stopTokenIds(p.tok, p.kind);
+    /** @type {{engine: Engine, k: number, own: boolean}|null} the attached draft model (speculative decoding) */
+    this.draft = null;
+    /** RAM estimate of the draft model (set by loadModel when it loaded one) */
+    this.draftEstimate = null;
   }
 
   get info() {
@@ -154,7 +210,42 @@ export class Engine extends PromptTools {
       name: this.g.get('general.name', null), arch: this.cfg.arch, template: this.kind, ctx: this.ctx, threads: this.threads, kv: this.kv,
       kernels: this.model.kernels === 'wasm' ? 'wasm-simd' : 'js', loadMs: this.loadMs, estimate: this.estimate,
       bos: this.tok.bosId, eos: this.tok.eosId, vocab: this.tok.vocabSize, hasChatTemplate: typeof this.jinja === 'string',
+      draft: this.draft ? { name: this.draft.engine.g.get('general.name', null), path: this.draft.engine.path, k: this.draft.k, threads: this.draft.engine.threads, ctx: this.draft.engine.ctx, estimate: this.draftEstimate } : null,
     };
+  }
+
+  /**
+   * Use `draftEngine` (a model of the same family, loaded with loadModel) as the draft model of speculative decoding:
+   * generate() then drafts k tokens with it and verifies them in one batched pass of this model. Greedy output is
+   * identical to plain decoding; sampled output has exactly the target's distribution. Calling it again replaces the draft
+   * (or changes k). While attached, the draft engine must not be used for anything else.
+   * @param {Engine} draftEngine
+   * @param {{k?: number, own?: boolean}} [o]  k: tokens drafted per pass (default 4, at most maxBatch - 1 of this model);
+   *   own: close the draft engine together with this one (loadModel's `draft` option does this)
+   * @throws {UnsupportedModelError} when the vocabularies differ
+   */
+  useDraft(draftEngine, { k = DEFAULT_DRAFT_K, own = false } = {}) {
+    if (this.closed) throw new Error('engine is closed');
+    if (!(draftEngine instanceof Engine)) throw new TypeError('useDraft expects an Engine made by loadModel');
+    if (draftEngine === this) throw new Error('a model cannot draft for itself (load a second, smaller model)');
+    if (draftEngine.closed) throw new Error('the draft engine is closed');
+    const bad = vocabMismatch(this.g, draftEngine.g);
+    if (bad) throw new UnsupportedModelError(bad);
+    if (draftEngine.cfg.vocabSize !== this.cfg.vocabSize) throw new UnsupportedModelError(`the models disagree on the logits vocabulary size (${draftEngine.cfg.vocabSize} vs ${this.cfg.vocabSize})`);
+    if (!Number.isInteger(k) || k < 1) throw new RangeError(`draft k must be a positive integer, got ${k}`);
+    const limit = verifyLimit(this.model);
+    if (limit < 2) throw new UnsupportedModelError('speculative decoding needs a target loaded with maxBatch >= 2');
+    if (this.draft && this.draft.engine !== draftEngine && this.draft.own) this.draft.engine.close();
+    this.draft = { engine: draftEngine, k: Math.min(k, limit - 1), own };
+    return this;
+  }
+
+  /** Stop using the draft model (closes it if this engine owns it). */
+  async clearDraft() {
+    const d = this.draft;
+    this.draft = null;
+    this.draftEstimate = null;
+    if (d?.own) await d.engine.close();
   }
 
   /**
@@ -168,7 +259,10 @@ export class Engine extends PromptTools {
    * @param {string[]} [o.stop]                                      stop strings (not included in the output)
    * @param {{aborted: boolean}|AbortSignal} [o.signal]
    * @param {boolean} [o.penalizePrompt]                             false: repetition penalties ignore prompt tokens (default true)
-   * @param {object} [o.stats]                                       filled with promptTokens, cachedTokens, prefillMs, decodeMs, generated, stopReason
+   * @param {boolean} [o.speculative]                                false: do not use the draft model for this call (default: use it when attached)
+   * @param {object} [o.stats]                                       filled with promptTokens, cachedTokens, prefillMs, decodeMs, generated, stopReason; with a draft
+   *                                                                 model also `speculative`: {k, cycles, drafted, accepted, acceptRate, tokensPerCycle (accepted+1 per
+   *                                                                 verification step), draftMs, verifyMs, otherMs, effectiveTps, acceptedHist, draftPrefillMs}
    * @param {(done: number, total: number) => void} [o.onPrefill]    prompt-reading progress
    * @returns {AsyncGenerator<string>} text chunks
    */
@@ -183,9 +277,13 @@ export class Engine extends PromptTools {
     const sample = createSampler(o.sampling ?? {});
     const filter = new StopFilter(o.stop ?? []);
     const dec = this.tok.streamDecoder();
-    const gen = generateTokens(this.model, ids, {
-      maxTokens: o.maxTokens ?? 512, sample, stopIds: this.stopIds, signal, stats, onPrefillProgress: o.onPrefill, penalizePrompt: o.penalizePrompt,
-    });
+    const gopts = { maxTokens: o.maxTokens ?? 512, sample, stopIds: this.stopIds, signal, stats, onPrefillProgress: o.onPrefill, penalizePrompt: o.penalizePrompt };
+    const d = o.speculative === false ? null : this.draft;
+    if (d?.engine.closed) throw new Error('the draft engine was closed; call clearDraft() or useDraft() again');
+    // a prompt the draft model's context cannot hold is generated without speculation
+    const gen = d && ids.length < d.engine.ctx
+      ? generateSpeculative(this.model, d.engine.model, ids, { ...gopts, k: d.k })
+      : generateTokens(this.model, ids, gopts);
     for await (const id of gen) {
       const text = filter.push(dec.push(id));
       if (filter.stopped) stoppedByString = true;
@@ -215,7 +313,7 @@ export class Engine extends PromptTools {
   }
 
   /** Forget the conversation held in the KV cache (the next prompt is processed from scratch). */
-  reset() { this.model.reset(); }
+  reset() { this.model.reset(); this.draft?.engine.model.reset(); }
 
   /** Number of tokens currently held in the KV cache. */
   get cachedTokens() { return this.model.pos; }
@@ -223,8 +321,10 @@ export class Engine extends PromptTools {
   async close() {
     if (this.closed) return;
     this.closed = true;
-    await this.model.close();
+    const d = this.draft;
+    this.draft = null;
+    try { if (d?.own) await d.engine.close(); } finally { await this.model.close(); }
   }
 }
 
-export { PrefixCache, modelFingerprint };
+export { PrefixCache, modelFingerprint, vocabMismatch, vocabFingerprint, defaultDraftThreads, DEFAULT_DRAFT_K };
