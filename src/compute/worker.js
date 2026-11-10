@@ -10,7 +10,7 @@ import { readTensorBytes } from '../gguf/reader.js';
 import { GGML_TYPE, GGML_TYPE_INFO } from '../gguf/types.js';
 import { f16Table, f32ToF16 } from '../util/f16.js';
 import { Act, matvec, dequantRow, rmsnorm, softmax, silu, ropeTables, applyRope, rowBytes, quantizeAct } from './ref-kernels.js';
-import { instantiateKernels } from './wasm/kernels.js';
+import { instantiateKernels, resolveDotMode, usesInt8Acts } from './wasm/kernels.js';
 import { Barrier } from './barrier.js';
 import { CTRL, CMD_EXIT, CMD_KV_EXPORT, CMD_KV_IMPORT, splitRows, splitRange, alignUp } from './layout.js';
 
@@ -131,13 +131,17 @@ function main() {
   const xqv = new Int8Array(mem.buffer, XQ, maxCols);
   const xdv = new Float32Array(mem.buffer, XD, maxCols / 32);
   const xq16v = new Int16Array(mem.buffer, XQ16, BM * maxCols);
+  // ZEROLLM_DOT=relaxed|relaxed-add: the relaxed-SIMD batched kernels read INT8 activations (token t at byte offset t*dim), which fit in
+  // the same region (it is sized for int16); every other mode keeps the int16-widened layout.
+  const dot = useWasm ? resolveDotMode() : 'extmul';
+  const xqBv = usesInt8Acts(dot) ? new Int8Array(mem.buffer, XQ16, BM * maxCols) : xq16v;
   const xdBv = new Float32Array(mem.buffer, XDB, (BM * maxCols) / 32);
   const xsv = new Float32Array(mem.buffer, XS, maxCols / 32);
   const xsBv = new Float32Array(mem.buffer, XSB, (BM * maxCols) / 32);
   const yv = new Float32Array(mem.buffer, YO, Math.max(maxRows, BM * maxRowsBatch));
   let k = null;
   if (useWasm) {
-    k = instantiateKernels(mem);
+    k = instantiateKernels(mem, { dot });
     for (const w of Object.values(W)) {
       // Q8_0 / Q4_0 kernels take (w, xq, xd, y, rows, nb[, ntok]); Q5_0 and the K-quants additionally take the per-block
       // quant sums (w, xq, xd, xs, y, rows, nb[, ntok]).
@@ -190,7 +194,7 @@ function main() {
       if (B === 1) quantizeAct(src.subarray(0, dim), xqv, xdv, xsv);
       else {
         const nbl = dim / 32;
-        for (let b = 0; b < B; b++) quantizeAct(src.subarray(b * dim, (b + 1) * dim), xq16v.subarray(b * dim, (b + 1) * dim), xdBv.subarray(b * nbl, (b + 1) * nbl), xsBv.subarray(b * nbl, (b + 1) * nbl));
+        for (let b = 0; b < B; b++) quantizeAct(src.subarray(b * dim, (b + 1) * dim), xqBv.subarray(b * dim, (b + 1) * dim), xdBv.subarray(b * nbl, (b + 1) * nbl), xsBv.subarray(b * nbl, (b + 1) * nbl));
       }
     }
     if (prof) PT.quant += performance.now() - t;
@@ -217,7 +221,7 @@ function main() {
     if (prof) PT.kernel += performance.now() - t;
   }
 
-  parentPort.postMessage({ type: 'ready', id, ms: performance.now() - t0, bytes: total, sliceBytes: loaded, kernels: useWasm ? 'wasm-simd' : 'js' });
+  parentPort.postMessage({ type: 'ready', id, ms: performance.now() - t0, bytes: total, sliceBytes: loaded, kernels: useWasm ? 'wasm-simd' : 'js', dot });
 
   // ---------------------------------------------------------------- the SPMD program for B tokens at pos0..pos0+B-1
   function runBatch(B, pos0, wantLogits) {

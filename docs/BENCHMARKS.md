@@ -243,3 +243,59 @@ Not a measurement of the real file (none available in the dev VM): `node tools/b
 | **whole model, decode** | **5.5-7 s = 0.15-0.18 tok/s** |
 | **whole model, prompt reading (no logits)** | **~5 s/token = 0.18-0.2 tok/s** |
 The K-quant reference matvec was rewritten (no allocations in the loops, block sums of the quantized activation computed once): output bit-identical, FFN 146 -> 90 ms, recurrent mixer 111 -> ~70 ms (same VM). Scaling to the laptop is a guess (single-thread speed 1.5-2.5x of this VM). The real numbers go here once `docs/REAL-MODEL-CHECK.md` ("Qwen3.5 reference check") has been run.
+
+
+## Relaxed-SIMD integer dot (`ZEROLLM_DOT=relaxed|relaxed-add`), experiment: dev VM numbers + what to run on the laptop
+
+**All numbers in this section are "dev VM, indicative only"**: Intel Xeon @ 2.3 GHz (Sapphire-Rapids class, AVX-512/VNNI in hardware, but V8 12.4 in Node 22.23 does not use them for wasm SIMD), 4 vCPU, **shared with other jobs while measured** (load average 5-9 on 4 vCPUs, so single-thread kernel numbers move by about +-10% and the 4-thread model numbers by much more). The target (Ryzen 5 7530U, Zen 3, Node 26) was not available. Default behaviour is unchanged: without the environment variable the engine uses exactly the kernels it used before (the default kernel module is byte-identical, checked by hash).
+
+Modes: `extmul` (default) and `wide` (= old `ZEROLLM_KDOT=wide`, still works) are the existing kernels. `relaxed` = new kernels for Q4_0/Q5_0/Q4_K/Q5_K/Q6_K (decode and batched) built from `i16x8.relaxed_dot_i8x16_i7x16_s` + one widening add per 32 weights; `relaxed-add` = the same kernels built from `i32x4.relaxed_dot_i8x16_i7x16_add_s` per 16 weights. Q8_0 has no relaxed kernel (signed int8 weights, not 0..127); its relaxed-mode batched kernel only reads int8 activations. The integer sums are exact and identical to the default kernels; the float results differ only by summation order (about 1e-7 relative).
+
+### Kernel micro-benchmark, 1 thread, cache-resident weights (`node tools/kbench.mjs`, 1024 x 2048, batch 16, 10 interleaved rounds, minimum kept)
+
+Two clean runs (the first of three runs had a neighbour job on the CPU, its decode column is visibly off, and is not used); ranges are the two runs. Decode = G weights/s, batched = G weight-token products/s. The batched extmul and wide kernels are the same code (they only differ in the K-quant decode kernels), so their two columns differ by noise only (that is the noise floor).
+
+| format | decode extmul | decode wide | decode relaxed | decode relaxed-add | batch extmul | batch wide | batch relaxed | batch relaxed-add |
+|---|---|---|---|---|---|---|---|---|
+| Q8_0 | 14.1 | 14.3-14.4 | 14.0-14.3 | 14.0-14.2 | 18.2 | 18.2 | 17.7 (0.97x) | 17.7 (0.97x) |
+| Q4_0 | 12.2-12.4 | 12.0 | **17.2-17.5 (1.4x)** | 12.7 (1.0x) | 17.7-18.1 | 17.7-18.2 | 18.7 (1.05x) | 14.8 (0.83x) |
+| Q5_0 | 8.0-8.3 | 8.2 | **10.7-11.0 (1.3x)** | 8.7-9.2 (1.1x) | 14.6-14.7 | 14.5-14.6 | 16.0 (1.10x) | 13.0 (0.89x) |
+| Q4_K | 6.8 | 4.7-5.2 | 8.1 (1.19x) | **9.1 (1.34x)** | 6.9 | 6.9 | 9.5 (1.38x) | **10.2 (1.48x)** |
+| Q5_K | 4.4-5.0 | 3.4-3.7 | 5.8 (1.2-1.3x) | **5.9-6.5 (1.3x)** | 6.5 | 6.5 | 8.7 (1.35x) | **9.4-9.6 (1.46x)** |
+| Q6_K | 2.8 | 2.5-2.6 | 2.7 (0.97x) | 2.9-3.3 (1.05-1.2x) | 5.4-5.5 | 5.4-5.5 | 5.0 (0.92x) | 5.9 (1.08x) |
+
+Summary of the VM data: the K-quant batched kernels (what prefill uses) are 35-48% faster with relaxed dot on Q4_K/Q5_K, Q6_K gains only ~8% with `relaxed-add` and loses ~8% with `relaxed`; decode gains 20-35% on Q4_K/Q5_K and 0-20% on Q6_K; Q4_0/Q5_0 prefer `relaxed` (decode +30-40%, batched +5-10%) and lose 10-17% batched with `relaxed-add`. Q8_0 is unchanged within noise.
+
+### Model level, synthetic Qwen3-0.6B-shaped Q4_K_M-style file (random raw blocks, 363 MB), batch 16, 64-token prompt (`node tools/dotbench.mjs <model> --threads N --rounds 6 --pause 1 --prompt-tokens 64`, interleaved rounds, medians with min-max)
+
+| threads | mode | prefill tok/s | decode tok/s |
+|---|---|---|---|
+| 1 | extmul (default) | 9.66 (9.13-9.89) | 6.54 (6.04-6.93) |
+| 1 | relaxed | 10.70 (10.23-10.78) = +11% | 7.31 (6.56-7.91) = +12% |
+| 1 | relaxed-add | 11.45 (11.31-11.73) = +19% | 7.05 (6.55-7.81) = +8% |
+| 4 | extmul (default) | 17.59 (13.45-18.80) | 8.21 (7.07-8.71) |
+| 4 | relaxed | 19.88 (16.23-20.72) = +13% | 8.61 (7.59-9.47) = +5% |
+| 4 | relaxed-add | 21.76 (21.47-23.04) = +24% | 9.18 (8.94-9.60) = +12% |
+
+The 4-thread rows ran on a loaded host (the min-max ranges of extmul and relaxed overlap); only the 1-thread rows are reasonably clean, and there decode differences of 8-12% are inside the spread. A Q8_0 file of the same shape (604 MB, 1 thread): prefill 26.4 -> 27.0 (+2%), decode 7.9 -> 8.1 (+3%), i.e. unchanged within noise, as expected. The model-level gain is smaller than the kernel gain because attention, activation quantization and barriers are untouched.
+
+### Why the gain is what it is (V8 12.4 / x64 disassembly via `node --print-wasm-code`, TurboFan)
+
+- `i32x4.relaxed_dot_i8x16_i7x16_add_s` is lowered to `vpcmpeqd; vpsrlw 15` (rebuilds the 16-bit ones constant, at every use), `vpmaddubsw`, `vpmaddwd`, `vpaddd`: six instructions per 16 weights. `i16x8.relaxed_dot_i8x16_i7x16_s` is a single `vpmaddubsw`, `i32x4.extadd_pairwise_i16x8_s` a single `vpmaddwd` with a memory constant; so the `relaxed` mode needs 4 instructions per 32 weights for the dot against 12 for `relaxed-add`. Yet `relaxed-add` is as fast or faster for the K-quants: the dot is not the limit there.
+- `mm_q4_k` machine code (all four tile variants): 9017 instructions / 60 KB (default), 6725 / 44 KB (`relaxed`), 7160 / 45 KB (`relaxed-add`); 27-40% of the instructions are register moves/spills in every variant and 53-60% of all instructions address the stack frame (spilled locals: the tiles keep 8 accumulators, 8 scalar min sums and a dozen pointers live). `mm_q6_k` (relaxed-add) is 10.6 K instructions / 68 KB with 37% moves. The kernels are limited by register pressure and the float scale/accumulate bookkeeping, not by the integer dot alone, which is why relaxed dot gives tens of percent and not 2x.
+- Things that were tried and did NOT help (kept out of the code): applying the Q6_K int8 group scales in the integer domain (one float conversion per 32 weights instead of 16): +4% batched, within noise; replacing V8's i8x16 shifts by i16x8 shifts + explicit masks: no measurable change (TurboFan hoists the rebuilt mask out of the loop).
+
+### Run this on the laptop (PowerShell; Node 26, Ryzen 5 7530U)
+
+```
+node bin/zerollm.js doctor                      # "relaxed-simd" must be true, otherwise the modes fall back to extmul with a warning
+npm test                                        # the relaxed tests are skipped (not failed) if relaxed SIMD is missing
+node tools/kbench.mjs                           # decode + batched Gw/s per format: extmul | wide | relaxed | relaxed-add (run it twice, close other apps)
+node tools/dotbench.mjs models/Qwen3-4B-Q4_K_M.gguf --threads 6 --rounds 5 --pause 15
+node tools/dotbench.mjs models/Qwen3-8B-Q4_K_M.gguf --threads 6 --rounds 5 --pause 15
+# by hand, one mode at a time:
+$env:ZEROLLM_DOT="relaxed"; node bin/zerollm.js bench models/Qwen3-4B-Q4_K_M.gguf --threads 6 --batch 1,16 --prompt-tokens 64 --n 16; Remove-Item Env:ZEROLLM_DOT
+$env:ZEROLLM_DOT="relaxed-add"; $env:ZEROLLM_PROFILE=1; node bin/zerollm.js bench models/Qwen3-4B-Q4_K_M.gguf --threads 6 --batch 16 --prompt-tokens 64 --n 8; Remove-Item Env:ZEROLLM_DOT, Env:ZEROLLM_PROFILE
+```
+
+Reading the result: `dotbench` prints median (min-max) over interleaved rounds; trust differences only when they exceed the spread (the laptop varies +-15% run to run). If `kbench` shows the batched Q4_K/Q6_K columns clearly above `extmul` AND `dotbench` shows prefill above the spread, relaxed is worth making the default for K-quant models (the first mode that wins decides between `relaxed` and `relaxed-add`; `kbench`'s Q4_0/Q5_0 rows say which is better for legacy files). If the relaxed columns are at or below extmul on Zen 3, the finding is that Node 26 on this CPU lowers the relaxed dot no better than widen + `dot_i16x8_s`, and nothing changes. Please paste the `kbench` table, the `dotbench` summary and `node bin/zerollm.js doctor` back.
